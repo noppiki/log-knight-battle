@@ -232,6 +232,24 @@ const TUNE = {
 
   // select-screen
   readyDelay:    0.9,    // s the "READY" stamp shows before the match starts
+
+  // ===== 1P-vs-CPU AI =====
+  // The CPU drives P2 in 1p mode. All knobs are tuned to a FAIR, beatable MEDIUM
+  // difficulty: the player can win but the AI poses a real threat. Larger
+  // reaction/cadence values = SLOWER, easier AI; smaller = faster, harder.
+  aiPickDelayMin: 0.4,    // s before the CPU starts picking on the SELECT screen
+  aiPickDelayMax: 0.8,    // (randomized in [min,max]); then it auto-locks
+  aiReactDelay:   0.18,   // s of reaction lag before the AI commits to an action
+  aiSwingCdMin:   0.36,   // min s between AI tap-swings (cadence; not machine-gun)
+  aiSwingCdMax:   0.58,   // max s between AI tap-swings (randomized each swing)
+  aiConnectRange: 122,    // |dx| at/under which a swing can bite (≈ pan reach + bodies)
+  aiCloseRange:   70,     // |dx| under which the AI stops closing (too close)
+  aiEdgeMargin:   62,     // px from logLeft/logRight where self-preservation kicks in
+  aiGuardProb:    0.55,   // chance to guard a telegraphed incoming hard swing
+  aiGuardTime:    0.30,   // s the AI holds a guard once it decides to block
+  aiGuardCd:      0.55,   // post-guard lockout (s) so the AI can't turtle forever
+  aiHopProb:      0.012,  // per-decision chance to hop-close when far
+  aiFoeSwingThreat: 4.0,  // foe.swingVel above this (toward self & in range) = threat
 };
 
 // The four selectable specials (id, display name, one-line effect).
@@ -279,6 +297,15 @@ for (const key in ASSET_SRCS) {
 function imgReady(img) { return !!img && img.complete && img.naturalWidth > 0; }
 function allAssetsLoaded() { return assetsLoaded >= ASSET_TOTAL; }
 
+// The below-canvas hint strip reflects the current mode (P2 = CPU in 1p).
+const hintEl = document.getElementById("hint");
+function updateHint() {
+  if (!hintEl) return;
+  hintEl.textContent = (gameMode === "1p")
+    ? "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: CPU (computer-controlled)"
+    : "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /";
+}
+
 // map a special id -> its medallion icon image (SELECT screen cards)
 const SPECIAL_ICON = {
   mega:    "iconMega",
@@ -313,6 +340,8 @@ const KEYS_PREVENT = new Set([
   "ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Space","Enter",
   // special keys: KeyF for P1, Slash ("/") for P2 (Slash is browser quick-find).
   "KeyF","Slash","/",
+  // title mode-select / select-back: Backspace would navigate the page back.
+  "Backspace",
 ]);
 
 let audioInited = false;
@@ -449,6 +478,11 @@ function makeKnight(side) {
     dashTimer: 0,          // DASH TACKLE active window
     dashHit: false,        // DASH TACKLE: already shoved this dash (one shove)
     anchorTimer: 0,        // ANCHOR active window
+    // ===== AI bookkeeping (only used when this knight is the CPU in 1p) =====
+    aiSwingCd:   0,        // cooldown until the AI may tap-swing again (cadence)
+    aiReactTimer:0,        // reaction lag before committing to a fresh decision
+    aiGuardTimer:0,        // >0 => AI is currently holding a guard
+    aiGuardCd:   0,        // post-guard lockout so the AI can't turtle forever
   };
 }
 
@@ -472,6 +506,8 @@ function resetKnightPositions() {
     k.counterTimer = 0; k.counterFlash = 0;
     k.dashTimer = 0; k.dashHit = false;
     k.anchorTimer = 0;
+    // AI timers reset every round / select-entry so no CPU state leaks.
+    k.aiSwingCd = 0; k.aiReactTimer = 0; k.aiGuardTimer = 0; k.aiGuardCd = 0;
   }
   p1.facing = 1; p2.facing = -1;
 }
@@ -521,10 +557,13 @@ function spawnDust(x, y) {
     });
   }
 }
-function spawnFloater(x, y, text, color) {
-  floaters.push({ x, y, vy: -42, life: 0, maxLife: 0.85, text, color: color || PAL.bone, scale: 1 });
+function spawnFloater(x, y, text, color, scale) {
+  const s = scale || 1;
+  floaters.push({ x, y, vy: -42, life: 0, maxLife: s > 1 ? 1.1 : 0.85, text, color: color || PAL.bone, scale: s });
 }
 function addShake(amount) { shake = Math.min(10, shake + amount * 0.6); }
+// Specials are allowed a much stronger, uncapped-by-the-normal-limit kick.
+function addBigShake(amount) { shake = Math.min(24, Math.max(shake, amount)); }
 
 function updateEffects(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
@@ -551,6 +590,16 @@ function updateEffects(dt) {
 // ----------------------------- GAME STATE ----------------------------
 const GS = { MENU: "menu", SELECT: "select", COUNTDOWN: "countdown", PLAYING: "playing", ROUND_OVER: "roundover", MATCH_OVER: "matchover" };
 let gameState = GS.MENU;
+
+// ===== GAME MODE: "1p" (P2 is a CPU) | "2p" (local two-player) =====
+// PERSISTS across rounds/matches; chosen on the TITLE screen. Default "1p" so a
+// solo player can start immediately. In "2p" the game behaves exactly as before.
+let gameMode = "1p";
+// CPU pick countdown on the SELECT screen (1p only): the CPU randomizes + locks
+// its special after this elapses. Re-armed each time SELECT is entered in 1p.
+let cpuPickTimer = 0;
+let cpuPickTarget = -1;   // chosen target card index (-1 = not chosen this SELECT)
+let cpuStepTimer = 0;     // paces the visible cursor walk toward the target
 
 // ----- SELECT screen state -----
 const sel = {
@@ -598,6 +647,13 @@ function enterSelect() {
   held.clear();
   // chosenSpecial is kept across rounds within a match, but re-picked here.
   p1.chosenSpecial = null; p2.chosenSpecial = null;
+  // 1p: arm the CPU's pick countdown (re-randomized each SELECT entry). In 2p it
+  // stays 0 and the CPU auto-pick logic never runs.
+  cpuPickTimer = (gameMode === "1p")
+    ? TUNE.aiPickDelayMin + Math.random() * (TUNE.aiPickDelayMax - TUNE.aiPickDelayMin)
+    : 0;
+  cpuPickTarget = -1;   // re-randomized lazily on the first 1p SELECT frame
+  cpuStepTimer = 0;
   gameState = GS.SELECT;
 }
 
@@ -680,8 +736,21 @@ function handleGlobalKey(code) {
   // transient special timers / knockback flags are cleared and players re-pick.
   if (code === "KeyR") { enterSelect(); return; }
   if (gameState === GS.MENU) {
-    if (code === "Enter" || code === "Space") enterSelect();
+    // mode toggle: ArrowUp/Down OR W/S OR 1/2 number keys
+    if (code === "ArrowUp" || code === "ArrowDown" || code === "KeyW" || code === "KeyS") {
+      gameMode = (gameMode === "1p") ? "2p" : "1p";
+      updateHint();
+      sfxSelect();
+    } else if (code === "Digit1" || code === "Numpad1") {
+      if (gameMode !== "1p") { gameMode = "1p"; updateHint(); sfxSelect(); }
+    } else if (code === "Digit2" || code === "Numpad2") {
+      if (gameMode !== "2p") { gameMode = "2p"; updateHint(); sfxSelect(); }
+    } else if (code === "Enter" || code === "Space") {
+      enterSelect();
+    }
   } else if (gameState === GS.SELECT) {
+    // Escape/Backspace returns to the TITLE so the player can switch modes.
+    if (code === "Escape" || code === "Backspace") { gameState = GS.MENU; sfxSelect(); return; }
     handleSelectKey(code);
   } else if (gameState === GS.MATCH_OVER) {
     if (code === "Enter") enterSelect();
@@ -703,13 +772,15 @@ function handleSelectKey(code) {
   } else if (code === "KeyS") {
     sel.p1.locked = false; p1.chosenSpecial = null; sfxSelect();
   }
-  // ---- P2 ----
-  if (!sel.p2.locked) {
-    if (code === "ArrowLeft") { sel.p2.cursor = (sel.p2.cursor + N - 1) % N; sfxSelect(); }
-    else if (code === "ArrowRight") { sel.p2.cursor = (sel.p2.cursor + 1) % N; sfxSelect(); }
-    else if (code === "Enter") { sel.p2.locked = true; p2.chosenSpecial = SPECIALS[sel.p2.cursor].id; sfxLock(); }
-  } else if (code === "ArrowDown") {
-    sel.p2.locked = false; p2.chosenSpecial = null; sfxSelect();
+  // ---- P2 (keyboard ONLY in 2p; in 1p the CPU picks/locks itself) ----
+  if (gameMode === "2p") {
+    if (!sel.p2.locked) {
+      if (code === "ArrowLeft") { sel.p2.cursor = (sel.p2.cursor + N - 1) % N; sfxSelect(); }
+      else if (code === "ArrowRight") { sel.p2.cursor = (sel.p2.cursor + 1) % N; sfxSelect(); }
+      else if (code === "Enter") { sel.p2.locked = true; p2.chosenSpecial = SPECIALS[sel.p2.cursor].id; sfxLock(); }
+    } else if (code === "ArrowDown") {
+      sel.p2.locked = false; p2.chosenSpecial = null; sfxSelect();
+    }
   }
   // both locked => start the READY beat
   if (sel.p1.locked && sel.p2.locked && sel.readyTimer === 0) {
@@ -902,12 +973,14 @@ function activateSpecial(k) {
       // telegraphed wind-up; the big swing auto-fires when windupTimer elapses.
       k.windupTimer = TUNE.megaWindup;
       k.swingVel = Math.min(k.swingVel, -1.0); // visibly cock BACK during wind-up
-      spawnFloater(k.x, k.y - TUNE.knightH - 14, "CHARGE!", PAL.spark);
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "CHARGE!", PAL.spark, 1.7);
+      addBigShake(12);
       sfxAnchor();
       break;
     case "counter":
       k.counterTimer = TUNE.counterWindow;
-      spawnFloater(k.x, k.y - TUNE.knightH - 14, "KAMAE!", k.side === "p1" ? PAL.redLight : PAL.bluLight);
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "KAMAE!", k.side === "p1" ? PAL.redLight : PAL.bluLight, 1.7);
+      addBigShake(12);
       sfxCounter();
       break;
     case "dash":
@@ -916,13 +989,15 @@ function activateSpecial(k) {
       k.vx = k.facing * TUNE.dashVx;        // commit a fast seat dash toward foe
       k.knockTimer = Math.max(k.knockTimer, TUNE.dashTime); // skip maxSpeed clamp
       spawnDust(k.x, logTopY);
-      spawnFloater(k.x, k.y - TUNE.knightH - 14, "TACKLE!", k.side === "p1" ? PAL.redLight : PAL.bluLight);
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "TACKLE!", k.side === "p1" ? PAL.redLight : PAL.bluLight, 1.7);
+      addBigShake(12);
       sfxDash();
       break;
     case "anchor":
       k.anchorTimer = TUNE.anchorTime;
       spawnDust(k.x, logTopY);
-      spawnFloater(k.x, k.y - TUNE.knightH - 14, "FUNBARI!", PAL.steel);
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "FUNBARI!", PAL.steel, 1.7);
+      addBigShake(12);
       sfxAnchor();
       break;
   }
@@ -1003,8 +1078,8 @@ function applyBodyShove(attacker, target, knockBase, balBase, label, color) {
   const cx = (attacker.x + target.x) / 2, cy = target.y - TUNE.knightH * 0.5;
   spawnSparks(cx, cy, 22, color || PAL.spark);
   spawnFloater(cx, cy - 16, label || (Math.random() < 0.5 ? "DOSUN!" : "SHOVE!"),
-               color || (attacker.side === "p1" ? PAL.redLight : PAL.bluLight));
-  addShake(12);
+               color || (attacker.side === "p1" ? PAL.redLight : PAL.bluLight), 1.9);
+  addBigShake(18);
   triggerHitStop(TUNE.hitStopMax);
 }
 
@@ -1143,8 +1218,8 @@ function applyHit(attacker, target, tip) {
     gainSp(target, TUNE.spGainLand); gainSp(attacker, TUNE.spGainTake);
     spawnSparks(tip.x, tip.y, 24, PAL.clash);
     spawnFloater(target.x, target.y - TUNE.knightH - 6, "COUNTER!",
-                 target.side === "p1" ? PAL.redLight : PAL.bluLight);
-    addShake(12);
+                 target.side === "p1" ? PAL.redLight : PAL.bluLight, 2.0);
+    addBigShake(18);
     triggerHitStop(TUNE.hitStopMax);
     sfxCounter();
     return;
@@ -1217,8 +1292,10 @@ function applyHit(attacker, target, tip) {
   else if (heavy) words = ["POW!", "THWACK!", "WHAM!"];
   else words = ["BONK!", "DOINK!", "WHACK!"];
   spawnFloater(cx, cy - 16, words[Math.floor(Math.random() * words.length)],
-               guarding ? PAL.steel : (attacker.side === "p1" ? PAL.redLight : PAL.bluLight));
-  addShake(guarding ? 4 : (mega ? 18 : (heavy ? 12 : 8)));
+               guarding ? PAL.steel : (attacker.side === "p1" ? PAL.redLight : PAL.bluLight),
+               mega ? 2.4 : 1);
+  if (mega) addBigShake(24);
+  else addShake(guarding ? 4 : (heavy ? 12 : 8));
   // hit-stop scaled to force (MEGA always max)
   const hs = TUNE.hitStopMin + (TUNE.hitStopMax - TUNE.hitStopMin) *
              Math.min(1, (speed - TUNE.hitSpeed) / (TUNE.forceCap - TUNE.hitSpeed));
@@ -1265,6 +1342,129 @@ function readInputs() {
   return [i1, i2];
 }
 
+// ----------------------------- CPU AI --------------------------------
+// aiInputs(self, foe, dt): returns the SAME shape readInputs produces for a
+// player — {left,right,jump,guard,attack,special} of booleans — so the existing
+// edge-triggered tap-swing / special-activation logic fires unchanged. attack &
+// special are MOMENTARY: true on exactly the frame the AI decides to act, gated
+// by per-knight cadence/reaction timers stored on `self` so it never machine-guns
+// and a human can trade/punish. Cheap heuristics only; runs every PLAYING frame.
+//
+// Priorities (high -> low): self-preservation (edge) > spacing > attack > defense
+// > special > hop. A FALLING self or foe => the AI idles (no actions).
+function aiInputs(self, foe, dt) {
+  const idle = { left:false, right:false, jump:false, guard:false, attack:false, special:false };
+
+  // tick AI cadence/reaction timers
+  if (self.aiSwingCd    > 0) self.aiSwingCd    = Math.max(0, self.aiSwingCd    - dt);
+  if (self.aiReactTimer > 0) self.aiReactTimer = Math.max(0, self.aiReactTimer - dt);
+  if (self.aiGuardCd    > 0) self.aiGuardCd    = Math.max(0, self.aiGuardCd    - dt);
+  // a guard hold that just elapsed arms the post-guard lockout so the AI drops
+  // its brace and becomes punishable (no infinite turtling).
+  if (self.aiGuardTimer > 0) {
+    self.aiGuardTimer = Math.max(0, self.aiGuardTimer - dt);
+    if (self.aiGuardTimer === 0) self.aiGuardCd = TUNE.aiGuardCd;
+  }
+
+  // The AI must never act while anyone is falling.
+  if (self.state === ST.FALLING || foe.state === ST.FALLING) return idle;
+
+  const out = { left:false, right:false, jump:false, guard:false, attack:false, special:false };
+
+  const d = foe.x - self.x;            // + => foe to the right
+  const absd = Math.abs(d);
+  const faceDir = d >= 0 ? 1 : -1;     // direction from self toward foe
+  const facingFoe = self.facing === faceDir;
+  const inRange = absd <= TUNE.aiConnectRange;
+
+  // distance from self to its OWN nearest log edge (small => danger)
+  const distToLeft  = self.x - logLeft;
+  const distToRight = logRight - self.x;
+  const nearLeftEdge  = distToLeft  < TUNE.aiEdgeMargin;
+  const nearRightEdge = distToRight < TUNE.aiEdgeMargin;
+  const nearEdge = nearLeftEdge || nearRightEdge;
+
+  // (a) SELF-PRESERVATION (highest): if near our own edge, scoot toward CENTER.
+  // This overrides closing toward the foe so the AI never voluntarily walks off.
+  if (nearEdge) {
+    if (nearLeftEdge)  out.right = true;   // edge is to the left => move right (center)
+    if (nearRightEdge) out.left  = true;   // edge is to the right => move left (center)
+    // ANCHOR if available while pinned near the edge (anti-ring-out use).
+    if (self.chosenSpecial === "anchor" && self.special >= TUNE.spMax &&
+        !specialActive(self) && self.aiReactTimer === 0) {
+      out.special = true;
+      self.aiReactTimer = TUNE.aiReactDelay;
+    }
+    return out;   // commit to escaping the edge this frame
+  }
+
+  // (b) SPACING: close the gap when too far; ease off if overlapping-close.
+  if (absd > TUNE.aiConnectRange) {
+    if (faceDir > 0) out.right = true; else out.left = true;
+    // occasional hop to close distance faster (only when safely far from edge)
+    if (Math.random() < TUNE.aiHopProb && self.onGround) out.jump = true;
+  } else if (absd < TUNE.aiCloseRange) {
+    // a touch too close: drift back slightly to keep swinging room (toward center)
+    if (faceDir > 0) out.left = true; else out.right = true;
+  } else {
+    // mid range: face the foe by nudging toward it (establishes facing for swings)
+    if (!facingFoe) { if (faceDir > 0) out.right = true; else out.left = true; }
+  }
+
+  // (d) DEFENSE: if the foe is winding a hard swing toward us and in range, and
+  // we're not mid-swing, GUARD with some probability (reaction-limited). A held
+  // guard runs out via aiGuardTimer so the AI never turtles forever.
+  const foeThreat = foe.swingVel > TUNE.aiFoeSwingThreat && inRange && self.swingVel < TUNE.hitSpeed;
+  if (self.aiGuardTimer > 0) {
+    out.guard = true;
+    // while guarding, stop trying to move/swing this frame
+    out.left = out.right = out.jump = out.attack = false;
+    return out;
+  }
+  if (foeThreat && self.aiReactTimer === 0 && self.aiGuardCd === 0 &&
+      Math.random() < TUNE.aiGuardProb) {
+    self.aiGuardTimer = TUNE.aiGuardTime;
+    self.aiReactTimer = TUNE.aiReactDelay;
+    return { left:false, right:false, jump:false, guard:true, attack:false, special:false };
+  }
+
+  // (e) SPECIAL: only when the gauge is full and one is chosen. Choose the moment
+  // by type. Momentary (one frame), reaction-gated. dash is checked against our
+  // own edge so the dash can't carry us off.
+  if (self.special >= TUNE.spMax && self.chosenSpecial && !specialActive(self) &&
+      self.aiReactTimer === 0) {
+    let fire = false;
+    switch (self.chosenSpecial) {
+      case "mega":    fire = inRange && foe.state !== ST.GUARD; break;
+      case "counter": fire = foe.swingVel > TUNE.aiFoeSwingThreat && inRange; break;
+      case "dash": {
+        // don't dash if it would carry us toward our own near edge
+        const dashTargetX = self.x + faceDir * TUNE.dashVx * TUNE.dashTime;
+        const safe = dashTargetX > logLeft + TUNE.aiEdgeMargin * 0.5 &&
+                     dashTargetX < logRight - TUNE.aiEdgeMargin * 0.5;
+        fire = safe && absd > TUNE.aiCloseRange && absd < TUNE.aiConnectRange * 1.6;
+        break;
+      }
+      case "anchor":  fire = self.balance < TUNE.balanceMax * 0.4; break;
+      default:        fire = inRange; break;
+    }
+    if (fire) { out.special = true; self.aiReactTimer = TUNE.aiReactDelay; return out; }
+  }
+
+  // (c) ATTACK: in range, facing the foe, off cooldown, not guarding. Gated by a
+  // randomized cadence so it isn't a machine-gun. Note swings use the CURRENT
+  // facing (updated by the move frames above), so require facingFoe here.
+  if (inRange && facingFoe && self.aiSwingCd === 0 && self.aiReactTimer === 0 &&
+      self.swingVel < TUNE.hitSpeed && !specialActive(self)) {
+    out.attack = true;
+    out.left = out.right = false;   // plant for the swing
+    self.aiSwingCd = TUNE.aiSwingCdMin + Math.random() * (TUNE.aiSwingCdMax - TUNE.aiSwingCdMin);
+    self.aiReactTimer = TUNE.aiReactDelay;
+  }
+
+  return out;
+}
+
 function update(dt) {
   frameCount++;
 
@@ -1283,6 +1483,43 @@ function update(dt) {
     // drain any stray attack/special arms so they don't leak into the match
     consumeAttack("p1"); consumeAttack("p2");
     consumeSpecial("p1"); consumeSpecial("p2");
+    // ---- 1p: CPU auto-picks a random special and auto-locks after a short beat.
+    // Its cursor walks toward the pick so the card visibly settles, then locks.
+    if (gameMode === "1p" && !sel.p2.locked && sel.readyTimer === 0) {
+      // Pick a stable random TARGET card once (on the first SELECT frame after
+      // entry), then visibly step the cursor toward it during the pick delay so
+      // the card cursor is seen moving, and LOCK on the target when the timer
+      // elapses. cpuPickTarget<0 means "not chosen yet this SELECT".
+      if (cpuPickTarget < 0) cpuPickTarget = Math.floor(Math.random() * SPECIALS.length);
+      if (cpuPickTimer > 0) {
+        cpuPickTimer = Math.max(0, cpuPickTimer - dt);
+        // step the cursor one card toward the target every ~0.18s of the delay
+        cpuStepTimer -= dt;
+        if (cpuStepTimer <= 0 && sel.p2.cursor !== cpuPickTarget) {
+          const dir = (cpuPickTarget - sel.p2.cursor + SPECIALS.length) % SPECIALS.length;
+          // shortest visual walk (left or right) toward the target
+          sel.p2.cursor = (dir <= SPECIALS.length / 2)
+            ? (sel.p2.cursor + 1) % SPECIALS.length
+            : (sel.p2.cursor + SPECIALS.length - 1) % SPECIALS.length;
+          cpuStepTimer = 0.18;
+          sfxSelect();
+        }
+        if (cpuPickTimer === 0) {
+          sel.p2.cursor = cpuPickTarget;     // settle on the chosen card
+          sel.p2.locked = true;
+          p2.chosenSpecial = SPECIALS[sel.p2.cursor].id;
+          sfxLock();
+        }
+      }
+    }
+    // Both locked => start the READY beat. This MUST live here too: when the CPU
+    // auto-locks above, handleSelectKey (the other place this check lives) never
+    // runs, so without this the match would soft-lock in SELECT. The
+    // readyTimer===0 guard makes the duplicated check double-fire-safe.
+    if (sel.p1.locked && sel.p2.locked && sel.readyTimer === 0) {
+      sel.readyTimer = TUNE.readyDelay;
+      sfxFight();
+    }
     // idle knights settle gently (no inputs)
     const noInput = { left:false,right:false,jump:false,guard:false,attack:false };
     updateKnight(p1, dt, noInput);
@@ -1316,7 +1553,11 @@ function update(dt) {
   }
 
   if (gameState === GS.PLAYING) {
-    const [i1, i2] = readInputs();
+    // Always read inputs (this also DRAINS any stray P2 attack/special arms so a
+    // human key press can't leak into the CPU's slot in 1p). In 1p the CPU
+    // computes P2's inputs via aiInputs() and we discard the keyboard half.
+    const [i1, i2kbd] = readInputs();
+    const i2 = (gameMode === "1p") ? aiInputs(p2, p1, dt) : i2kbd;
     // special activation (edge-triggered) BEFORE physics so a fired MEGA/dash
     // takes effect this frame.
     if (i1.special) activateSpecial(p1);
@@ -1596,9 +1837,9 @@ function drawFloaters() {
     const a = 1 - f.life / f.maxLife;
     const pop = f.life < 0.12 ? 1 + (0.12 - f.life) * 3 : 1;
     ctx.globalAlpha = Math.max(0, a);
-    const size = Math.round(20 * pop);
+    const size = Math.round(20 * pop * (f.scale || 1));
     ctx.font = `900 ${size}px "Trebuchet MS", sans-serif`;
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 4 * (f.scale || 1);
     ctx.strokeStyle = PAL.ink;
     ctx.strokeText(f.text, f.x, f.y);
     ctx.fillStyle = f.color;
@@ -1706,7 +1947,7 @@ function drawHUD() {
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
   const mw = 320;
   drawBalanceMeter(p1, 30, 40, mw, "P1  CRIMSON", palR);
-  drawBalanceMeter(p2, VW - 30 - mw, 40, mw, "AZURE  P2", palB);
+  drawBalanceMeter(p2, VW - 30 - mw, 40, mw, gameMode === "1p" ? "AZURE  CPU" : "AZURE  P2", palB);
   drawRoundTimer();
 }
 
@@ -1793,7 +2034,11 @@ function drawSelect() {
   ctx.fillText("P1 CRIMSON  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", 40, 116);
   ctx.textAlign = "right";
   ctx.fillStyle = PAL.bluLight;
-  ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 140);
+  if (gameMode === "1p") {
+    ctx.fillText("AZURE CPU  ·  computer picks automatically", VW - 40, 140);
+  } else {
+    ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 140);
+  }
   ctx.textAlign = "left";
 
   // ---- card grid ----
@@ -1843,6 +2088,18 @@ function drawSelect() {
     if (p1Here) drawCardOutline(cx, y0, cardW, cardH, PAL.redLight, sel.p1.locked, -3);
     if (p2Here) drawCardOutline(cx, y0, cardW, cardH, PAL.bluLight, sel.p2.locked, 3);
 
+    // tiny "CPU" tag above the azure cursor card in 1p so it's clear P2 is the AI
+    if (p2Here && gameMode === "1p") {
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.font = '900 14px "Trebuchet MS", sans-serif';
+      ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink;
+      ctx.strokeText("CPU", cx + cardW / 2, y0 - 10);
+      ctx.fillStyle = PAL.bluLight;
+      ctx.fillText("CPU", cx + cardW / 2, y0 - 10);
+      ctx.restore();
+    }
+
     // LOCKED stamps (offset so both can sit on one card)
     if (p1Here && sel.p1.locked) drawLockStamp(cx + cardW / 2 - 34, y0 + cardH - 30, PAL.redLight);
     if (p2Here && sel.p2.locked) drawLockStamp(cx + cardW / 2 + 34, y0 + cardH - 30, PAL.bluLight);
@@ -1866,7 +2123,8 @@ function drawSelect() {
     if (blink) {
       ctx.font = '800 20px "Trebuchet MS", sans-serif';
       ctx.fillStyle = PAL.bone;
-      ctx.fillText("Both players LOCK IN to begin   ·   R: back to select", VW / 2, 466);
+      const lockMsg = gameMode === "1p" ? "LOCK IN to begin (CPU picks automatically)" : "Both players LOCK IN to begin";
+      ctx.fillText(lockMsg + "   ·   ESC: title   ·   R: re-pick", VW / 2, 466);
     }
   }
   ctx.textAlign = "left";
@@ -2019,42 +2277,85 @@ function drawTitle() {
   ctx.fillStyle = PAL.bone;
   ctx.fillText("A bare-knuckle frying-pan duel — astride a log, last seat wins.", VW / 2, 306);
 
+  // ----- MODE SELECTOR: "1P vs CPU" | "2P LOCAL" (highlight current) -----
+  const modes = [
+    { id: "1p", label: "1P  vs CPU" },
+    { id: "2p", label: "2P  LOCAL" },
+  ];
+  const mY = 332;
+  const mGap = 230;
+  const mX0 = VW / 2 - mGap / 2;
+  ctx.font = '900 22px "Trebuchet MS", sans-serif';
+  ctx.textAlign = "center";
+  for (let i = 0; i < modes.length; i++) {
+    const m = modes[i];
+    const cxm = mX0 + i * mGap;
+    const isCur = gameMode === m.id;
+    const bw = 200, bh = 34, bx = cxm - bw / 2, by = mY - 24;
+    // slab
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
+    ctx.fillStyle = isCur ? "#2e3a56" : "#1a2234";
+    ctx.fillRect(bx, by, bw, bh);
+    if (isCur) {
+      ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+      ctx.strokeRect(bx, by, bw, bh);
+    }
+    ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(m.label, cxm, mY);
+    ctx.fillStyle = isCur ? PAL.sunGlow : PAL.steelDk;
+    ctx.fillText(m.label, cxm, mY);
+  }
+  ctx.font = '600 13px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("↑↓ / W S / 1 2  select mode  ·  ENTER  choose specials", VW / 2, mY + 24);
+  ctx.textAlign = "left";
+
   // controls panel (compact two columns)
   ctx.font = '700 16px "Trebuchet MS", sans-serif';
   ctx.textAlign = "left";
   const colL = VW / 2 - 300, colR = VW / 2 + 40;
   ctx.fillStyle = PAL.redLight;
-  ctx.fillText("PLAYER 1 — CRIMSON", colL, 350);
+  ctx.fillText("PLAYER 1 — CRIMSON", colL, 384);
   ctx.fillStyle = PAL.bone;
   ctx.font = '500 15px "Trebuchet MS", sans-serif';
-  ctx.fillText("A / D  ......  SCOOT", colL, 370);
-  ctx.fillText("W  .........  HOP", colL, 388);
-  ctx.fillText("S  ........  GUARD", colL, 406);
-  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 424);
+  ctx.fillText("A / D  ......  SCOOT", colL, 404);
+  ctx.fillText("W  .........  HOP", colL, 422);
+  ctx.fillText("S  ........  GUARD", colL, 440);
+  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 458);
   ctx.fillStyle = PAL.skyAmber;
-  ctx.fillText("F  ......  SPECIAL", colL, 442);
+  ctx.fillText("F  ......  SPECIAL", colL, 476);
 
+  // P2 column: human controls in 2p, "CPU controlled" note in 1p.
   ctx.font = '700 16px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bluLight;
-  ctx.fillText("PLAYER 2 — AZURE", colR, 350);
+  ctx.fillText(gameMode === "1p" ? "PLAYER 2 — AZURE (CPU)" : "PLAYER 2 — AZURE", colR, 384);
   ctx.fillStyle = PAL.bone;
   ctx.font = '500 15px "Trebuchet MS", sans-serif';
-  ctx.fillText("◄ / ►  ....  SCOOT", colR, 370);
-  ctx.fillText("▲  .........  HOP", colR, 388);
-  ctx.fillText("▼  ........  GUARD", colR, 406);
-  ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 424);
-  ctx.fillStyle = PAL.skyAmber;
-  ctx.fillText("/  ......  SPECIAL", colR, 442);
+  if (gameMode === "1p") {
+    ctx.fillText("Computer-controlled", colR, 404);
+    ctx.fillText("opponent — medium AI.", colR, 422);
+    ctx.fillStyle = PAL.steelDk;
+    ctx.fillText("Switch to 2P for local", colR, 448);
+    ctx.fillText("two-player play.", colR, 466);
+  } else {
+    ctx.fillText("◄ / ►  ....  SCOOT", colR, 404);
+    ctx.fillText("▲  .........  HOP", colR, 422);
+    ctx.fillText("▼  ........  GUARD", colR, 440);
+    ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 458);
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillText("/  ......  SPECIAL", colR, 476);
+  }
 
   // prompt (blink)
   const blink = (Math.sin(frameCount * 0.12) > -0.2);
   if (blink) {
     ctx.textAlign = "center";
-    ctx.font = '900 24px "Trebuchet MS", sans-serif';
+    ctx.font = '900 22px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
-    ctx.strokeText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 492);
+    ctx.strokeText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 512);
     ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 492);
+    ctx.fillText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 512);
   }
   ctx.textAlign = "left";
 }
@@ -2215,6 +2516,7 @@ function frame(now) {
   render();
   requestAnimationFrame(frame);
 }
+updateHint();   // sync the below-canvas hint strip to the default mode (1p)
 requestAnimationFrame(frame);
 
 })();
