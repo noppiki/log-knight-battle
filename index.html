@@ -3302,15 +3302,33 @@ function drawOnlineBackdrop(heading) {
 // a stone-slab choice button centered at (cx, y)
 function drawSlabButton(cx, y, w, h, label, selected) {
   const bx = cx - w / 2, by = y - h / 2;
-  ctx.fillStyle = PAL.ink;
-  ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
-  ctx.fillStyle = selected ? "#2e3a56" : "#1a2234";
-  ctx.fillRect(bx, by, w, h);
-  ctx.fillStyle = selected ? "#3a4a6e" : "#222c42";
-  ctx.fillRect(bx, by, w, 5);
-  if (selected) {
-    ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
-    ctx.strokeRect(bx, by, w, h);
+  if (imgReady(IMG.modeSlab)) {
+    // soft amber halo behind the active slab (same pattern as the title mode slabs)
+    if (selected) {
+      ctx.fillStyle = "rgba(216,164,90,0.22)";
+      ctx.fillRect(bx - 8, by - 8, w + 16, h + 16);
+      ctx.fillStyle = "rgba(216,164,90,0.35)";
+      ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.modeSlab, bx - 4, by - 4, w + 8, h + 8);
+    ctx.imageSmoothingEnabled = false;
+    if (selected) {
+      ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+      ctx.strokeRect(bx, by, w, h);  // crisp amber rim on top
+    }
+  } else {
+    // ---- fallback: original procedural slab ----
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
+    ctx.fillStyle = selected ? "#2e3a56" : "#1a2234";
+    ctx.fillRect(bx, by, w, h);
+    ctx.fillStyle = selected ? "#3a4a6e" : "#222c42";
+    ctx.fillRect(bx, by, w, 5);
+    if (selected) {
+      ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+      ctx.strokeRect(bx, by, w, h);
+    }
   }
   ctx.save();
   ctx.textAlign = "center";
