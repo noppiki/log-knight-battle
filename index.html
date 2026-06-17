@@ -589,6 +589,7 @@ const ASSET_SRCS = {
   log:          "assets/log.webp",
   hudTimer:     "assets/hud_timer.webp",
   cardFrame:    "assets/card_frame.webp",
+  resultBanner: "assets/result_banner.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -3499,6 +3500,16 @@ function drawRoundOver() {
   ctx.fillRect(0, 0, VW, VH);
   ctx.textAlign = "center";
 
+  // ornate banner backdrop behind result text (780×175, centered on text baseline VH/2-30)
+  if (imgReady(IMG.resultBanner)) {
+    const bw = 780, bh = 175;
+    const bx = Math.round(VW / 2 - bw / 2);
+    const by = Math.round(VH / 2 - 30 - bh / 2); // = Math.round(VH/2 - 117.5)
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.resultBanner, bx, by, bw, bh);
+    ctx.imageSmoothingEnabled = false;
+  }
+
   // optional "TIME UP!" kicker above the result
   if (timeUpBanner) {
     ctx.font = '900 34px "Trebuchet MS", sans-serif';
@@ -3530,6 +3541,17 @@ function drawRoundOver() {
 function drawMatchOver() {
   ctx.fillStyle = "rgba(8,12,20,0.7)";
   ctx.fillRect(0, 0, VW, VH);
+
+  // ornate banner backdrop behind victory text (880×110, Y=VH/2-100; bottom=VH/2+10, score at VH/2+8 just clear)
+  if (imgReady(IMG.resultBanner)) {
+    const bw = 880, bh = 110;
+    const bx = Math.round(VW / 2 - bw / 2);
+    const by = Math.round(VH / 2 - 100);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.resultBanner, bx, by, bw, bh);
+    ctx.imageSmoothingEnabled = false;
+  }
+
   const isRed = matchWinner && matchWinner.side === "p1";
   const txt = isRed ? "CRIMSON IS VICTORIOUS" : "AZURE IS VICTORIOUS";
   ctx.textAlign = "center";
