@@ -34,6 +34,23 @@
     box-shadow: 0 0 0 2px #2a3552, 0 18px 60px rgba(0,0,0,0.7);
     /* sized by JS to keep aspect ratio, integer-ish scaling */
   }
+  #joinInput {
+    position: absolute;
+    z-index: 10;
+    font: 900 28px "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    letter-spacing: 8px;
+    text-align: center;
+    text-transform: uppercase;
+    color: #f6d8a0;
+    background: #11151f;
+    border: 3px solid #e7a36b;
+    border-radius: 4px;
+    outline: none;
+    padding: 10px 14px;
+    width: 240px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.6);
+  }
+  #joinInput::placeholder { color: #5a6a8a; letter-spacing: 4px; }
   #hint {
     position: absolute;
     bottom: 8px;
@@ -50,6 +67,12 @@
 <body>
   <div id="stage">
     <canvas id="game" width="960" height="540"></canvas>
+    <!-- JOIN-screen room-code entry. Hidden by default; shown only on the ONLINE
+         JOIN screen. Positioned over the canvas via JS. Isolated from the global
+         keydown listener (its own handler stopsPropagation). -->
+    <input id="joinInput" type="text" maxlength="8" autocomplete="off"
+           autocapitalize="characters" spellcheck="false"
+           placeholder="ROOM CODE" style="display:none;" />
   </div>
   <div id="hint">P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /</div>
 
@@ -260,6 +283,279 @@ const SPECIALS = [
   { id: "anchor",  name: "踏ん張り",         en: "ANCHOR",        fx: "Plant for 3s: very hard to shove off the log." },
 ];
 
+// ----------------------------- NETPLAY (online 2-player) -------------
+// Host-authoritative relay netplay. The HOST runs the FULL simulation using its
+// local keyboard as p1 and the GUEST's relayed inputs as p2; each frame it sends
+// a state snapshot (+ FX events). The GUEST does NOT simulate: it sends its local
+// input, applies the latest snapshot into its globals, replays FX events through
+// the local helpers, and calls render(). All net code is gated on
+// gameMode==="online" so the offline 1p/2p paths are byte-for-byte unchanged.
+const NET_BASE_URL = "wss://lkb-relay.noppiki.workers.dev/r/";
+const NET_CONNECT_TIMEOUT = 8000;   // ms before a stalled connect is treated as error
+
+const net = {
+  mode: null,        // null | "host" | "guest"
+  ws: null,          // active WebSocket (null when offline)
+  code: "",          // room code
+  connected: false,  // both peers present (relay "ready")
+  status: "",        // human-readable connect status (shown on connect screens)
+  error: "",         // last error message (shown on connect screens)
+  // HOST side: latest guest input (held flags) + accumulated edge events.
+  guestInput: { l:false, r:false, j:false, g:false, a:false, s:false },
+  guestAttackPending: false,    // one-shot: a guest attack press not yet consumed
+  guestSpecialPending: false,   // one-shot: a guest special press not yet consumed
+  prevGuestLR: { l:false, r:false, g:false },  // for host-side SELECT edge-detect
+  // GUEST side: latest snapshot applied + outgoing FX event queue this frame.
+  haveSnapshot: false,          // guest has applied at least one host snapshot
+  outEvents: [],                // HOST: FX events recorded this frame (flushed on send)
+  connectTimer: null,           // setTimeout handle for the connect watchdog
+  readyPending: false,          // relay "ready" arrived before "role": defer onNetReady
+};
+
+function netReset() {
+  if (net.connectTimer != null) { clearTimeout(net.connectTimer); net.connectTimer = null; }
+  if (net.ws) {
+    try {
+      net.ws.onopen = net.ws.onclose = net.ws.onerror = net.ws.onmessage = null;
+      net.ws.close();
+    } catch (err) {}
+  }
+  net.mode = null; net.ws = null; net.code = ""; net.connected = false;
+  net.status = ""; net.error = "";
+  net.guestInput = { l:false, r:false, j:false, g:false, a:false, s:false };
+  net.guestAttackPending = false; net.guestSpecialPending = false;
+  net.prevGuestLR = { l:false, r:false, g:false };
+  net.haveSnapshot = false; net.outEvents.length = 0;
+  net.readyPending = false;
+  hideJoinInput();
+}
+
+function randomRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // no easily-confused 0/O/1/I
+  let s = "";
+  for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+// Open a relay socket for `code`. `intended` is the role the local player TRIED to
+// take ("host" via HOST GAME, "guest" via JOIN); the relay's authoritative role
+// message ultimately sets net.mode (first-to-room => host).
+function netConnect(code, intended) {
+  netReset();
+  net.code = code;
+  net.status = (intended === "host")
+    ? "Opening room…"
+    : "Connecting to room " + code + "…";
+  let ws;
+  try {
+    ws = new WebSocket(NET_BASE_URL + code);
+  } catch (err) {
+    net.error = "Could not open connection.";
+    net.status = "";
+    return;
+  }
+  net.ws = ws;
+  net.connectTimer = setTimeout(() => {
+    if (!net.connected) {
+      net.error = "Connection timed out.";
+      net.status = "";
+      netTeardownToMenu(false);   // preserves net.error
+      gameState = GS.ONLINE_MENU; // pre-connect failure => back to the menu (not stuck on HOST)
+    }
+  }, NET_CONNECT_TIMEOUT);
+
+  ws.onopen = () => {
+    net.status = (intended === "host")
+      ? "Room ready. Waiting for opponent…"
+      : "Joined. Waiting for host…";
+  };
+  ws.onmessage = (e) => netOnMessage(e.data);
+  ws.onerror = () => {
+    if (!net.connected) {
+      net.error = "Connection error.";
+      net.status = "";
+    }
+  };
+  ws.onclose = () => {
+    if (gameMode !== "online") return;
+    if (net.connected) {
+      // Mid-session close (peer present then gone) => bail cleanly to the title.
+      onPeerGone("Connection closed.");
+    } else {
+      // PRE-connect close (never reached "ready") => return to the ONLINE_MENU with
+      // an error, not the title. onPeerGone/netReset would wipe net.error otherwise.
+      if (!net.error) net.error = "Connection failed.";
+      netTeardownToMenu(false);   // preserves net.error
+      gameState = GS.ONLINE_MENU;
+    }
+  };
+}
+
+// Relay CONTROL messages carry a `type`; GAME messages carry a `t`. Distinguish on
+// that. The relay forwards game payloads verbatim.
+function netOnMessage(data) {
+  let msg;
+  try { msg = JSON.parse(data); } catch (err) { return; }
+  if (!msg || typeof msg !== "object") return;
+
+  if (typeof msg.type === "string") {
+    // ----- relay control -----
+    switch (msg.type) {
+      case "role":
+        net.mode = (msg.role === "host") ? "host" : "guest";
+        net.status = (net.mode === "host")
+          ? "Room ready. Waiting for opponent…"
+          : "Joined. Waiting for host…";
+        // If "ready" already arrived (relay reordered), the transition was deferred
+        // until the role was known — fire it now that net.mode is set.
+        if (net.readyPending) { net.readyPending = false; onNetReady(); }
+        break;
+      case "ready":
+        // Connection bookkeeping is unconditional (clears the watchdog so it can't
+        // fire after a successful connect, even if "role" hasn't arrived yet).
+        if (net.connectTimer != null) { clearTimeout(net.connectTimer); net.connectTimer = null; }
+        net.connected = true;
+        net.error = "";
+        // Don't act on "ready" until the role is known: "ready" before "role" would
+        // mis-route a would-be host into ONLINE_WAIT. Defer until "role" arrives.
+        if (net.mode == null) { net.readyPending = true; }
+        else { onNetReady(); }
+        break;
+      case "full":
+        net.error = "Room is full.";
+        net.status = "";
+        netTeardownToMenu(false);   // preserves net.error
+        gameState = GS.ONLINE_MENU; // pre-connect failure => back to the menu
+        break;
+      case "peer-left":
+        onPeerGone("Opponent disconnected.");
+        break;
+    }
+    return;
+  }
+
+  if (typeof msg.t === "string") {
+    // ----- game payload -----
+    if (net.mode === "host" && msg.t === "in") {
+      applyGuestInput(msg.k);
+    } else if (net.mode === "guest" && msg.t === "st") {
+      applySnapshot(msg.s);
+      if (Array.isArray(msg.ev)) for (const ev of msg.ev) playEvent(ev);
+      net.haveSnapshot = true;
+    }
+  }
+}
+
+// Both peers present. Host becomes authoritative and drives SELECT for both; guest
+// waits for the first snapshot. Clear input arms so nothing leaks into the match.
+function onNetReady() {
+  attackArmed.p1 = attackArmed.p2 = false;
+  specialArmed.p1 = specialArmed.p2 = false;
+  held.clear();
+  hideJoinInput();
+  if (net.mode === "host") {
+    enterSelect();   // host enters SELECT and starts broadcasting it
+  } else {
+    // guest: park until the first snapshot; render() shows an "awaiting" beat.
+    gameState = GS.ONLINE_WAIT;
+  }
+}
+
+// Peer vanished mid-session (peer-left / socket close / error): show a banner and
+// route cleanly back to the title via the full-reset path. Never soft-lock.
+function onPeerGone(reasonMsg) {
+  const msg = reasonMsg || "Opponent disconnected.";
+  if (gameMode !== "online") { netReset(); return; }
+  netReset();                   // NB: netReset clears net.error, so capture msg first
+  gameMode = "online";          // stay on the online flow conceptually
+  onlineDisconnectMsg = msg;    // shown once on the title (drawTitle banner)
+  // route to title; keep the disconnect message for one screen
+  enterTitleFromOnline();
+}
+
+// Tear down the socket and return to the ONLINE_MENU (keeping any error to show).
+function netTeardownToMenu(keepOnline) {
+  const err = net.error;
+  netReset();
+  net.error = err;
+  if (keepOnline) gameState = GS.ONLINE_MENU;
+}
+
+// Full exit of online mode back to the title screen.
+function enterTitleFromOnline() {
+  // clean reset of the world so no online residue shows on the title
+  resetKnightPositions();
+  fullResetKnight(p1); fullResetKnight(p2);
+  attackArmed.p1 = attackArmed.p2 = false;
+  specialArmed.p1 = specialArmed.p2 = false;
+  held.clear();
+  gameState = GS.MENU;
+}
+
+// HOST: ingest a guest input message. Movement/guard are level (held); attack and
+// special are EDGE events the host latches as one-shot pending flags so one guest
+// press => exactly one swing/special even if frame rates differ.
+function applyGuestInput(k) {
+  if (!k) return;
+  net.guestInput.l = !!k.l; net.guestInput.r = !!k.r;
+  net.guestInput.j = !!k.j; net.guestInput.g = !!k.g;
+  if (k.a) net.guestAttackPending = true;
+  if (k.s) net.guestSpecialPending = true;
+}
+
+// HOST: build the p2 input object for THIS frame from the latched guest state,
+// consuming the one-shot attack/special pendings.
+function hostGuestInputForFrame() {
+  const gi = net.guestInput;
+  const out = {
+    left: gi.l, right: gi.r, jump: gi.j, guard: gi.g,
+    attack: net.guestAttackPending,
+    special: net.guestSpecialPending,
+  };
+  net.guestAttackPending = false;
+  net.guestSpecialPending = false;
+  return out;
+}
+
+// GUEST: collect local input as P2-semantic flags (same comfortable P1 scheme:
+// A/D move, W hop, S guard, Space swing, F special) and send to host.
+function guestSendInput() {
+  if (!net.ws || net.ws.readyState !== 1) return;
+  const k = {
+    l: held.has("KeyA"), r: held.has("KeyD"),
+    j: held.has("KeyW"), g: held.has("KeyS"),
+    a: consumeAttack("p1"),     // edge-triggered locally (one true per press)
+    s: consumeSpecial("p1"),    // edge-triggered locally
+  };
+  try { net.ws.send(JSON.stringify({ t: "in", k })); } catch (err) {}
+}
+
+// ----- FX event recording (HOST) and replay (GUEST) -----
+// On the host, FX helpers ALSO push a compact event so the guest can reproduce the
+// juice. On the guest, playEvent() routes each event through the SAME local helper.
+// Guest replays SFX via the RAW (_-prefixed) functions so replay never re-records.
+const SFX_MAP = {
+  swing: _sfxSwing, hit: _sfxHit, clang: _sfxClang, jump: _sfxJump, fall: _sfxFall,
+  count: _sfxCount, fight: _sfxFight, spReady: _sfxSpReady, spFail: _sfxSpFail,
+  mega: _sfxMega, counter: _sfxCounter, dash: _sfxDash, anchor: _sfxAnchor,
+  select: _sfxSelect, lock: _sfxLock,
+};
+function netRecord(ev) {
+  if (net.mode === "host" && gameMode === "online") net.outEvents.push(ev);
+}
+function playEvent(ev) {
+  if (!ev || typeof ev.k !== "string") return;
+  switch (ev.k) {
+    case "spark":  _spawnSparks(ev.x, ev.y, ev.n, ev.color); break;
+    case "dust":   _spawnDust(ev.x, ev.y); break;
+    case "float":  _spawnFloater(ev.x, ev.y, ev.text, ev.color, ev.scale); break;
+    case "shake":  if (ev.big) _addBigShake(ev.amt); else _addShake(ev.amt); break;
+    case "sfx":    { const fn = SFX_MAP[ev.id]; if (fn) fn(); break; }
+  }
+}
+
+let onlineDisconnectMsg = "";   // shown once on the title after a disconnect
+
 // ----------------------------- CANVAS --------------------------------
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d", { alpha: false });
@@ -303,7 +599,9 @@ function updateHint() {
   if (!hintEl) return;
   hintEl.textContent = (gameMode === "1p")
     ? "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: CPU (computer-controlled)"
-    : "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /";
+    : (gameMode === "online")
+      ? "ONLINE: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  —  you control YOUR knight"
+      : "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /";
 }
 
 // map a special id -> its medallion icon image (SELECT screen cards)
@@ -325,6 +623,50 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 resize();
+
+// ----------------------------- JOIN INPUT OVERLAY --------------------
+// A real HTML <input> for room-code entry on the ONLINE JOIN screen. Positioned
+// over the canvas center. Its own keydown handler stopsPropagation so the global
+// game listener never sees these keys (no preventDefault collision / mode toggle).
+const joinInputEl = document.getElementById("joinInput");
+function positionJoinInput() {
+  if (!joinInputEl) return;
+  const rect = canvas.getBoundingClientRect();
+  // center horizontally, ~58% down the canvas (below the prompt text)
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height * 0.56;
+  joinInputEl.style.left = Math.round(cx - joinInputEl.offsetWidth / 2) + "px";
+  joinInputEl.style.top  = Math.round(cy) + "px";
+}
+function showJoinInput() {
+  if (!joinInputEl) return;
+  joinInputEl.value = "";
+  joinCodeBuffer = "";
+  joinInputEl.style.display = "block";
+  positionJoinInput();
+  // focus after layout so it can receive typing immediately
+  setTimeout(() => { try { joinInputEl.focus(); } catch (e) {} }, 0);
+}
+function hideJoinInput() {
+  if (!joinInputEl) return;
+  joinInputEl.style.display = "none";
+  try { joinInputEl.blur(); } catch (e) {}
+}
+if (joinInputEl) {
+  joinInputEl.addEventListener("input", () => {
+    // alphanumeric, uppercased, max 8 (room codes are short)
+    const cleaned = joinInputEl.value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8);
+    joinInputEl.value = cleaned;
+    joinCodeBuffer = cleaned;
+  });
+  joinInputEl.addEventListener("keydown", (e) => {
+    // keep these keys away from the global game listener entirely
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); submitJoinCode(); }
+    else if (e.key === "Escape") { e.preventDefault(); hideJoinInput(); enterOnlineMenu(); }
+  });
+}
+window.addEventListener("resize", positionJoinInput);
 
 // ----------------------------- INPUT ---------------------------------
 // Held-keys set for continuous reads (move/guard).
@@ -411,22 +753,43 @@ function blip(freq, dur, type, vol) {
     osc.start(t); osc.stop(t + dur + 0.02);
   } catch (err) {}
 }
-function sfxSwing() { blip(220, 0.08, "triangle", 0.05); }
-function sfxHit()   { blip(140, 0.14, "square", 0.10); blip(90, 0.16, "sawtooth", 0.06); }
-function sfxClang() { blip(880, 0.10, "square", 0.10); blip(1320, 0.10, "triangle", 0.07); }
-function sfxJump()  { blip(330, 0.10, "sine", 0.05); }
-function sfxFall()  { blip(120, 0.4, "sawtooth", 0.08); }
-function sfxCount() { blip(660, 0.08, "square", 0.07); }
-function sfxFight() { blip(523, 0.10, "square", 0.10); blip(784, 0.16, "square", 0.08); }
-// --- special-move SFX ---
-function sfxSpReady() { blip(880, 0.07, "square", 0.06); blip(1175, 0.10, "triangle", 0.05); }
-function sfxSpFail()  { blip(180, 0.06, "square", 0.04); }
-function sfxMega()    { blip(70, 0.30, "sawtooth", 0.12); blip(160, 0.22, "square", 0.09); }
-function sfxCounter() { blip(1320, 0.08, "square", 0.10); blip(1760, 0.12, "triangle", 0.07); }
-function sfxDash()    { blip(110, 0.18, "sawtooth", 0.09); blip(300, 0.10, "square", 0.06); }
-function sfxAnchor()  { blip(200, 0.22, "sine", 0.08); blip(110, 0.26, "triangle", 0.06); }
-function sfxSelect()  { blip(523, 0.05, "square", 0.05); }
-function sfxLock()    { blip(659, 0.08, "square", 0.07); blip(988, 0.10, "triangle", 0.05); }
+// --- raw SFX (actual audio). The public sfx* names play the sound AND, when
+// hosting online, record a {k:"sfx",id} event so the guest plays the same cue.
+// netRecordSfx is a no-op offline. (netRecord itself guards on host/online.)
+function _sfxSwing() { blip(220, 0.08, "triangle", 0.05); }
+function _sfxHit()   { blip(140, 0.14, "square", 0.10); blip(90, 0.16, "sawtooth", 0.06); }
+function _sfxClang() { blip(880, 0.10, "square", 0.10); blip(1320, 0.10, "triangle", 0.07); }
+function _sfxJump()  { blip(330, 0.10, "sine", 0.05); }
+function _sfxFall()  { blip(120, 0.4, "sawtooth", 0.08); }
+function _sfxCount() { blip(660, 0.08, "square", 0.07); }
+function _sfxFight() { blip(523, 0.10, "square", 0.10); blip(784, 0.16, "square", 0.08); }
+function _sfxSpReady() { blip(880, 0.07, "square", 0.06); blip(1175, 0.10, "triangle", 0.05); }
+function _sfxSpFail()  { blip(180, 0.06, "square", 0.04); }
+function _sfxMega()    { blip(70, 0.30, "sawtooth", 0.12); blip(160, 0.22, "square", 0.09); }
+function _sfxCounter() { blip(1320, 0.08, "square", 0.10); blip(1760, 0.12, "triangle", 0.07); }
+function _sfxDash()    { blip(110, 0.18, "sawtooth", 0.09); blip(300, 0.10, "square", 0.06); }
+function _sfxAnchor()  { blip(200, 0.22, "sine", 0.08); blip(110, 0.26, "triangle", 0.06); }
+function _sfxSelect()  { blip(523, 0.05, "square", 0.05); }
+function _sfxLock()    { blip(659, 0.08, "square", 0.07); blip(988, 0.10, "triangle", 0.05); }
+
+function netRecordSfx(id) {
+  if (net.mode === "host" && gameMode === "online") net.outEvents.push({ k: "sfx", id });
+}
+function sfxSwing()   { _sfxSwing();   netRecordSfx("swing"); }
+function sfxHit()     { _sfxHit();     netRecordSfx("hit"); }
+function sfxClang()   { _sfxClang();   netRecordSfx("clang"); }
+function sfxJump()    { _sfxJump();    netRecordSfx("jump"); }
+function sfxFall()    { _sfxFall();    netRecordSfx("fall"); }
+function sfxCount()   { _sfxCount();   netRecordSfx("count"); }
+function sfxFight()   { _sfxFight();   netRecordSfx("fight"); }
+function sfxSpReady() { _sfxSpReady(); netRecordSfx("spReady"); }
+function sfxSpFail()  { _sfxSpFail();  netRecordSfx("spFail"); }
+function sfxMega()    { _sfxMega();    netRecordSfx("mega"); }
+function sfxCounter() { _sfxCounter(); netRecordSfx("counter"); }
+function sfxDash()    { _sfxDash();    netRecordSfx("dash"); }
+function sfxAnchor()  { _sfxAnchor();  netRecordSfx("anchor"); }
+function sfxSelect()  { _sfxSelect();  netRecordSfx("select"); }
+function sfxLock()    { _sfxLock();    netRecordSfx("lock"); }
 
 // ----------------------------- LOG GEOMETRY --------------------------
 const logW = VW * TUNE.logWidthFrac;
@@ -527,7 +890,13 @@ const particles = [];   // {x,y,vx,vy,life,maxLife,size,color}
 const floaters = [];    // {x,y,vy,life,maxLife,text,color,scale}
 let shake = 0;          // current screen-shake magnitude
 
-function spawnSparks(x, y, n, color) {
+// ===== FX helpers: RAW (_-prefixed) do the actual work; the public names wrap
+// them and, WHEN HOSTING ONLINE, also record a compact FX event so the guest can
+// reproduce the juice (see netRecord/playEvent). The guest replays events through
+// the RAW versions so it never double-records. Offline, the public names behave
+// exactly as before (netRecord is a no-op when gameMode!=="online").
+function _spawnSparks(x, y, n, color) {
+  n = n || 0;
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
     const sp = 80 + Math.random() * 220;
@@ -542,7 +911,7 @@ function spawnSparks(x, y, n, color) {
     });
   }
 }
-function spawnDust(x, y) {
+function _spawnDust(x, y) {
   for (let i = 0; i < 8; i++) {
     const a = -Math.PI + Math.random() * Math.PI; // upper hemisphere outward
     const sp = 30 + Math.random() * 70;
@@ -557,13 +926,37 @@ function spawnDust(x, y) {
     });
   }
 }
-function spawnFloater(x, y, text, color, scale) {
+function _spawnFloater(x, y, text, color, scale) {
   const s = scale || 1;
   floaters.push({ x, y, vy: -42, life: 0, maxLife: s > 1 ? 1.1 : 0.85, text, color: color || PAL.bone, scale: s });
 }
-function addShake(amount) { shake = Math.min(10, shake + amount * 0.6); }
+function _addShake(amount) { shake = Math.min(10, shake + amount * 0.6); }
 // Specials are allowed a much stronger, uncapped-by-the-normal-limit kick.
-function addBigShake(amount) { shake = Math.min(24, Math.max(shake, amount)); }
+function _addBigShake(amount) { shake = Math.min(24, Math.max(shake, amount)); }
+
+// Public FX names (used everywhere by the sim). When hosting online they ALSO
+// emit an event for the guest. The color/text are serialized verbatim (plain
+// strings/numbers), so the guest reproduces them identically.
+function spawnSparks(x, y, n, color) {
+  _spawnSparks(x, y, n, color);
+  netRecord({ k: "spark", x, y, n, color: color || PAL.spark });
+}
+function spawnDust(x, y) {
+  _spawnDust(x, y);
+  netRecord({ k: "dust", x, y });
+}
+function spawnFloater(x, y, text, color, scale) {
+  _spawnFloater(x, y, text, color, scale);
+  netRecord({ k: "float", x, y, text, color: color || PAL.bone, scale: scale || 1 });
+}
+function addShake(amount) {
+  _addShake(amount);
+  netRecord({ k: "shake", amt: amount, big: false });
+}
+function addBigShake(amount) {
+  _addBigShake(amount);
+  netRecord({ k: "shake", amt: amount, big: true });
+}
 
 function updateEffects(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
@@ -588,13 +981,26 @@ function updateEffects(dt) {
 }
 
 // ----------------------------- GAME STATE ----------------------------
-const GS = { MENU: "menu", SELECT: "select", COUNTDOWN: "countdown", PLAYING: "playing", ROUND_OVER: "roundover", MATCH_OVER: "matchover" };
+const GS = {
+  MENU: "menu", SELECT: "select", COUNTDOWN: "countdown", PLAYING: "playing",
+  ROUND_OVER: "roundover", MATCH_OVER: "matchover",
+  // ----- ONLINE connect flow (only reachable when gameMode==="online") -----
+  ONLINE_MENU: "onlinemenu",   // choose HOST GAME / JOIN GAME
+  ONLINE_HOST: "onlinehost",   // hosting: show room code, waiting for opponent
+  ONLINE_JOIN: "onlinejoin",   // joining: type a room code, then waiting
+  ONLINE_WAIT: "onlinewait",   // guest: connected, awaiting first host snapshot
+};
 let gameState = GS.MENU;
 
-// ===== GAME MODE: "1p" (P2 is a CPU) | "2p" (local two-player) =====
+// ===== GAME MODE: "1p" (P2 is a CPU) | "2p" (local two-player) | "online" =====
 // PERSISTS across rounds/matches; chosen on the TITLE screen. Default "1p" so a
-// solo player can start immediately. In "2p" the game behaves exactly as before.
+// solo player can start immediately. In "2p" the game behaves exactly as before;
+// "online" routes through the relay netplay flow (host-authoritative).
 let gameMode = "1p";
+// ONLINE_MENU cursor: 0 = HOST GAME, 1 = JOIN GAME.
+let onlineMenuCursor = 0;
+// JOIN screen: the room code being typed (uppercased, alphanumeric, <=4 chars).
+let joinCodeBuffer = "";
 // CPU pick countdown on the SELECT screen (1p only): the CPU randomizes + locks
 // its special after this elapses. Re-armed each time SELECT is entered in 1p.
 let cpuPickTimer = 0;
@@ -654,6 +1060,15 @@ function enterSelect() {
     : 0;
   cpuPickTarget = -1;   // re-randomized lazily on the first 1p SELECT frame
   cpuStepTimer = 0;
+  // online: clear the host-side guest input latches/edges so a re-pick starts clean
+  // (harmless offline — net is dormant).
+  net.guestAttackPending = false; net.guestSpecialPending = false;
+  // Zero the held guest input too (not just the edges/pendings): otherwise a guest
+  // holding A/D/S at round end leaves guestInput true while prevGuestLR is false,
+  // and hostSelectFromGuest reads a phantom edge that auto-moves/unlocks the cursor.
+  // Zeroing both together makes the next real guest packet a clean baseline.
+  net.guestInput = { l:false, r:false, j:false, g:false, a:false, s:false };
+  net.prevGuestLR = { l:false, r:false, g:false };
   gameState = GS.SELECT;
 }
 
@@ -731,30 +1146,127 @@ function tryKnockout(k) {
   sfxFall();
 }
 
+// 3-way title mode order so ↑↓ cycles through all reachable modes.
+const MODE_ORDER = ["1p", "2p", "online"];
+function cycleMode(dir) {
+  const i = MODE_ORDER.indexOf(gameMode);
+  const n = MODE_ORDER.length;
+  gameMode = MODE_ORDER[(i + dir + n) % n];
+  onlineDisconnectMsg = "";   // clear stale disconnect notice once the user navigates
+  updateHint();
+  sfxSelect();
+}
+
 function handleGlobalKey(code) {
-  // R = full restart from ANY state. Routes through enterSelect() so all
-  // transient special timers / knockback flags are cleared and players re-pick.
+  // ===== ONLINE GUEST: keys are routed ONLY to the input send-buffer (handled by
+  // the keydown listener's arm logic + guestSendInput). The guest must NEVER run
+  // enterSelect / mode toggles / handleSelectKey locally (instant desync). The
+  // only local controls are LEAVE (Escape) and R (also leave). =====
+  if (gameMode === "online" && net.mode === "guest") {
+    if (code === "Escape" || code === "KeyR") leaveOnline();
+    return;
+  }
+  // ===== ONLINE connect screens (host + pre-connect) =====
+  if (gameState === GS.ONLINE_MENU) { handleOnlineMenuKey(code); return; }
+  if (gameState === GS.ONLINE_HOST) { if (code === "Escape" || code === "Backspace") leaveOnline(); return; }
+  if (gameState === GS.ONLINE_JOIN) { handleJoinKey(code); return; }
+  if (gameState === GS.ONLINE_WAIT) { if (code === "Escape" || code === "KeyR") leaveOnline(); return; }
+
+  // R = full restart. From any OFFLINE state it re-enters SELECT. ONLINE-HOST: R
+  // re-enters SELECT and re-broadcasts (host stays authoritative); guest handled
+  // above. Online host R is allowed; the guest follows via snapshots.
   if (code === "KeyR") { enterSelect(); return; }
+
   if (gameState === GS.MENU) {
-    // mode toggle: ArrowUp/Down OR W/S OR 1/2 number keys
-    if (code === "ArrowUp" || code === "ArrowDown" || code === "KeyW" || code === "KeyS") {
-      gameMode = (gameMode === "1p") ? "2p" : "1p";
-      updateHint();
-      sfxSelect();
+    // mode toggle: ArrowUp/Down OR W/S cycle all three; 1/2/3 jump directly.
+    if (code === "ArrowUp" || code === "KeyW") {
+      cycleMode(-1);
+    } else if (code === "ArrowDown" || code === "KeyS") {
+      cycleMode(1);
     } else if (code === "Digit1" || code === "Numpad1") {
       if (gameMode !== "1p") { gameMode = "1p"; updateHint(); sfxSelect(); }
     } else if (code === "Digit2" || code === "Numpad2") {
       if (gameMode !== "2p") { gameMode = "2p"; updateHint(); sfxSelect(); }
+    } else if (code === "Digit3" || code === "Numpad3") {
+      if (gameMode !== "online") { gameMode = "online"; updateHint(); sfxSelect(); }
     } else if (code === "Enter" || code === "Space") {
-      enterSelect();
+      if (gameMode === "online") enterOnlineMenu();
+      else enterSelect();
     }
   } else if (gameState === GS.SELECT) {
     // Escape/Backspace returns to the TITLE so the player can switch modes.
-    if (code === "Escape" || code === "Backspace") { gameState = GS.MENU; sfxSelect(); return; }
+    // In online, leaving SELECT must tear down the socket (host abandons the room).
+    if (code === "Escape" || code === "Backspace") {
+      if (gameMode === "online") { leaveOnline(); return; }
+      gameState = GS.MENU; sfxSelect(); return;
+    }
     handleSelectKey(code);
   } else if (gameState === GS.MATCH_OVER) {
     if (code === "Enter") enterSelect();
   }
+}
+
+// ----- ONLINE connect-flow key handlers -----
+function enterOnlineMenu() {
+  netReset();
+  onlineMenuCursor = 0;
+  joinCodeBuffer = "";
+  net.error = ""; net.status = "";
+  onlineDisconnectMsg = "";
+  gameState = GS.ONLINE_MENU;
+  sfxSelect();
+}
+function handleOnlineMenuKey(code) {
+  if (code === "Escape" || code === "Backspace") {
+    gameState = GS.MENU; sfxSelect(); return;
+  }
+  if (code === "ArrowLeft" || code === "KeyA" || code === "ArrowUp" || code === "KeyW") {
+    onlineMenuCursor = (onlineMenuCursor + 1) % 2; sfxSelect();
+  } else if (code === "ArrowRight" || code === "KeyD" || code === "ArrowDown" || code === "KeyS") {
+    onlineMenuCursor = (onlineMenuCursor + 1) % 2; sfxSelect();
+  } else if (code === "Enter" || code === "Space") {
+    if (onlineMenuCursor === 0) startHost();
+    else startJoin();
+  }
+}
+function startHost() {
+  const code = randomRoomCode();
+  net.error = "";
+  gameState = GS.ONLINE_HOST;
+  hideJoinInput();
+  netConnect(code, "host");
+  sfxLock();
+}
+function startJoin() {
+  net.error = "";
+  joinCodeBuffer = "";
+  gameState = GS.ONLINE_JOIN;
+  showJoinInput();
+  sfxSelect();
+}
+// JOIN screen keys are mostly handled by the HTML <input> overlay; this only
+// catches Escape (the input's own listener handles Enter/letters and stops
+// propagation so it never reaches here).
+function handleJoinKey(code) {
+  if (code === "Escape" || code === "Backspace") {
+    hideJoinInput();
+    enterOnlineMenu();
+  }
+}
+function submitJoinCode() {
+  const code = joinCodeBuffer.trim().toUpperCase();
+  if (code.length < 1) return;
+  hideJoinInput();
+  net.error = "";
+  gameState = GS.ONLINE_HOST;   // reuse the "waiting" screen layout for joining too
+  netConnect(code, "guest");
+  sfxLock();
+}
+// Leave online entirely: close socket, show any disconnect message, return to title.
+function leaveOnline() {
+  netReset();
+  enterTitleFromOnline();
+  sfxSelect();
 }
 
 // SELECT navigation. Called from the keydown listener AFTER e.repeat is filtered
@@ -1465,6 +1977,112 @@ function aiInputs(self, foe, dt) {
   return out;
 }
 
+// ----------------------------- NETPLAY SNAPSHOT ----------------------
+// Compact per-knight render state. Includes EVERY field render()/drawKnight()/
+// drawHUD()/drawSelect() reads off a knight. Particle/floater arrays are NOT
+// serialized (they're driven by FX events on the guest).
+function snapKnight(k) {
+  return {
+    x: k.x, y: k.y, facing: k.facing,
+    swingAngle: k.swingAngle, state: k.state,
+    balance: k.balance, special: k.special, chosenSpecial: k.chosenSpecial,
+    tumble: k.tumble || 0, attackFlash: k.attackFlash,
+    windupTimer: k.windupTimer, counterTimer: k.counterTimer,
+    counterFlash: k.counterFlash, dashTimer: k.dashTimer,
+    anchorTimer: k.anchorTimer, onGround: k.onGround,
+    rounds: k.rounds, spReadyPulse: k.spReadyPulse, bob: k.bob,
+  };
+}
+function applyKnight(k, s) {
+  if (!s) return;
+  k.x = s.x; k.y = s.y; k.facing = s.facing;
+  k.swingAngle = s.swingAngle; k.state = s.state;
+  k.balance = s.balance; k.special = s.special; k.chosenSpecial = s.chosenSpecial;
+  k.tumble = s.tumble; k.attackFlash = s.attackFlash;
+  k.windupTimer = s.windupTimer; k.counterTimer = s.counterTimer;
+  k.counterFlash = s.counterFlash; k.dashTimer = s.dashTimer;
+  k.anchorTimer = s.anchorTimer; k.onGround = s.onGround;
+  k.rounds = s.rounds; k.spReadyPulse = s.spReadyPulse; k.bob = s.bob;
+}
+
+// Build the full authoritative snapshot the guest needs to render any state.
+function buildSnapshot() {
+  return {
+    gs: gameState,
+    p1: snapKnight(p1),
+    p2: snapKnight(p2),
+    roundTimer,
+    countdownIndex, countdownTimer,
+    timeUpBanner, drawBanner,
+    roundWinner: roundWinner ? roundWinner.side : null,
+    matchWinner: matchWinner ? matchWinner.side : null,
+    // SELECT-screen state
+    selp1c: sel.p1.cursor, selp1l: sel.p1.locked,
+    selp2c: sel.p2.cursor, selp2l: sel.p2.locked,
+    readyTimer: sel.readyTimer,
+    // mode label so guest's HUD/labels match (always "online" here, but kept
+    // explicit; guest forces gameMode="online" anyway)
+    shake,   // current shake is carried so the guest's world jitter tracks host;
+             // FX shake EVENTS also fire, but updateEffects decays both consistently.
+  };
+}
+
+// GUEST: write a received snapshot into local globals so render() draws it.
+function applySnapshot(s) {
+  if (!s) return;
+  gameState = s.gs;
+  applyKnight(p1, s.p1);
+  applyKnight(p2, s.p2);
+  roundTimer = s.roundTimer;
+  countdownIndex = s.countdownIndex; countdownTimer = s.countdownTimer;
+  timeUpBanner = s.timeUpBanner; drawBanner = s.drawBanner;
+  roundWinner = s.roundWinner === "p1" ? p1 : (s.roundWinner === "p2" ? p2 : null);
+  matchWinner = s.matchWinner === "p1" ? p1 : (s.matchWinner === "p2" ? p2 : null);
+  sel.p1.cursor = s.selp1c; sel.p1.locked = s.selp1l;
+  sel.p2.cursor = s.selp2c; sel.p2.locked = s.selp2l;
+  sel.readyTimer = s.readyTimer;
+  // shake: take the host's value as a floor so the guest's world jitter tracks the
+  // host (its own updateEffects decays it between snapshots).
+  shake = Math.max(shake, s.shake || 0);
+}
+
+// HOST: flush this frame's snapshot + recorded FX events to the guest.
+function hostBroadcast() {
+  if (net.mode !== "host" || !net.connected || !net.ws || net.ws.readyState !== 1) {
+    net.outEvents.length = 0;
+    return;
+  }
+  const msg = { t: "st", s: buildSnapshot(), ev: net.outEvents };
+  try { net.ws.send(JSON.stringify(msg)); } catch (err) {}
+  net.outEvents.length = 0;
+}
+
+// HOST: translate the relayed guest input into SELECT navigation for p2. The guest
+// sends uniform HELD flags every frame; the host edge-detects l/r (cursor move) and
+// g (un-lock) here, and uses the already-edge-triggered attack as LOCK. This mirrors
+// handleSelectKey's P2 branch but driven by the guest's stream.
+function hostSelectFromGuest() {
+  if (sel.readyTimer > 0) { net.guestAttackPending = false; net.guestSpecialPending = false; return; }
+  const N = SPECIALS.length;
+  const gi = net.guestInput;
+  const prev = net.prevGuestLR;
+  if (!sel.p2.locked) {
+    if (gi.l && !prev.l) { sel.p2.cursor = (sel.p2.cursor + N - 1) % N; sfxSelect(); }
+    if (gi.r && !prev.r) { sel.p2.cursor = (sel.p2.cursor + 1) % N; sfxSelect(); }
+    if (net.guestAttackPending) { sel.p2.locked = true; p2.chosenSpecial = SPECIALS[sel.p2.cursor].id; sfxLock(); }
+  } else {
+    if (gi.g && !prev.g) { sel.p2.locked = false; p2.chosenSpecial = null; sfxSelect(); }
+  }
+  // consume edge state for next frame; drain attack/special so they don't leak
+  prev.l = gi.l; prev.r = gi.r; prev.g = gi.g;
+  net.guestAttackPending = false; net.guestSpecialPending = false;
+  // both locked => start READY beat (same trigger as handleSelectKey / 1p)
+  if (sel.p1.locked && sel.p2.locked && sel.readyTimer === 0) {
+    sel.readyTimer = TUNE.readyDelay;
+    sfxFight();
+  }
+}
+
 function update(dt) {
   frameCount++;
 
@@ -1512,6 +2130,11 @@ function update(dt) {
         }
       }
     }
+    // ---- online HOST: drive p2's SELECT cursor/lock from the guest's relayed
+    // input (edge-detected). The READY-beat trigger below covers the lock-in.
+    if (gameMode === "online" && net.mode === "host") {
+      hostSelectFromGuest();
+    }
     // Both locked => start the READY beat. This MUST live here too: when the CPU
     // auto-locks above, handleSelectKey (the other place this check lives) never
     // runs, so without this the match would soft-lock in SELECT. The
@@ -1534,6 +2157,9 @@ function update(dt) {
   if (gameState === GS.COUNTDOWN) {
     // keep attack flags from leaking into the fight
     consumeAttack("p1"); consumeAttack("p2");
+    // online host: also drain the guest's latched attack/special so a press during
+    // the countdown doesn't auto-fire on the first PLAYING frame.
+    net.guestAttackPending = false; net.guestSpecialPending = false;
     countdownTimer -= dt;
     if (countdownTimer <= 0) {
       countdownIndex++;
@@ -1557,7 +2183,11 @@ function update(dt) {
     // human key press can't leak into the CPU's slot in 1p). In 1p the CPU
     // computes P2's inputs via aiInputs() and we discard the keyboard half.
     const [i1, i2kbd] = readInputs();
-    const i2 = (gameMode === "1p") ? aiInputs(p2, p1, dt) : i2kbd;
+    // p2 input source: 1p => AI, online-host => relayed guest input, else => P2 kbd.
+    let i2;
+    if (gameMode === "1p") i2 = aiInputs(p2, p1, dt);
+    else if (gameMode === "online" && net.mode === "host") i2 = hostGuestInputForFrame();
+    else i2 = i2kbd;
     // special activation (edge-triggered) BEFORE physics so a fired MEGA/dash
     // takes effect this frame.
     if (i1.special) activateSpecial(p1);
@@ -1586,6 +2216,7 @@ function update(dt) {
 
   if (gameState === GS.ROUND_OVER) {
     consumeAttack("p1"); consumeAttack("p2");
+    net.guestAttackPending = false; net.guestSpecialPending = false;
     // keep falling knights animating
     const noInput = { left:false,right:false,jump:false,guard:false,attack:false };
     updateKnight(p1, dt, noInput);
@@ -1946,8 +2577,11 @@ function drawHUD() {
   const palR = { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim };
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
   const mw = 320;
-  drawBalanceMeter(p1, 30, 40, mw, "P1  CRIMSON", palR);
-  drawBalanceMeter(p2, VW - 30 - mw, 40, mw, gameMode === "1p" ? "AZURE  CPU" : "AZURE  P2", palB);
+  const p1Label = (gameMode === "online" && net.mode === "guest") ? "CRIMSON  HOST" : "P1  CRIMSON";
+  const p2Label = (gameMode === "1p") ? "AZURE  CPU"
+                : (gameMode === "online") ? ((net.mode === "guest") ? "AZURE  YOU" : "AZURE  P2") : "AZURE  P2";
+  drawBalanceMeter(p1, 30, 40, mw, p1Label, palR);
+  drawBalanceMeter(p2, VW - 30 - mw, 40, mw, p2Label, palB);
   drawRoundTimer();
 }
 
@@ -2036,6 +2670,9 @@ function drawSelect() {
   ctx.fillStyle = PAL.bluLight;
   if (gameMode === "1p") {
     ctx.fillText("AZURE  —  CPU  (auto)", VW - 40, 116);
+  } else if (gameMode === "online") {
+    // both peers use the same comfortable A/D/SPACE/S scheme on their OWN machine.
+    ctx.fillText("AZURE (online)  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", VW - 40, 140);
   } else {
     ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 140);
   }
@@ -2246,6 +2883,150 @@ function drawCountdown() {
   ctx.textAlign = "left";
 }
 
+// ===== ONLINE connect screens (Nordic stone-slab styling, matches SELECT) =====
+// shared dim backdrop + heading
+function drawOnlineBackdrop(heading) {
+  ctx.fillStyle = "rgba(8,12,20,0.66)";
+  ctx.fillRect(0, 0, VW, VH);
+  ctx.textAlign = "center";
+  ctx.font = '900 46px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 9; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(heading, VW / 2, 120);
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText(heading, VW / 2, 120);
+  ctx.textAlign = "left";
+}
+// a stone-slab choice button centered at (cx, y)
+function drawSlabButton(cx, y, w, h, label, selected) {
+  const bx = cx - w / 2, by = y - h / 2;
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
+  ctx.fillStyle = selected ? "#2e3a56" : "#1a2234";
+  ctx.fillRect(bx, by, w, h);
+  ctx.fillStyle = selected ? "#3a4a6e" : "#222c42";
+  ctx.fillRect(bx, by, w, 5);
+  if (selected) {
+    ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+    ctx.strokeRect(bx, by, w, h);
+  }
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.font = '900 26px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(label, cx, y + 9);
+  ctx.fillStyle = selected ? PAL.sunGlow : PAL.steelDk;
+  ctx.fillText(label, cx, y + 9);
+  ctx.restore();
+}
+
+function drawOnlineMenu() {
+  drawOnlineBackdrop("ONLINE  DUEL");
+  ctx.textAlign = "center";
+  ctx.font = 'italic 600 18px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("Host a room and share the code, or join a friend's room.", VW / 2, 168);
+
+  drawSlabButton(VW / 2, 250, 300, 70, "HOST  GAME", onlineMenuCursor === 0);
+  drawSlabButton(VW / 2, 340, 300, 70, "JOIN  GAME", onlineMenuCursor === 1);
+
+  // sub-captions under each
+  ctx.font = '500 14px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillText("Create a room — you play CRIMSON (host).", VW / 2, 296);
+  ctx.fillText("Enter a room code — you play AZURE (guest).", VW / 2, 386);
+
+  ctx.font = '600 14px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("← → / W S  select   ·   ENTER  confirm   ·   ESC  back", VW / 2, 470);
+
+  if (net.error) {
+    ctx.font = '800 16px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = "#ff9090";
+    ctx.fillText(net.error, VW / 2, 500);
+  }
+  ctx.textAlign = "left";
+}
+
+// HOST waiting screen (also reused as the JOIN "connecting/waiting" screen).
+function drawOnlineConnect() {
+  drawOnlineBackdrop(net.mode === "guest" ? "JOINING  ROOM" : "HOSTING  ROOM");
+  ctx.textAlign = "center";
+
+  // room code panel (big chunky slab) — shown for the host so they can share it.
+  if (net.code) {
+    const w = 280, h = 90, cx = VW / 2, cy = 220;
+    const bx = cx - w / 2, by = cy - h / 2;
+    ctx.fillStyle = PAL.ink; ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
+    ctx.fillStyle = "#202a40"; ctx.fillRect(bx, by, w, h);
+    ctx.fillStyle = "#2e3a56"; ctx.fillRect(bx, by, w, 6);
+    ctx.font = '700 14px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.steelDk;
+    ctx.fillText("ROOM CODE", cx, by + 26);
+    ctx.font = '900 52px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 7; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(net.code, cx, by + 72);
+    ctx.fillStyle = PAL.sunGlow;
+    ctx.fillText(net.code, cx, by + 72);
+  }
+
+  // status / spinner-ish line
+  const dots = ".".repeat(1 + (Math.floor(frameCount * 0.05) % 3));
+  ctx.font = '800 22px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  const statusLine = net.connected ? "Opponent found — starting…"
+    : (net.mode === "guest" ? "Waiting for host" : "Share the code · waiting for opponent");
+  ctx.fillText(statusLine + (net.connected ? "" : dots), VW / 2, 320);
+
+  if (net.error) {
+    ctx.font = '800 18px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = "#ff9090";
+    ctx.fillText(net.error, VW / 2, 360);
+  }
+
+  ctx.font = '600 14px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillText("ESC  cancel & back", VW / 2, 470);
+  ctx.textAlign = "left";
+}
+
+function drawOnlineJoin() {
+  drawOnlineBackdrop("JOIN  ROOM");
+  ctx.textAlign = "center";
+  ctx.font = '800 20px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("Type the room code, then press ENTER", VW / 2, 200);
+  // the actual text field is the HTML <input> overlay (positioned ~56% down).
+  // draw a faint slab behind where it sits for visual anchoring.
+  const w = 300, h = 70, cx = VW / 2, cy = VH * 0.56 - 6;
+  const bx = cx - w / 2, by = cy - h / 2;
+  ctx.fillStyle = PAL.ink; ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
+  ctx.fillStyle = "#161d2d"; ctx.fillRect(bx, by, w, h);
+
+  ctx.font = '600 14px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillText("ENTER  connect   ·   ESC  back", VW / 2, 470);
+  if (net.error) {
+    ctx.font = '800 16px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = "#ff9090";
+    ctx.fillText(net.error, VW / 2, 500);
+  }
+  ctx.textAlign = "left";
+}
+
+// GUEST: connected, awaiting the first host snapshot.
+function drawOnlineWait() {
+  drawOnlineBackdrop("CONNECTED");
+  ctx.textAlign = "center";
+  const dots = ".".repeat(1 + (Math.floor(frameCount * 0.05) % 3));
+  ctx.font = '800 24px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("Syncing with host" + dots, VW / 2, VH / 2);
+  ctx.font = '600 14px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillText("ESC  leave", VW / 2, 470);
+  ctx.textAlign = "left";
+}
+
 function drawTitle() {
   // dim overlay
   ctx.fillStyle = "rgba(8,12,20,0.55)";
@@ -2279,21 +3060,24 @@ function drawTitle() {
   ctx.fillStyle = PAL.bone;
   ctx.fillText("A bare-knuckle frying-pan duel — astride a log, last seat wins.", VW / 2, 306);
 
-  // ----- MODE SELECTOR: "1P vs CPU" | "2P LOCAL" (highlight current) -----
+  // ----- MODE SELECTOR: "1P vs CPU" | "2P LOCAL" | "ONLINE" (highlight current) -----
   const modes = [
-    { id: "1p", label: "1P  vs CPU" },
-    { id: "2p", label: "2P  LOCAL" },
+    { id: "1p",     label: "1P  vs CPU" },
+    { id: "2p",     label: "2P  LOCAL" },
+    { id: "online", label: "ONLINE" },
   ];
   const mY = 332;
-  const mGap = 230;
-  const mX0 = VW / 2 - mGap / 2;
-  ctx.font = '900 22px "Trebuchet MS", sans-serif';
+  const bw = 184, bh = 34, mGap = 16;
+  const totalW = modes.length * bw + (modes.length - 1) * mGap;
+  const mX0 = VW / 2 - totalW / 2;
+  ctx.font = '900 20px "Trebuchet MS", sans-serif';
   ctx.textAlign = "center";
   for (let i = 0; i < modes.length; i++) {
     const m = modes[i];
-    const cxm = mX0 + i * mGap;
+    const bx = mX0 + i * (bw + mGap);
+    const cxm = bx + bw / 2;
     const isCur = gameMode === m.id;
-    const bw = 200, bh = 34, bx = cxm - bw / 2, by = mY - 24;
+    const by = mY - 24;
     // slab
     ctx.fillStyle = PAL.ink;
     ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
@@ -2310,8 +3094,20 @@ function drawTitle() {
   }
   ctx.font = '600 13px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bone;
-  ctx.fillText("↑↓ / W S / 1 2  select mode  ·  ENTER  choose specials", VW / 2, mY + 24);
+  const enterLabel = (gameMode === "online") ? "ENTER  go online" : "ENTER  choose specials";
+  ctx.fillText("↑↓ / W S / 1 2 3  select mode  ·  " + enterLabel, VW / 2, mY + 24);
   ctx.textAlign = "left";
+
+  // disconnect notice (shown once after an online session ends abnormally)
+  if (onlineDisconnectMsg) {
+    ctx.textAlign = "center";
+    ctx.font = '800 16px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(onlineDisconnectMsg, VW / 2, 360);
+    ctx.fillStyle = "#ff9090";
+    ctx.fillText(onlineDisconnectMsg, VW / 2, 360);
+    ctx.textAlign = "left";
+  }
 
   // controls panel (compact two columns)
   ctx.font = '700 16px "Trebuchet MS", sans-serif';
@@ -2428,6 +3224,8 @@ let matchBtn = null;
 // click restart button
 canvas.addEventListener("click", (e) => {
   if (gameState !== GS.MATCH_OVER || !matchBtn) return;
+  // online guest never drives restart locally (host is authoritative); ignore.
+  if (gameMode === "online" && net.mode === "guest") return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = VW / rect.width, scaleY = VH / rect.height;
   const mx = (e.clientX - rect.left) * scaleX;
@@ -2496,13 +3294,22 @@ function render() {
   ctx.restore(); // end shake transform — UI must NOT jitter
 
   // ----- UI / OVERLAYS (no shake) -----
-  if (gameState !== GS.MENU && gameState !== GS.SELECT) drawHUD();
+  // The HUD (life/SP/timer) only shows in the live match states. MENU, SELECT and
+  // the ONLINE connect screens suppress it.
+  const noHud = (gameState === GS.MENU || gameState === GS.SELECT ||
+                 gameState === GS.ONLINE_MENU || gameState === GS.ONLINE_HOST ||
+                 gameState === GS.ONLINE_JOIN || gameState === GS.ONLINE_WAIT);
+  if (!noHud) drawHUD();
 
   if (gameState === GS.MENU) drawTitle();
   else if (gameState === GS.SELECT) drawSelect();
   else if (gameState === GS.COUNTDOWN) drawCountdown();
   else if (gameState === GS.ROUND_OVER) drawRoundOver();
   else if (gameState === GS.MATCH_OVER) drawMatchOver();
+  else if (gameState === GS.ONLINE_MENU) drawOnlineMenu();
+  else if (gameState === GS.ONLINE_HOST) drawOnlineConnect();
+  else if (gameState === GS.ONLINE_JOIN) drawOnlineJoin();
+  else if (gameState === GS.ONLINE_WAIT) drawOnlineWait();
 }
 
 // ---------------------------- MAIN LOOP ------------------------------
@@ -2514,8 +3321,25 @@ function frame(now) {
   if (dt > 1 / 20) dt = 1 / 20;
   if (dt < 0) dt = 0;
 
+  if (gameMode === "online" && net.mode === "guest") {
+    // ===== GUEST: thin terminal — DO NOT simulate. =====
+    // (1) send local input to host (edge-triggered attack/special consumed here),
+    // (2) the latest snapshot+events were already applied by netOnMessage,
+    // (3) animate/expire FX locally, (4) render. Connect screens still render.
+    frameCount++;          // keep render-only animations (auras, blinks, dots) alive
+    guestSendInput();
+    updateEffects(dt);
+    render();
+    requestAnimationFrame(frame);
+    return;
+  }
+
   update(dt);
   render();
+
+  // HOST: after simulating, broadcast the snapshot + this frame's FX events.
+  if (gameMode === "online" && net.mode === "host") hostBroadcast();
+
   requestAnimationFrame(frame);
 }
 updateHint();   // sync the below-canvas hint strip to the default mode (1p)
