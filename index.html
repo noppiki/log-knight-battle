@@ -524,7 +524,7 @@ function spawnDust(x, y) {
 function spawnFloater(x, y, text, color) {
   floaters.push({ x, y, vy: -42, life: 0, maxLife: 0.85, text, color: color || PAL.bone, scale: 1 });
 }
-function addShake(amount) { shake = Math.min(18, shake + amount); }
+function addShake(amount) { shake = Math.min(10, shake + amount * 0.6); }
 
 function updateEffects(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
@@ -543,7 +543,7 @@ function updateEffects(dt) {
     f.vy *= (1 - 1.5 * dt);
   }
   if (shake > 0) {
-    shake -= 36 * dt;
+    shake -= 48 * dt;
     if (shake < 0) shake = 0;
   }
 }
@@ -2175,8 +2175,8 @@ function render() {
   // ----- WORLD (subject to screen shake) -----
   ctx.save();
   if (shake > 0) {
-    const sxk = (Math.random() * 2 - 1) * shake;
-    const syk = (Math.random() * 2 - 1) * shake;
+    const sxk = (Math.random() * 2 - 1) * shake * 0.7;
+    const syk = (Math.random() * 2 - 1) * shake * 0.7;
     ctx.translate(sxk, syk);
   }
 
