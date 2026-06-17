@@ -700,6 +700,19 @@ let audioInited = false;
 
 window.addEventListener("keydown", (e) => {
   const code = e.code;
+
+  // ----- M = mute toggle (global). Gated to skip when the JOIN room-code -----
+  // input is focused so typing M there doesn't both type AND toggle. The JOIN
+  // input also stopPropagation's its own keys, so this branch never even sees
+  // them — the e.target gate is belt-and-suspenders for any other focusable
+  // element added later.
+  if (code === "KeyM" && !e.repeat && e.target !== joinInputEl) {
+    if (!audioInited) initAudio();
+    toggleMuted();
+    e.preventDefault();
+    return;
+  }
+
   if (KEYS_PREVENT.has(e.key) || KEYS_PREVENT.has(code)) e.preventDefault();
 
   if (!audioInited) initAudio();
@@ -739,12 +752,39 @@ function consumeSpecial(who) {
 }
 
 // ----------------------------- AUDIO ---------------------------------
+// One AudioContext (`actx`) shared by SFX + BGM. Routing:
+//
+//   blip() → per-note env gain ─┐
+//                                ├→ sfxGain ──┐
+//   bgm.* drone + bell voices ─→ bgmGain ─────┼→ globalGain → destination
+//                                              │
+//   (globalGain is the SINGLE mute gate. Mute = ramp globalGain to 0; unmute
+//    = ramp back to GLOBAL_LEVEL. The two sub-buses keep their own balance.)
+//
+// `muted` is persisted under localStorage["lkb_muted"] = "1"|"0" and restored
+// on load. The actual node level is only applied once actx exists (first user
+// gesture); until then we just remember the flag.
 let actx = null;
+let globalGain = null;   // master mute gate (all audio passes through)
+let sfxGain = null;      // SFX sub-bus
+const GLOBAL_LEVEL = 0.85;
+let muted = (function () {
+  try { return localStorage.getItem("lkb_muted") === "1"; } catch (e) { return false; }
+})();
 function initAudio() {
   if (audioInited) return;
   audioInited = true;
   try {
     actx = new (window.AudioContext || window.webkitAudioContext)();
+    // Build the mute gate + SFX sub-bus immediately so blip() can attach.
+    globalGain = actx.createGain();
+    globalGain.gain.value = muted ? 0 : GLOBAL_LEVEL;
+    globalGain.connect(actx.destination);
+    sfxGain = actx.createGain();
+    sfxGain.gain.value = 1.0;          // SFX balance is unchanged; mute lives on globalGain
+    sfxGain.connect(globalGain);
+    // Kick off ambient BGM lazily on this same first-gesture entry point.
+    try { bgm.init(); bgm.start(); } catch (e) {}
   } catch (err) { actx = null; }
 }
 function blip(freq, dur, type, vol) {
@@ -759,10 +799,230 @@ function blip(freq, dur, type, vol) {
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(vol || 0.12, t + 0.005);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    osc.connect(g); g.connect(actx.destination);
+    // Route through sfxGain → globalGain so the global mute gate also catches SFX.
+    osc.connect(g); g.connect(sfxGain || actx.destination);
     osc.start(t); osc.stop(t + dur + 0.02);
   } catch (err) {}
 }
+
+// ===== PROCEDURAL NORDIC-MOOD BGM ======================================
+// Sparse atmospheric loop, all WebAudio, no asset files. Two voices:
+//   - DRONE: low sine (A1 ~55Hz) + sub sine (A2 ~110Hz) + a soft sawtooth
+//            doubling, lowpass-filtered (~600-900Hz) with a slow LFO on the
+//            cutoff + tiny detune wobble so it breathes rather than droning
+//            statically. Heavy attenuation; sits UNDER everything.
+//   - BELL: triangle voice playing a minor-pentatonic arpeggio (A C D E G)
+//            with rests, ~75 BPM, 4-6 notes per ~8s bar. Routed through a
+//            Schroeder-style feedback-delay "reverb" (delay + lowpass +
+//            feedback) so each note blooms and decays into the drone.
+//   - ACCENT: every 8-16s, a single softer high-octave bell for shimmer.
+// All voices sum into bgmGain → globalGain. Mute is handled by globalGain;
+// bgm.setMuted is kept for symmetry but the global gate is the source of truth.
+const bgm = (function () {
+  const BGM_LEVEL = 0.07;           // overall BGM master (under-mix target)
+  const BPM = 75;
+  const STEP_SEC = 60 / BPM / 2;    // eighth-note grid
+  const SCALE = [110.00, 130.81, 146.83, 164.81, 196.00]; // A2 C3 D3 E3 G3
+  // Sparse pattern: 1 = play a pentatonic note, 0 = rest. 32 steps ≈ 8s bar.
+  // Picked by hand to feel like dusk, not a melody. Index into SCALE is random
+  // per-trigger so it never settles into a repeating motif.
+  const PATTERN = [
+    1,0,0,0, 0,0,1,0, 0,0,0,0, 1,0,0,0,
+    0,0,0,1, 0,0,0,0, 1,0,0,0, 0,0,0,0,
+  ];
+  let bgmGain = null;
+  let droneGain = null;
+  let bellGain = null;
+  let droneNodes = null;            // {oscs:[], lfo, lfoGain, filter}
+  let reverbIn = null;              // feedback-delay reverb send (for bells)
+  let stepIdx = 0;
+  let stepTimer = null;
+  let accentTimer = null;
+  let started = false;
+  let visHandlerInstalled = false;
+
+  function init() {
+    if (!actx || bgmGain) return;
+    bgmGain = actx.createGain();
+    bgmGain.gain.value = 0.0001;    // start silent; fade in on start()
+    bgmGain.connect(globalGain);
+
+    // ---- DRONE -----------------------------------------------------------
+    droneGain = actx.createGain();
+    droneGain.gain.value = 0.6;
+    const filt = actx.createBiquadFilter();
+    filt.type = "lowpass";
+    filt.frequency.value = 700;
+    filt.Q.value = 0.7;
+    // Slow LFO on filter cutoff (~0.07 Hz) for breathing motion.
+    const lfo = actx.createOscillator();
+    lfo.frequency.value = 0.07;
+    const lfoGain = actx.createGain();
+    lfoGain.gain.value = 150;       // ±150 Hz around 700 Hz
+    lfo.connect(lfoGain).connect(filt.frequency);
+    lfo.start();
+
+    const oscs = [];
+    function voice(freq, type, vol, detune) {
+      const o = actx.createOscillator();
+      o.type = type;
+      o.frequency.value = freq;
+      if (detune) o.detune.value = detune;
+      const g = actx.createGain();
+      g.gain.value = vol;
+      o.connect(g).connect(filt);
+      o.start();
+      oscs.push(o);
+    }
+    voice(55.00, "sine",     1.00, 0);     // A1 fundamental
+    voice(55.00, "sawtooth", 0.18, -7);    // gentle saw, slight detune
+    voice(110.00,"sine",     0.45, +4);    // A2 sub doubling
+    filt.connect(droneGain).connect(bgmGain);
+    droneNodes = { oscs, lfo, lfoGain, filter: filt };
+
+    // ---- BELL + FEEDBACK-DELAY REVERB -----------------------------------
+    bellGain = actx.createGain();
+    bellGain.gain.value = 0.55;
+    bellGain.connect(bgmGain);
+    // Schroeder-style: input → delay → lowpass → feedback gain → back to delay,
+    // tap from delay → out. Cheap, but gives a wet halo around each bell.
+    reverbIn = actx.createGain();
+    reverbIn.gain.value = 1.0;
+    const delay = actx.createDelay(2.0);
+    delay.delayTime.value = 0.42;
+    const dampen = actx.createBiquadFilter();
+    dampen.type = "lowpass";
+    dampen.frequency.value = 1800;
+    const fb = actx.createGain();
+    fb.gain.value = 0.55;
+    const wet = actx.createGain();
+    wet.gain.value = 0.45;
+    reverbIn.connect(delay);
+    delay.connect(dampen);
+    dampen.connect(fb);
+    fb.connect(delay);              // feedback loop
+    dampen.connect(wet);
+    wet.connect(bellGain);
+  }
+
+  // One pentatonic bell hit at currentTime+offset. Short attack, long tail
+  // bloom in the reverb. Triangle voice keeps it soft.
+  function bell(freq, when, vol) {
+    if (!actx) return;
+    const o = actx.createOscillator();
+    o.type = "triangle";
+    o.frequency.value = freq;
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(vol, when + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + 1.6);
+    o.connect(g);
+    g.connect(bellGain);            // dry
+    g.connect(reverbIn);            // send → reverb
+    o.start(when);
+    o.stop(when + 1.7);
+  }
+
+  function tick() {
+    if (!actx || !bgmGain) return;
+    const hit = PATTERN[stepIdx % PATTERN.length];
+    stepIdx++;
+    if (hit) {
+      // pick a random pentatonic degree; bias to lower notes so it stays calm
+      const idx = Math.floor(Math.pow(Math.random(), 1.4) * SCALE.length);
+      const f = SCALE[Math.max(0, Math.min(SCALE.length - 1, idx))];
+      bell(f, actx.currentTime + 0.02, 0.18 + Math.random() * 0.06);
+    }
+  }
+
+  // Occasional high-octave shimmer (every 8-16s).
+  function scheduleAccent() {
+    if (accentTimer) clearTimeout(accentTimer);
+    const ms = 8000 + Math.random() * 8000;
+    accentTimer = setTimeout(function () {
+      if (started && actx) {
+        const idx = Math.floor(Math.random() * SCALE.length);
+        bell(SCALE[idx] * 2, actx.currentTime + 0.02, 0.10);
+      }
+      scheduleAccent();
+    }, ms);
+  }
+
+  function start() {
+    if (!actx || started) return;
+    init();
+    if (!bgmGain) return;
+    started = true;
+    const t = actx.currentTime;
+    bgmGain.gain.cancelScheduledValues(t);
+    bgmGain.gain.setValueAtTime(0.0001, t);
+    bgmGain.gain.exponentialRampToValueAtTime(BGM_LEVEL, t + 2.0);
+    if (stepTimer) clearInterval(stepTimer);
+    stepTimer = setInterval(tick, STEP_SEC * 1000);
+    scheduleAccent();
+
+    // Pause/resume on tab visibility. Browsers may freeze AudioContext clocks
+    // (and throttle/freeze setInterval) when hidden — if we naively kept the
+    // scheduler running, bell events would queue up against a frozen clock and
+    // either silently drop or burst back when the tab returns. So on hide we
+    // FULLY tear down the schedulers + ramp BGM gain to 0; on show we resume()
+    // the context, ramp back up, and restart the schedulers cleanly.
+    if (!visHandlerInstalled) {
+      visHandlerInstalled = true;
+      document.addEventListener("visibilitychange", function () {
+        if (!actx || !bgmGain) return;
+        if (document.hidden) {
+          if (!started) return;
+          const tnow = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(tnow);
+          bgmGain.gain.linearRampToValueAtTime(0.0001, tnow + 0.15);
+          if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+          if (accentTimer) { clearTimeout(accentTimer); accentTimer = null; }
+        } else {
+          // Tab is back. Resume the context (was likely suspended), ramp the
+          // BGM bus back to level, and restart the step + accent schedulers.
+          // If nothing was ever started, do nothing.
+          if (actx.state === "suspended") { try { actx.resume(); } catch (e) {} }
+          if (!started) return;
+          const tnow = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(tnow);
+          bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL, tnow + 0.4);
+          if (!stepTimer) stepTimer = setInterval(tick, STEP_SEC * 1000);
+          scheduleAccent();   // self-clears any prior pending timer
+        }
+      });
+    }
+  }
+
+  function stop() {
+    if (!actx || !bgmGain) { started = false; return; }
+    const t = actx.currentTime;
+    bgmGain.gain.cancelScheduledValues(t);
+    bgmGain.gain.linearRampToValueAtTime(0.0001, t + 0.3);
+    if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+    if (accentTimer) { clearTimeout(accentTimer); accentTimer = null; }
+    started = false;
+  }
+
+  // Kept for API symmetry — actual mute lives on globalGain so SFX also mute.
+  function setMuted(_m) { /* no-op: globalGain is the single source of truth */ }
+
+  return { init, start, stop, setMuted };
+})();
+
+// ===== GLOBAL MUTE TOGGLE ==============================================
+// Single source of truth: globalGain.gain. Persisted under localStorage
+// "lkb_muted" = "1"|"0". Ramped over 0.05s to avoid clicks.
+function setMuted(m) {
+  muted = !!m;
+  try { localStorage.setItem("lkb_muted", muted ? "1" : "0"); } catch (e) {}
+  if (actx && globalGain) {
+    const t = actx.currentTime;
+    globalGain.gain.cancelScheduledValues(t);
+    globalGain.gain.linearRampToValueAtTime(muted ? 0 : GLOBAL_LEVEL, t + 0.05);
+  }
+}
+function toggleMuted() { setMuted(!muted); }
 // --- raw SFX (actual audio). The public sfx* names play the sound AND, when
 // hosting online, record a {k:"sfx",id} event so the guest plays the same cue.
 // netRecordSfx is a no-op offline. (netRecord itself guards on host/online.)
@@ -2583,6 +2843,77 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
   ctx.textAlign = "left";
 }
 
+// ===== Mute indicator (procedural speaker icon) =========================
+// Drawn at (cx, cy) as its CENTER, scaled to the requested width `w` (≈18px).
+// Cone = a small filled trapezoid (drawn as two stacked rects + a triangle so
+// it stays purely procedural). Waves = two thin arcs to the right. When muted,
+// a red diagonal slash is overlaid. Used in the top-right of HUD/title/select.
+function drawAudioIcon(cx, cy, w) {
+  const scale = w / 20;        // base art is in a 20x20 box
+  const x = Math.round(cx - 10 * scale);
+  const y = Math.round(cy - 10 * scale);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+
+  // cone body: small inner rect + a left-side rect + a triangular flare
+  ctx.fillStyle = muted ? "#7d8294" : "#e8dcc0";
+  ctx.fillRect(2, 8, 3, 4);            // back nub
+  ctx.fillRect(5, 6, 2, 8);            // neck
+  // triangle flare
+  ctx.beginPath();
+  ctx.moveTo(7, 4);
+  ctx.lineTo(12, 1);
+  ctx.lineTo(12, 19);
+  ctx.lineTo(7, 16);
+  ctx.closePath();
+  ctx.fill();
+
+  if (!muted) {
+    // sound waves: two arcs of increasing radius
+    ctx.strokeStyle = "#e8dcc0";
+    ctx.lineWidth = 1.4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(13, 10, 3.0, -Math.PI / 3, Math.PI / 3);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(13, 10, 5.5, -Math.PI / 3.2, Math.PI / 3.2);
+    ctx.stroke();
+  } else {
+    // red diagonal slash with a darker shadow underneath
+    ctx.strokeStyle = "#1a0808";
+    ctx.lineWidth = 3.2;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(1, 1); ctx.lineTo(19, 19);
+    ctx.stroke();
+    ctx.strokeStyle = "#ff4a4a";
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.moveTo(1, 1); ctx.lineTo(19, 19);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Top-right placement for the mute icon, with a small "M" caption underneath.
+// Tucked into the corner so it doesn't collide with the balance meters
+// (which start at x=30 and end at x=VW-30) or the round timer (centered).
+function drawMuteIndicator() {
+  const w = 20;
+  const cx = VW - 22;
+  const cy = 22;
+  drawAudioIcon(cx, cy, w);
+  ctx.save();
+  ctx.font = '700 9px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = muted ? "#ff8080" : "#5a6a8a";
+  ctx.textAlign = "center";
+  ctx.fillText("M", cx, cy + 18);
+  ctx.restore();
+  ctx.textAlign = "left";
+}
+
 function drawHUD() {
   const palR = { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim };
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
@@ -3283,6 +3614,10 @@ function render() {
   else if (gameState === GS.ONLINE_HOST) drawOnlineConnect();
   else if (gameState === GS.ONLINE_JOIN) drawOnlineJoin();
   else if (gameState === GS.ONLINE_WAIT) drawOnlineWait();
+
+  // Mute indicator sits on top of every screen, top-right corner. Always
+  // visible so the user knows what state audio is in (and finds the M key).
+  drawMuteIndicator();
 }
 
 // ---------------------------- MAIN LOOP ------------------------------
