@@ -292,6 +292,19 @@ const SPECIALS = [
   { id: "anchor",  name: "踏ん張り",         en: "ANCHOR",        fx: "Plant for 3s: very hard to shove off the log." },
 ];
 
+// Stage variants: four Nordic-themed backgrounds randomized per match (not per
+// round, so all rounds of one match share the same scene). drawBackground reads
+// STAGES[currentStageIndex].imgKey out of IMG[]. The match-entry point
+// (startMatch) re-rolls currentStageIndex; the host's snapshot carries it so
+// the online guest sees the same stage.
+const STAGES = [
+  { id: "dusk",       imgKey: "bg",        name: "NORDIC DUSK" },
+  { id: "tundra",     imgKey: "bgTundra",  name: "FROZEN TUNDRA" },
+  { id: "goldenhour", imgKey: "bgGolden",  name: "GOLDEN HOUR" },
+  { id: "aurora",     imgKey: "bgAurora",  name: "AURORA NIGHT" },
+];
+let currentStageIndex = 0;   // index into STAGES; randomized per match in startMatch()
+
 // ----------------------------- NETPLAY (online 2-player) -------------
 // Host-authoritative relay netplay. The HOST runs the FULL simulation using its
 // local keyboard as p1 and the GUEST's relayed inputs as p2; each frame it sends
@@ -579,6 +592,9 @@ ctx.imageSmoothingEnabled = false;
 // mid-load image is simply skipped that frame (no throw, no half-drawn art).
 const ASSET_SRCS = {
   bg:           "assets/bg.jpg",
+  bgTundra:     "assets/bg_tundra.jpg",
+  bgGolden:     "assets/bg_goldenhour.jpg",
+  bgAurora:     "assets/bg_aurora.jpg",
   knightRed:    "assets/knight_red.png",
   knightBlue:   "assets/knight_blue.png",
   titleCrest:   "assets/title_crest.png",
@@ -1353,6 +1369,10 @@ function enterSelect() {
 // Start the match. Only fired from SELECT after both players lock in and the
 // READY beat elapses. Chosen specials are already stored on the knights.
 function startMatch() {
+  // Pick a random stage for this match (same stage across all rounds).
+  // Per-match (not per-round) so the scene feels intentional. Host re-rolls
+  // here; the snapshot carries currentStageIndex so the guest mirrors it.
+  currentStageIndex = Math.floor(Math.random() * STAGES.length);
   p1.rounds = 0; p2.rounds = 0;
   matchWinner = null;
   startCountdown();
@@ -2302,6 +2322,7 @@ function buildSnapshot() {
     // explicit; guest forces gameMode="online" anyway)
     shake,   // current shake is carried so the guest's world jitter tracks host;
              // FX shake EVENTS also fire, but updateEffects decays both consistently.
+    stage: currentStageIndex,   // host-rolled stage so the guest's drawBackground matches
   };
 }
 
@@ -2322,6 +2343,9 @@ function applySnapshot(s) {
   // shake: take the host's value as a floor so the guest's world jitter tracks the
   // host (its own updateEffects decays it between snapshots).
   shake = Math.max(shake, s.shake || 0);
+  // Mirror the host's chosen stage so the guest's background matches. Guarded
+  // against older snapshots that pre-date the field.
+  if (typeof s.stage === "number") currentStageIndex = s.stage;
 }
 
 // HOST: flush this frame's snapshot + recorded FX events to the guest.
@@ -2543,11 +2567,18 @@ const clouds = [
 ];
 
 function drawBackground() {
-  // The hand-painted 960x540 Nordic-dusk plate replaces the old procedural
-  // sky/sun/clouds/forest. Drawn full-frame; the procedural LOG (drawLog) is
-  // still painted ON TOP so the knights sit on it at the same coordinates.
-  // Guarded so a mid-load image never throws (falls back to the dusk fill).
-  if (imgReady(IMG.bg)) {
+  // Four hand-painted 960x540 Nordic plates (dusk / tundra / golden hour /
+  // aurora) — currentStageIndex is set once per match in startMatch().
+  // Drawn full-frame; the procedural LOG (drawLog) is still painted ON TOP so
+  // the knights sit on it at the same coordinates. Guarded so a mid-load image
+  // never throws: prefer the chosen stage, fall back to the original dusk
+  // plate if it happens to finish first, then to a flat dusk fill.
+  const stage = STAGES[currentStageIndex] || STAGES[0];
+  const img = IMG[stage.imgKey];
+  if (imgReady(img)) {
+    ctx.drawImage(img, 0, 0, VW, VH);
+  } else if (imgReady(IMG.bg)) {
+    // mid-load fallback: use whichever bg already finished decoding
     ctx.drawImage(IMG.bg, 0, 0, VW, VH);
   } else {
     ctx.fillStyle = PAL.skyTop;
@@ -3282,6 +3313,20 @@ function drawCountdown() {
   ctx.fillStyle = isFight ? PAL.skyAmber : PAL.bone;
   ctx.strokeText(label, 0, 0);
   ctx.fillText(label, 0, 0);
+
+  // Stage-name reveal: only on the first countdown step "3" so it pops once
+  // per round-start without distracting on 2/1/FIGHT. Still inside the existing
+  // translate+scale, so the name shares the pop animation with the number.
+  if (countdownIndex === 0) {
+    const stage = STAGES[currentStageIndex] || STAGES[0];
+    ctx.font = '800 24px "Trebuchet MS", sans-serif';
+    ctx.textAlign = "center";
+    ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(stage.name, 0, 130);
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillText(stage.name, 0, 130);
+  }
+
   ctx.restore();
   ctx.textAlign = "left";
 }
