@@ -51,7 +51,7 @@
   <div id="stage">
     <canvas id="game" width="960" height="540"></canvas>
   </div>
-  <div id="hint">P1: A/D scoot · W hop · S guard · TAP SPACE to swing the pan &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · TAP ENTER to swing</div>
+  <div id="hint">P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /</div>
 
 <script>
 "use strict";
@@ -187,7 +187,57 @@ const TUNE = {
 
   // fall
   fallGravity: 1500,
+
+  // ===== SPECIAL-MOVE SYSTEM =====
+  // SP gauge (0..100). Fills through combat so a full charge takes ~8-14s of
+  // active play. Derivation: a clean hit costs ~10 of the 100 life bar and the
+  // post-hit lockout is hitCooldown(0.22s), so realistic ACTIVE trading lands
+  // roughly ~1 hit/sec/player (not every swing connects — many miss, clash, or
+  // are guarded). With gainLand+gainTake+passive below, ~1 land/s + ~0.7 take/s
+  // gives ~7 + 0.7*3 + 2.5 = ~11.6 SP/s => full in ~8.6s of a live exchange.
+  // A pure stalemate (no hits) still fills via passive 2.5/s => ~40s, so it is
+  // reachable but combat is by far the dominant source.
+  spGainLand:    7,      // SP gained when YOU land a hit
+  spGainTake:    3,      // SP gained when you TAKE a hit (smaller)
+  spGainGuard:   2,      // SP gained when you block a hit while guarding
+  spPassive:     2.5,    // SP/sec passive trickle while PLAYING (stalemate charge)
+  spMax:         100,    // full gauge => special AVAILABLE
+  spClashGain:   3,      // SP each on a mutual clash
+
+  // (a) MEGA SMASH — telegraphed wind-up then one huge auto-swing.
+  megaWindup:    0.35,   // s of vulnerable cock-back before the swing fires
+  megaSwingVel:  13.0,   // forward swingVel set when it unleashes (huge)
+  megaMul:       2.6,    // knock & balance multiplier applied AFTER forceCap
+                         // (sanctioned anti-one-shot exception for this high-risk move)
+
+  // (b) COUNTER STANCE — brief parry window that reflects an incoming hit.
+  counterWindow: 0.70,   // s the counter is active
+  counterKnock:  240,    // seat knockback dealt to a punished attacker
+  counterBal:    26,     // balance damage dealt to a punished attacker
+  counterReact:  6.0,    // swingVel kick that rocks the punished attacker back
+
+  // (c) DASH TACKLE — fast committed seat dash; body-shove on overlap.
+  dashTime:      0.30,   // s of the dash
+  dashVx:        520,    // dash speed toward the foe (well beyond maxSpeed 260)
+  dashKnock:     300,    // seat knockback of the body shove
+  dashBal:       22,     // balance damage of the body shove
+
+  // (d) ANCHOR — temporary knockback resistance / anti-ring-out.
+  anchorTime:    3.0,    // s of the planted stance
+  anchorKnockMul: 0.25,  // incoming seat-knock multiplier while anchored
+  anchorBalMul:   0.50,  // incoming balance-loss multiplier while anchored
+
+  // select-screen
+  readyDelay:    0.9,    // s the "READY" stamp shows before the match starts
 };
+
+// The four selectable specials (id, display name, one-line effect).
+const SPECIALS = [
+  { id: "mega",    name: "大振りスマッシュ", en: "MEGA SMASH",    fx: "Telegraphed wind-up, then ONE huge ring-out swing." },
+  { id: "counter", name: "カウンター構え",   en: "COUNTER STANCE", fx: "Brace; negate & punish a hit during the window." },
+  { id: "dash",    name: "突進タックル",     en: "DASH TACKLE",   fx: "Commit a fast dash; body-shove on contact. Risky." },
+  { id: "anchor",  name: "踏ん張り",         en: "ANCHOR",        fx: "Plant for 3s: very hard to shove off the log." },
+];
 
 // ----------------------------- CANVAS --------------------------------
 const canvas = document.getElementById("game");
@@ -213,9 +263,13 @@ resize();
 const held = new Set();
 // attackArmed: true means a fresh press is available to consume.
 const attackArmed = { p1: false, p2: false };
+// specialArmed: same edge-trigger pattern for the dedicated special keys.
+const specialArmed = { p1: false, p2: false };
 
 const KEYS_PREVENT = new Set([
   "ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Space","Enter",
+  // special keys: KeyF for P1, Slash ("/") for P2 (Slash is browser quick-find).
+  "KeyF","Slash","/",
 ]);
 
 let audioInited = false;
@@ -235,6 +289,10 @@ window.addEventListener("keydown", (e) => {
   if (code === "Space") attackArmed.p1 = true;
   if (code === "Enter") attackArmed.p2 = true;
 
+  // Edge-trigger specials (dedicated keys, one press = one activation).
+  if (code === "KeyF")  specialArmed.p1 = true;
+  if (code === "Slash") specialArmed.p2 = true;
+
   // Global hotkeys handled by state machine
   handleGlobalKey(code);
 });
@@ -249,6 +307,10 @@ window.addEventListener("blur", () => { held.clear(); });
 
 function consumeAttack(who) {
   if (attackArmed[who]) { attackArmed[who] = false; return true; }
+  return false;
+}
+function consumeSpecial(who) {
+  if (specialArmed[who]) { specialArmed[who] = false; return true; }
   return false;
 }
 
@@ -284,6 +346,15 @@ function sfxJump()  { blip(330, 0.10, "sine", 0.05); }
 function sfxFall()  { blip(120, 0.4, "sawtooth", 0.08); }
 function sfxCount() { blip(660, 0.08, "square", 0.07); }
 function sfxFight() { blip(523, 0.10, "square", 0.10); blip(784, 0.16, "square", 0.08); }
+// --- special-move SFX ---
+function sfxSpReady() { blip(880, 0.07, "square", 0.06); blip(1175, 0.10, "triangle", 0.05); }
+function sfxSpFail()  { blip(180, 0.06, "square", 0.04); }
+function sfxMega()    { blip(70, 0.30, "sawtooth", 0.12); blip(160, 0.22, "square", 0.09); }
+function sfxCounter() { blip(1320, 0.08, "square", 0.10); blip(1760, 0.12, "triangle", 0.07); }
+function sfxDash()    { blip(110, 0.18, "sawtooth", 0.09); blip(300, 0.10, "square", 0.06); }
+function sfxAnchor()  { blip(200, 0.22, "sine", 0.08); blip(110, 0.26, "triangle", 0.06); }
+function sfxSelect()  { blip(523, 0.05, "square", 0.05); }
+function sfxLock()    { blip(659, 0.08, "square", 0.07); blip(988, 0.10, "triangle", 0.05); }
 
 // ----------------------------- LOG GEOMETRY --------------------------
 const logW = VW * TUNE.logWidthFrac;
@@ -322,6 +393,19 @@ function makeKnight(side) {
     bob: Math.random() * Math.PI * 2,
     landDust: 0,
     rounds: 0,
+    // ===== SPECIAL-MOVE SYSTEM =====
+    chosenSpecial: null,   // "mega"|"counter"|"dash"|"anchor"; chosen ONCE per match
+                           // on the SELECT screen. NOT reset between rounds.
+    special: 0,            // SP gauge 0..spMax; resets to 0 each round, refills
+    spReadyPulse: 0,       // visual pulse when the gauge first hits full
+    // transient special states/timers (all reset on round start)
+    windupTimer: 0,        // MEGA SMASH cock-back countdown (vulnerable)
+    megaPending: false,    // MEGA SMASH: next pan contact is super-charged
+    counterTimer: 0,       // COUNTER STANCE active window
+    counterFlash: 0,       // visual flash after a successful counter
+    dashTimer: 0,          // DASH TACKLE active window
+    dashHit: false,        // DASH TACKLE: already shoved this dash (one shove)
+    anchorTimer: 0,        // ANCHOR active window
   };
 }
 
@@ -338,8 +422,25 @@ function resetKnightPositions() {
     k.swingAngle = 0; k.swingVel = 0;
     k.tapCdTimer = 0; k.hitCdTimer = 0; k.knockTimer = 0; k.attackFlash = 0;
     k.fellAtFrame = -1; k.landDust = 0;
+    // SP gauge + all transient special states reset each round.
+    // chosenSpecial is DELIBERATELY left intact (picked once per match).
+    k.special = 0; k.spReadyPulse = 0;
+    k.windupTimer = 0; k.megaPending = false;
+    k.counterTimer = 0; k.counterFlash = 0;
+    k.dashTimer = 0; k.dashHit = false;
+    k.anchorTimer = 0;
   }
   p1.facing = 1; p2.facing = -1;
+}
+
+// FULL clean reset of a single knight to a stationary idle pose. Builds on the
+// per-round reset (resetKnightPositions handles x/y/facing + all round-scoped
+// bits as the single source of truth) and additionally clears the visual
+// tumble angle. Used by enterSelect so no residual motion/state leaks into the
+// SELECT screen or the next match. NOTE: chosenSpecial is intentionally NOT
+// touched here — enterSelect clears it separately (kept across rounds).
+function fullResetKnight(k) {
+  k.tumble = 0;
 }
 
 // ----------------------------- EFFECTS -------------------------------
@@ -405,8 +506,15 @@ function updateEffects(dt) {
 }
 
 // ----------------------------- GAME STATE ----------------------------
-const GS = { MENU: "menu", COUNTDOWN: "countdown", PLAYING: "playing", ROUND_OVER: "roundover", MATCH_OVER: "matchover" };
+const GS = { MENU: "menu", SELECT: "select", COUNTDOWN: "countdown", PLAYING: "playing", ROUND_OVER: "roundover", MATCH_OVER: "matchover" };
 let gameState = GS.MENU;
+
+// ----- SELECT screen state -----
+const sel = {
+  p1: { cursor: 0, locked: false },
+  p2: { cursor: 1, locked: false },
+  readyTimer: 0,   // >0 once both locked: the "READY" beat before the match
+};
 
 let countdownTimer = 0;
 let countdownIndex = 0;         // 0..3 -> "3","2","1","FIGHT!"
@@ -427,6 +535,31 @@ function triggerHitStop(sec) {
 
 const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
 
+// Enter the SELECT screen: reset cursors/locks/ready beat and the chosen
+// specials. This is the single entry point for title-Enter, R (any state),
+// MATCH_OVER-Enter, and the restart button — so players always re-pick.
+function enterSelect() {
+  sel.p1.cursor = 0; sel.p1.locked = false;
+  sel.p2.cursor = 1; sel.p2.locked = false;
+  sel.readyTimer = 0;
+  // FULL clean reset: positions + all round-scoped physics/combat/special state
+  // (resetKnightPositions is the single source of truth for that), then clear
+  // the visual tumble so no faller/dasher/winder-upper from the previous match
+  // keeps sliding/tumbling on the SELECT background.
+  resetKnightPositions();
+  fullResetKnight(p1); fullResetKnight(p2);
+  // Clear edge-trigger input arms and any keys still physically held so they
+  // can't leak a press/movement into the next match.
+  attackArmed.p1 = attackArmed.p2 = false;
+  specialArmed.p1 = specialArmed.p2 = false;
+  held.clear();
+  // chosenSpecial is kept across rounds within a match, but re-picked here.
+  p1.chosenSpecial = null; p2.chosenSpecial = null;
+  gameState = GS.SELECT;
+}
+
+// Start the match. Only fired from SELECT after both players lock in and the
+// READY beat elapses. Chosen specials are already stored on the knights.
 function startMatch() {
   p1.rounds = 0; p2.rounds = 0;
   matchWinner = null;
@@ -500,11 +633,45 @@ function tryKnockout(k) {
 }
 
 function handleGlobalKey(code) {
-  if (code === "KeyR") { startMatch(); return; }   // full restart from any state
+  // R = full restart from ANY state. Routes through enterSelect() so all
+  // transient special timers / knockback flags are cleared and players re-pick.
+  if (code === "KeyR") { enterSelect(); return; }
   if (gameState === GS.MENU) {
-    if (code === "Enter" || code === "Space") startMatch();
+    if (code === "Enter" || code === "Space") enterSelect();
+  } else if (gameState === GS.SELECT) {
+    handleSelectKey(code);
   } else if (gameState === GS.MATCH_OVER) {
-    if (code === "Enter") startMatch();
+    if (code === "Enter") enterSelect();
+  }
+}
+
+// SELECT navigation. Called from the keydown listener AFTER e.repeat is filtered
+// (one genuine press = one move), so we don't poll the held-set here.
+//   P1: KeyA/KeyD move, Space lock, KeyS un-lock.
+//   P2: ArrowLeft/Right move, Enter lock, ArrowDown un-lock.
+function handleSelectKey(code) {
+  if (sel.readyTimer > 0) return;   // both locked: input frozen during READY beat
+  const N = SPECIALS.length;
+  // ---- P1 ----
+  if (!sel.p1.locked) {
+    if (code === "KeyA") { sel.p1.cursor = (sel.p1.cursor + N - 1) % N; sfxSelect(); }
+    else if (code === "KeyD") { sel.p1.cursor = (sel.p1.cursor + 1) % N; sfxSelect(); }
+    else if (code === "Space") { sel.p1.locked = true; p1.chosenSpecial = SPECIALS[sel.p1.cursor].id; sfxLock(); }
+  } else if (code === "KeyS") {
+    sel.p1.locked = false; p1.chosenSpecial = null; sfxSelect();
+  }
+  // ---- P2 ----
+  if (!sel.p2.locked) {
+    if (code === "ArrowLeft") { sel.p2.cursor = (sel.p2.cursor + N - 1) % N; sfxSelect(); }
+    else if (code === "ArrowRight") { sel.p2.cursor = (sel.p2.cursor + 1) % N; sfxSelect(); }
+    else if (code === "Enter") { sel.p2.locked = true; p2.chosenSpecial = SPECIALS[sel.p2.cursor].id; sfxLock(); }
+  } else if (code === "ArrowDown") {
+    sel.p2.locked = false; p2.chosenSpecial = null; sfxSelect();
+  }
+  // both locked => start the READY beat
+  if (sel.p1.locked && sel.p2.locked && sel.readyTimer === 0) {
+    sel.readyTimer = TUNE.readyDelay;
+    sfxFight();
   }
 }
 
@@ -575,7 +742,10 @@ function updateKnight(k, dt, input) {
   // clamp player-driven speed only. While knockback is in flight (knockTimer>0)
   // the seat impulse may far exceed maxSpeed — that's exactly the shove that
   // pushes a knight off the log — so leave it uncapped and let friction decay it.
-  if (k.knockTimer === 0) {
+  // A DASH TACKLE (dashTimer>0) is likewise an intentional over-speed commit, so
+  // it is exempt from the clamp too (this is what lets it self-ring-out on a whiff
+  // via the existing off-log check below).
+  if (k.knockTimer === 0 && k.dashTimer === 0) {
     if (k.vx >  TUNE.maxSpeed) k.vx =  TUNE.maxSpeed;
     if (k.vx < -TUNE.maxSpeed) k.vx = -TUNE.maxSpeed;
   }
@@ -654,6 +824,147 @@ function updateKnight(k, dt, input) {
   }
 }
 
+// ----------------------------- SPECIAL MOVES -------------------------
+// True while any special's transient state is active (used to block a second
+// activation — one charge at a time).
+function specialActive(k) {
+  return k.windupTimer > 0 || k.megaPending || k.counterTimer > 0 ||
+         k.dashTimer > 0 || k.anchorTimer > 0;
+}
+
+// Add SP, clamping to spMax. Fires a one-shot "ready" pulse + chime the frame
+// the gauge first reaches full (and only when a special is chosen & none active).
+function gainSp(k, amt) {
+  if (amt <= 0) return;
+  const was = k.special;
+  k.special = Math.min(TUNE.spMax, k.special + amt);
+  if (was < TUNE.spMax && k.special >= TUNE.spMax && k.chosenSpecial && !specialActive(k)) {
+    k.spReadyPulse = 0.6;
+    sfxSpReady();
+  }
+}
+
+// Try to activate a knight's CHOSEN special. Spends the FULL gauge. Does nothing
+// (tiny "not ready" blip) if the gauge isn't full, no special is chosen, the
+// knight is falling, or a special is already in flight (no double-fire).
+function activateSpecial(k) {
+  if (k.state === ST.FALLING) return;
+  if (!k.chosenSpecial) return;
+  if (specialActive(k)) return;            // one charge at a time
+  if (k.special < TUNE.spMax) { sfxSpFail(); return; }   // not ready
+
+  k.special = 0;   // spend the full meter
+  switch (k.chosenSpecial) {
+    case "mega":
+      // telegraphed wind-up; the big swing auto-fires when windupTimer elapses.
+      k.windupTimer = TUNE.megaWindup;
+      k.swingVel = Math.min(k.swingVel, -1.0); // visibly cock BACK during wind-up
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "CHARGE!", PAL.spark);
+      sfxAnchor();
+      break;
+    case "counter":
+      k.counterTimer = TUNE.counterWindow;
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "KAMAE!", k.side === "p1" ? PAL.redLight : PAL.bluLight);
+      sfxCounter();
+      break;
+    case "dash":
+      k.dashTimer = TUNE.dashTime;
+      k.dashHit = false;
+      k.vx = k.facing * TUNE.dashVx;        // commit a fast seat dash toward foe
+      k.knockTimer = Math.max(k.knockTimer, TUNE.dashTime); // skip maxSpeed clamp
+      spawnDust(k.x, logTopY);
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "TACKLE!", k.side === "p1" ? PAL.redLight : PAL.bluLight);
+      sfxDash();
+      break;
+    case "anchor":
+      k.anchorTimer = TUNE.anchorTime;
+      spawnDust(k.x, logTopY);
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "FUNBARI!", PAL.steel);
+      sfxAnchor();
+      break;
+  }
+}
+
+// Per-frame upkeep of active special states. Run in PLAYING after updateKnight.
+function tickSpecial(k, dt) {
+  if (k.spReadyPulse > 0) k.spReadyPulse = Math.max(0, k.spReadyPulse - dt);
+  if (k.counterFlash > 0) k.counterFlash = Math.max(0, k.counterFlash - dt);
+
+  // MEGA SMASH wind-up: when it elapses, auto-unleash one huge forward swing.
+  if (k.windupTimer > 0) {
+    k.windupTimer = Math.max(0, k.windupTimer - dt);
+    if (k.windupTimer === 0 && k.state !== ST.FALLING) {
+      k.swingVel = TUNE.megaSwingVel;       // huge forward velocity
+      k.megaPending = true;                 // next contact is super-charged
+      k.attackFlash = 0.16;
+      sfxMega();
+    }
+  }
+  if (k.counterTimer > 0) k.counterTimer = Math.max(0, k.counterTimer - dt);
+  if (k.dashTimer  > 0) k.dashTimer  = Math.max(0, k.dashTimer  - dt);
+  if (k.anchorTimer > 0) k.anchorTimer = Math.max(0, k.anchorTimer - dt);
+  // megaPending lingers until the swing actually lands (consumed in applyHit),
+  // but if the swing decays below the hit threshold it would never connect; let
+  // it clear once the pan is no longer moving forward hard, so it can't stick.
+  if (k.megaPending && k.windupTimer === 0 && k.swingVel < TUNE.hitSpeed) {
+    k.megaPending = false;
+  }
+}
+
+// DASH TACKLE body-shove: while either knight is dashing, a body-to-body overlap
+// delivers a big shove (routed like applyHit so tryKnockout can KO same-frame).
+function resolveDashTackles(dt) {
+  for (const [att, tgt] of [[p1, p2], [p2, p1]]) {
+    if (att.dashTimer <= 0 || att.dashHit) continue;
+    if (att.state === ST.FALLING || tgt.state === ST.FALLING) continue;
+    const ba = bodyBox(att), bt = bodyBox(tgt);
+    const overlap = !(ba.x2 < bt.x1 || ba.x1 > bt.x2 || ba.y2 < bt.y1 || ba.y1 > bt.y2);
+    if (!overlap) continue;
+    att.dashHit = true;
+    applyBodyShove(att, tgt);
+  }
+}
+
+// A body shove (DASH TACKLE / COUNTER reflect): direct knockback + balance with
+// the same anchor/guard/edge rules as applyHit, then SP gain + FX.
+function applyBodyShove(attacker, target, knockBase, balBase, label, color) {
+  knockBase = knockBase != null ? knockBase : TUNE.dashKnock;
+  balBase   = balBase   != null ? balBase   : TUNE.dashBal;
+  const guarding = target.state === ST.GUARD;
+  let knock = knockBase, balLoss = balBase;
+
+  // low-balance target shoved further (same comeback lever as applyHit)
+  const balFrac = target.balance / TUNE.balanceMax;
+  knock *= 1 + (TUNE.lowBalKnockMul - 1) * (1 - balFrac);
+  if (guarding) { knock *= TUNE.guardMul; balLoss *= TUNE.guardMul; }
+
+  // edge danger amplifier (knockback only)
+  const tEdgeN = Math.min(1, Math.abs(target.x - logCenter) / (logW / 2));
+  if (tEdgeN > TUNE.edgeKnockZone) {
+    const e = (tEdgeN - TUNE.edgeKnockZone) / (1 - TUNE.edgeKnockZone);
+    knock *= 1 + (TUNE.edgeKnockMul - 1) * Math.min(1, Math.max(0, e));
+  }
+
+  // ANCHOR resistance on the target
+  if (target.anchorTimer > 0) { knock *= TUNE.anchorKnockMul; balLoss *= TUNE.anchorBalMul; }
+
+  const dir = (target.x >= attacker.x) ? 1 : -1;
+  target.vx += knock * dir;
+  target.knockTimer = 0.30;
+  target.balance = Math.max(0, target.balance - balLoss);
+
+  // SP gain for both sides
+  attacker.special = Math.min(TUNE.spMax, attacker.special + TUNE.spGainLand);
+  target.special   = Math.min(TUNE.spMax, target.special   + TUNE.spGainTake);
+
+  const cx = (attacker.x + target.x) / 2, cy = target.y - TUNE.knightH * 0.5;
+  spawnSparks(cx, cy, 22, color || PAL.spark);
+  spawnFloater(cx, cy - 16, label || (Math.random() < 0.5 ? "DOSUN!" : "SHOVE!"),
+               color || (attacker.side === "p1" ? PAL.redLight : PAL.bluLight));
+  addShake(12);
+  triggerHitStop(TUNE.hitStopMax);
+}
+
 // World-space frying-pan TIP, computed from the seat pivot + swingAngle so it
 // tracks the rigidly-rotated upper body EXACTLY as drawn. Render order is:
 //   translate(k.x,k.y) · scale(f,1) · rotate(swingAngle)   [pivot = seat]
@@ -700,13 +1011,24 @@ function resolveCombat(dt) {
   const tipA = panTip(p1), tipB = panTip(p2);
   const boxA = bodyBox(p1), boxB = bodyBox(p2);
 
+  // === INTENTIONAL "流れパン" (momentum-pan), by user decision 2026-06-17 ===
+  // A knight "bites" whenever its pan tip is moving toward the foe fast enough
+  // (swingVel > hitSpeed) and overlaps the foe — INCLUDING swings caused purely
+  // by recoil / spring oscillation, with NO fresh tap required. This is a
+  // DELIBERATE design choice and MUST NOT be restricted to tap-initiated swings.
+  // Do not "fix" this by gating on attackFlash / a recent tap — it is by design.
+  //
   // A guarding knight can NEVER deal damage: its stiff brace-spring can fling
   // the raised pan forward fast enough to clear hitSpeed, but guard must be
   // purely defensive. Exclude GUARD (and FALLING) from being a live attacker.
+  // A COUNTER-stance knight is purely DEFENSIVE: even if residual swingVel makes
+  // its pan "live", it must NOT count as an attacker. Otherwise a same-frame
+  // mutual collision would hit the CLASH branch and CLANG before applyHit() can
+  // run the counter short-circuit (negate + reflect). Exclude counterTimer > 0.
   const aLive = p1.hitCdTimer === 0 && p1.swingVel > TUNE.hitSpeed &&
-                p1.state !== ST.FALLING && p1.state !== ST.GUARD;
+                p1.state !== ST.FALLING && p1.state !== ST.GUARD && p1.counterTimer === 0;
   const bLive = p2.hitCdTimer === 0 && p2.swingVel > TUNE.hitSpeed &&
-                p2.state !== ST.FALLING && p2.state !== ST.GUARD;
+                p2.state !== ST.FALLING && p2.state !== ST.GUARD && p2.counterTimer === 0;
 
   const aReach = aLive && circleHitsBox(tipA.x, tipA.y, TUNE.panTipR, boxB) && p2.state !== ST.FALLING;
   const bReach = bLive && circleHitsBox(tipB.x, tipB.y, TUNE.panTipR, boxA) && p1.state !== ST.FALLING;
@@ -721,6 +1043,7 @@ function resolveCombat(dt) {
     p1.vx += TUNE.clashPush * dirP1;  p1.knockTimer = 0.20;
     p2.vx += TUNE.clashPush * -dirP1; p2.knockTimer = 0.20;
     p1.hitCdTimer = TUNE.hitCooldown; p2.hitCdTimer = TUNE.hitCooldown;
+    gainSp(p1, TUNE.spClashGain); gainSp(p2, TUNE.spClashGain);
     const cx = (tipA.x + tipB.x) / 2, cy = (tipA.y + tipB.y) / 2;
     spawnSparks(cx, cy, 24, PAL.clash);
     spawnFloater(cx, cy - 18, "CLANG!", PAL.clash);
@@ -738,6 +1061,33 @@ function bodyBoxAround(cx, cy, r) {
 }
 
 function applyHit(attacker, target, tip) {
+  // ===== COUNTER STANCE: target is bracing — NEGATE this hit and PUNISH =====
+  // If the would-be victim is in their counter window, the incoming hit deals
+  // NOTHING to them; instead the attacker eats a big reflected shove + balance.
+  // The attacker's swing energy is consumed and they get the one-hit lockout so
+  // the negated swing can't immediately re-bite.
+  if (target.counterTimer > 0 && target.state !== ST.FALLING) {
+    target.counterTimer = 0;
+    target.counterFlash = 0.4;
+    const dir = (attacker.x >= target.x) ? 1 : -1;   // shove attacker away from target
+    attacker.vx += TUNE.counterKnock * dir;
+    attacker.knockTimer = 0.30;
+    attacker.balance = Math.max(0, attacker.balance - TUNE.counterBal);
+    attacker.swingVel = -Math.abs(attacker.swingVel) - TUNE.counterReact; // rocked back
+    attacker.swingVel = Math.max(attacker.swingVel, -TUNE.swingMax * 6);
+    attacker.hitCdTimer = TUNE.hitCooldown;
+    attacker.megaPending = false;     // a countered mega is spent, not retained
+    // SP: countering knight rewarded as if landing; attacker as if taking.
+    gainSp(target, TUNE.spGainLand); gainSp(attacker, TUNE.spGainTake);
+    spawnSparks(tip.x, tip.y, 24, PAL.clash);
+    spawnFloater(target.x, target.y - TUNE.knightH - 6, "COUNTER!",
+                 target.side === "p1" ? PAL.redLight : PAL.bluLight);
+    addShake(12);
+    triggerHitStop(TUNE.hitStopMax);
+    sfxCounter();
+    return;
+  }
+
   const guarding = target.state === ST.GUARD;
 
   // force scales with pan-tip approach speed (swingVel), capped to avoid one-shots
@@ -746,12 +1096,28 @@ function applyHit(attacker, target, tip) {
   let balLoss = TUNE.balHitScale * speed;
   let react = TUNE.reaction * speed;
 
+  // MEGA SMASH: this is the sanctioned anti-one-shot EXCEPTION. The giant
+  // swingVel is still capped by forceCap above (so normal math holds), then we
+  // multiply knock & balance AFTER the cap for the 2-3x payoff. Consumed here.
+  const mega = attacker.megaPending;
+  if (mega) {
+    knock *= TUNE.megaMul;
+    balLoss *= TUNE.megaMul;
+    attacker.megaPending = false;
+  }
+
   // low-balance target gets shoved further (danger / comeback lever)
   const balFrac = target.balance / TUNE.balanceMax;            // 1 full .. 0 empty
   const lowMul = 1 + (TUNE.lowBalKnockMul - 1) * (1 - balFrac);
   knock *= lowMul;
 
   if (guarding) { knock *= TUNE.guardMul; balLoss *= TUNE.guardMul; react *= TUNE.guardMul; }
+
+  // ANCHOR: target is planted — greatly reduce incoming seat-knock + balance loss.
+  if (target.anchorTimer > 0) {
+    knock *= TUNE.anchorKnockMul;
+    balLoss *= TUNE.anchorBalMul;
+  }
 
   // EDGE = DANGER: a target near the rim is amplified-shoved (knockback ONLY,
   // never life — that keeps the ~10-hit depletion math honest). Scales toward
@@ -774,22 +1140,28 @@ function applyHit(attacker, target, tip) {
   attacker.swingVel *= TUNE.swingConsume;
   attacker.hitCdTimer = TUNE.hitCooldown;
 
-  // effects (size scales with force)
+  // SP gain: lander gets more, taker gets a smaller amount; guard chips a little.
+  gainSp(attacker, TUNE.spGainLand);
+  gainSp(target, guarding ? TUNE.spGainGuard : TUNE.spGainTake);
+
+  // effects (size scales with force; MEGA gets a bespoke onomatopoeia + extra FX)
   const heavy = speed > TUNE.hitSpeed + 2.5;
   const cx = tip.x, cy = tip.y;
-  spawnSparks(cx, cy, guarding ? 10 : (heavy ? 22 : 15), guarding ? PAL.steel : PAL.spark);
+  spawnSparks(cx, cy, guarding ? 10 : (mega ? 32 : (heavy ? 22 : 15)),
+              guarding ? PAL.steel : (mega ? PAL.clash : PAL.spark));
   let words;
-  if (guarding) words = ["CLANG!", "GUARD!"];
+  if (mega) words = ["GWAAAN!", "SMASH!"];
+  else if (guarding) words = ["CLANG!", "GUARD!"];
   else if (heavy) words = ["POW!", "THWACK!", "WHAM!"];
   else words = ["BONK!", "DOINK!", "WHACK!"];
   spawnFloater(cx, cy - 16, words[Math.floor(Math.random() * words.length)],
                guarding ? PAL.steel : (attacker.side === "p1" ? PAL.redLight : PAL.bluLight));
-  addShake(guarding ? 4 : (heavy ? 12 : 8));
-  // hit-stop scaled to force
+  addShake(guarding ? 4 : (mega ? 18 : (heavy ? 12 : 8)));
+  // hit-stop scaled to force (MEGA always max)
   const hs = TUNE.hitStopMin + (TUNE.hitStopMax - TUNE.hitStopMin) *
              Math.min(1, (speed - TUNE.hitSpeed) / (TUNE.forceCap - TUNE.hitSpeed));
-  if (!guarding) triggerHitStop(hs);
-  sfxHit();
+  if (!guarding) triggerHitStop(mega ? TUNE.hitStopMax : hs);
+  if (mega) sfxMega(); else sfxHit();
 }
 
 // After physics, check whether a falling knight has dropped off-screen
@@ -826,6 +1198,8 @@ function readInputs() {
     jump: held.has("ArrowUp"), guard: held.has("ArrowDown"),
     attack: consumeAttack("p2"),
   };
+  i1.special = consumeSpecial("p1");
+  i2.special = consumeSpecial("p2");
   return [i1, i2];
 }
 
@@ -842,6 +1216,21 @@ function update(dt) {
   }
 
   updateEffects(dt);
+
+  if (gameState === GS.SELECT) {
+    // drain any stray attack/special arms so they don't leak into the match
+    consumeAttack("p1"); consumeAttack("p2");
+    consumeSpecial("p1"); consumeSpecial("p2");
+    // idle knights settle gently (no inputs)
+    const noInput = { left:false,right:false,jump:false,guard:false,attack:false };
+    updateKnight(p1, dt, noInput);
+    updateKnight(p2, dt, noInput);
+    if (sel.readyTimer > 0) {
+      sel.readyTimer -= dt;
+      if (sel.readyTimer <= 0) { sel.readyTimer = 0; startMatch(); }
+    }
+    return;
+  }
 
   if (gameState === GS.COUNTDOWN) {
     // keep attack flags from leaking into the fight
@@ -866,9 +1255,18 @@ function update(dt) {
 
   if (gameState === GS.PLAYING) {
     const [i1, i2] = readInputs();
+    // special activation (edge-triggered) BEFORE physics so a fired MEGA/dash
+    // takes effect this frame.
+    if (i1.special) activateSpecial(p1);
+    if (i2.special) activateSpecial(p2);
     updateKnight(p1, dt, i1);
     updateKnight(p2, dt, i2);
+    tickSpecial(p1, dt); tickSpecial(p2, dt);
+    // passive SP trickle so stalemates still charge (only while neither falling)
+    if (p1.state !== ST.FALLING) gainSp(p1, TUNE.spPassive * dt);
+    if (p2.state !== ST.FALLING) gainSp(p2, TUNE.spPassive * dt);
     resolveCombat(dt);
+    resolveDashTackles(dt);            // body-to-body shoves during a dash
     tryKnockout(p1); tryKnockout(p2);  // lethal hit => FALLING this frame, before timer/resolution
     checkRoundResolution();      // a fall (once off-screen) flips state to ROUND_OVER
     // Round clock: ticks ONLY while still PLAYING and NEITHER knight is mid-fall.
@@ -1078,6 +1476,32 @@ function drawKnight(k) {
   const pal = (k.side === "p1")
     ? { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim }
     : { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
+
+  // ===== SPECIAL aura (drawn in world space, BEFORE the body transform) =====
+  // Subtle glow when SP is full & ready, or while a special state is active.
+  // Color cues the moment: amber=ready, white=mega windup, cyan=counter,
+  // team=dash, steel=anchor. Kept low-alpha so it never fights the pixel art.
+  const spFull = k.special >= TUNE.spMax && k.chosenSpecial;
+  let auraCol = null, auraA = 0;
+  if (k.windupTimer > 0)      { auraCol = PAL.clash;  auraA = 0.30 + 0.2 * Math.sin(frameCount * 0.6); }
+  else if (k.counterTimer > 0){ auraCol = PAL.bluLight; auraA = 0.32; }
+  else if (k.dashTimer > 0)   { auraCol = (k.side === "p1" ? PAL.redLight : PAL.bluLight); auraA = 0.30; }
+  else if (k.anchorTimer > 0) { auraCol = PAL.steel;  auraA = 0.26; }
+  else if (k.counterFlash > 0){ auraCol = PAL.clash;  auraA = 0.5 * (k.counterFlash / 0.4); }
+  else if (spFull)            { auraCol = PAL.sunGlow; auraA = 0.16 + 0.08 * Math.sin(frameCount * 0.18); }
+  if (auraCol && auraA > 0) {
+    const gx = k.x, gy = k.y - TUNE.knightH * 0.5;
+    const gr = ctx.createRadialGradient(gx, gy, 6, gx, gy, TUNE.knightH * 0.85);
+    gr.addColorStop(0, auraCol);
+    gr.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(0.6, auraA));
+    ctx.fillStyle = gr;
+    ctx.beginPath();
+    ctx.arc(gx, gy, TUNE.knightH * 0.85, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.translate(k.x, k.y);
@@ -1441,6 +1865,45 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
   ctx.fillRect(-1, -6, 2, 12);    // fulcrum post
   ctx.restore();
 
+  // ===== SP meter: a thinner accent bar beneath the life bar =====
+  const spH = 7, spY = y + h + 4;
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(x - 2, spY - 2, w + 4, spH + 4);
+  ctx.fillStyle = "#191f30";
+  ctx.fillRect(x, spY, w, spH);
+  const spFrac = Math.max(0, Math.min(1, k.special / TUNE.spMax));
+  const spW = Math.round(w * spFrac);
+  const full = k.special >= TUNE.spMax && k.chosenSpecial;
+  // accent gradient color (distinct from the life bar): amber charging -> bright
+  let spCol = full ? PAL.sunGlow : PAL.skyAmber;
+  ctx.fillStyle = spCol;
+  if (k.side === "p1") ctx.fillRect(x, spY, spW, spH);
+  else ctx.fillRect(x + (w - spW), spY, spW, spH);
+  // tick at the full mark
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  for (let t = 1; t < 4; t++) ctx.fillRect(x + Math.round(w * t / 4), spY, 1, spH);
+  // "SP READY!" flash when full
+  if (full) {
+    const pulse = k.spReadyPulse > 0 || (Math.floor(frameCount * 0.12) % 2 === 0);
+    if (pulse) {
+      ctx.font = '900 13px "Trebuchet MS", sans-serif';
+      ctx.textAlign = k.side === "p1" ? "left" : "right";
+      ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink;
+      const rx = k.side === "p1" ? x : x + w;
+      ctx.strokeText("SP READY!", rx, spY + spH + 14);
+      ctx.fillStyle = PAL.sunGlow;
+      ctx.fillText("SP READY!", rx, spY + spH + 14);
+    }
+  } else if (k.chosenSpecial) {
+    // tiny SP caption with the chosen special's short name
+    const spInfo = SPECIALS.find(s => s.id === k.chosenSpecial);
+    ctx.font = '700 10px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.steelDk;
+    ctx.textAlign = k.side === "p1" ? "left" : "right";
+    const rx = k.side === "p1" ? x : x + w;
+    ctx.fillText("SP · " + (spInfo ? spInfo.en : ""), rx, spY + spH + 13);
+  }
+
   // label + win pips
   ctx.fillStyle = PAL.bone;
   ctx.font = '700 16px "Trebuchet MS", sans-serif';
@@ -1533,6 +1996,189 @@ function drawCenterText(text, sub, big) {
   ctx.textAlign = "left";
 }
 
+// ===== SELECT screen: pick one special per player, Nordic chunky-pixel HUD =====
+function drawSelect() {
+  // dim overlay (match the title's mood)
+  ctx.fillStyle = "rgba(8,12,20,0.62)";
+  ctx.fillRect(0, 0, VW, VH);
+
+  ctx.textAlign = "center";
+  ctx.font = '900 52px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 9; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("CHOOSE YOUR SPECIAL", VW / 2, 86);
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("CHOOSE YOUR SPECIAL", VW / 2, 86);
+
+  // player banners (crimson left / azure right) with their special key binding
+  ctx.font = '800 20px "Trebuchet MS", sans-serif';
+  ctx.textAlign = "left";
+  ctx.fillStyle = PAL.redLight;
+  ctx.fillText("P1 CRIMSON  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", 40, 124);
+  ctx.textAlign = "right";
+  ctx.fillStyle = PAL.bluLight;
+  ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 124);
+  ctx.textAlign = "left";
+
+  // ---- card grid ----
+  const N = SPECIALS.length;
+  const gap = 22, cardW = 196, cardH = 240;
+  const totalW = N * cardW + (N - 1) * gap;
+  const x0 = (VW - totalW) / 2, y0 = 158;
+
+  for (let i = 0; i < N; i++) {
+    const sp = SPECIALS[i];
+    const cx = x0 + i * (cardW + gap);
+    const p1Here = sel.p1.cursor === i;
+    const p2Here = sel.p2.cursor === i;
+
+    // card slab: dark frame + inset face (stone-HUD flavor)
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(cx - 4, y0 - 4, cardW + 8, cardH + 8);
+    ctx.fillStyle = "#202a40";
+    ctx.fillRect(cx, y0, cardW, cardH);
+    ctx.fillStyle = "#2e3a56";
+    ctx.fillRect(cx, y0, cardW, 6);   // top bevel
+    // corner rivets
+    ctx.fillStyle = PAL.steelDk;
+    for (const [rx, ry] of [[cx + 7, y0 + 9], [cx + cardW - 10, y0 + 9],
+                            [cx + 7, y0 + cardH - 12], [cx + cardW - 10, y0 + cardH - 12]]) {
+      ctx.fillRect(rx, ry, 3, 3);
+    }
+
+    // emblem-ish icon plate per special
+    drawSpecialIcon(sp.id, cx + cardW / 2, y0 + 64);
+
+    // names
+    ctx.textAlign = "center";
+    ctx.font = '900 24px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.bone;
+    ctx.fillText(sp.name, cx + cardW / 2, y0 + 134);
+    ctx.font = '800 15px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillText(sp.en, cx + cardW / 2, y0 + 156);
+
+    // one-line effect (wrapped to two lines)
+    ctx.font = '500 12px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = "#b9c2d6";
+    wrapText(sp.fx, cx + cardW / 2, y0 + 182, cardW - 24, 15);
+
+    // P1 / P2 cursor highlights (crimson / azure outlines)
+    if (p1Here) drawCardOutline(cx, y0, cardW, cardH, PAL.redLight, sel.p1.locked, -3);
+    if (p2Here) drawCardOutline(cx, y0, cardW, cardH, PAL.bluLight, sel.p2.locked, 3);
+
+    // LOCKED stamps (offset so both can sit on one card)
+    if (p1Here && sel.p1.locked) drawLockStamp(cx + cardW / 2 - 34, y0 + cardH - 30, PAL.redLight);
+    if (p2Here && sel.p2.locked) drawLockStamp(cx + cardW / 2 + 34, y0 + cardH - 30, PAL.bluLight);
+  }
+
+  // footer / prompt
+  ctx.textAlign = "center";
+  if (sel.readyTimer > 0) {
+    const s = 1 + Math.min(1, (TUNE.readyDelay - sel.readyTimer) * 6) * 0.4;
+    ctx.save();
+    ctx.translate(VW / 2, 466);
+    ctx.scale(s, s);
+    ctx.font = '900 56px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 9; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText("READY!", 0, 0);
+    ctx.fillStyle = PAL.sunGlow;
+    ctx.fillText("READY!", 0, 0);
+    ctx.restore();
+  } else {
+    const blink = (Math.sin(frameCount * 0.12) > -0.2);
+    if (blink) {
+      ctx.font = '800 20px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = PAL.bone;
+      ctx.fillText("Both players LOCK IN to begin   ·   R: back to select", VW / 2, 466);
+    }
+  }
+  ctx.textAlign = "left";
+}
+
+function drawCardOutline(x, y, w, h, color, locked, inset) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = locked ? 5 : 3;
+  ctx.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+  ctx.restore();
+}
+
+function drawLockStamp(cx, cy, color) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-0.18);
+  ctx.font = '900 16px "Trebuchet MS", sans-serif';
+  ctx.textAlign = "center";
+  ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("LOCKED", 0, 0);
+  ctx.fillStyle = color;
+  ctx.fillText("LOCKED", 0, 0);
+  ctx.restore();
+}
+
+// chunky little icon per special (on-theme, not generic clip-art)
+function drawSpecialIcon(id, cx, cy) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (id === "mega") {
+    // big pan cocked back with motion arc
+    ctx.strokeStyle = PAL.steelDk; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(0, 4, 22, Math.PI * 1.05, Math.PI * 1.75); ctx.stroke();
+    ctx.fillStyle = "#15151a";
+    ctx.beginPath(); ctx.arc(-2, -10, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#34343c"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(-2, -10, 12, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "#2a211a";
+    ctx.fillRect(6, -2, 18, 5);
+  } else if (id === "counter") {
+    // crossed parry spark
+    ctx.strokeStyle = PAL.bluLight; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(-16, -14); ctx.lineTo(16, 14); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(16, -14); ctx.lineTo(-16, 14); ctx.stroke();
+    ctx.fillStyle = PAL.clash;
+    for (const a of [0, 1, 2, 3]) {
+      const ang = a * Math.PI / 2 + 0.4;
+      ctx.fillRect(Math.cos(ang) * 18 - 2, Math.sin(ang) * 18 - 2, 4, 4);
+    }
+  } else if (id === "dash") {
+    // forward chevrons (speed)
+    ctx.fillStyle = PAL.redLight;
+    for (let i = 0; i < 3; i++) {
+      const ox = -16 + i * 12;
+      ctx.beginPath();
+      ctx.moveTo(ox, -12); ctx.lineTo(ox + 9, 0); ctx.lineTo(ox, 12);
+      ctx.lineTo(ox + 4, 12); ctx.lineTo(ox + 13, 0); ctx.lineTo(ox + 4, -12);
+      ctx.closePath(); ctx.fill();
+    }
+  } else if (id === "anchor") {
+    // planted boots / ground grip
+    ctx.fillStyle = PAL.steel;
+    ctx.fillRect(-3, -16, 6, 22);
+    ctx.beginPath(); ctx.arc(0, -16, 6, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = PAL.steel; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(0, 4, 14, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+    ctx.fillStyle = "#8a7a5a";
+    ctx.fillRect(-18, 16, 36, 4);  // ground line
+  }
+  ctx.restore();
+}
+
+// simple word-wrap centered at (cx, y), advancing by lineH
+function wrapText(text, cx, y, maxW, lineH) {
+  const words = text.split(" ");
+  let line = "", yy = y;
+  for (let i = 0; i < words.length; i++) {
+    const test = line ? line + " " + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, cx, yy);
+      line = words[i]; yy += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, cx, yy);
+}
+
 function drawCountdown() {
   const label = COUNT_LABELS[Math.min(countdownIndex, COUNT_LABELS.length - 1)];
   // pop scale based on time within the step
@@ -1579,20 +2225,24 @@ function drawTitle() {
   ctx.fillText("PLAYER 1 — CRIMSON", colL, 330);
   ctx.fillStyle = PAL.bone;
   ctx.font = '500 16px "Trebuchet MS", sans-serif';
-  ctx.fillText("A / D  ......  SCOOT", colL, 358);
-  ctx.fillText("W  .........  HOP", colL, 380);
-  ctx.fillText("S  ........  GUARD", colL, 402);
-  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 424);
+  ctx.fillText("A / D  ......  SCOOT", colL, 352);
+  ctx.fillText("W  .........  HOP", colL, 372);
+  ctx.fillText("S  ........  GUARD", colL, 392);
+  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 412);
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText("F  ......  SPECIAL", colL, 432);
 
   ctx.font = '700 17px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bluLight;
   ctx.fillText("PLAYER 2 — AZURE", colR, 330);
   ctx.fillStyle = PAL.bone;
   ctx.font = '500 16px "Trebuchet MS", sans-serif';
-  ctx.fillText("◄ / ►  ....  SCOOT", colR, 358);
-  ctx.fillText("▲  .........  HOP", colR, 380);
-  ctx.fillText("▼  ........  GUARD", colR, 402);
-  ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 424);
+  ctx.fillText("◄ / ►  ....  SCOOT", colR, 352);
+  ctx.fillText("▲  .........  HOP", colR, 372);
+  ctx.fillText("▼  ........  GUARD", colR, 392);
+  ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 412);
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText("/  ......  SPECIAL", colR, 432);
 
   // prompt (blink)
   const blink = (Math.sin(frameCount * 0.12) > -0.2);
@@ -1600,9 +2250,9 @@ function drawTitle() {
     ctx.textAlign = "center";
     ctx.font = '900 26px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
-    ctx.strokeText("PRESS  ENTER  TO  START", VW / 2, 492);
+    ctx.strokeText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 492);
     ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText("PRESS  ENTER  TO  START", VW / 2, 492);
+    ctx.fillText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 492);
   }
   ctx.textAlign = "left";
 }
@@ -1679,7 +2329,7 @@ canvas.addEventListener("click", (e) => {
   const my = (e.clientY - rect.top) * scaleY;
   const b = matchBtn;
   if (mx >= b.bx && mx <= b.bx + b.bw && my >= b.by && my <= b.by + b.bh) {
-    startMatch();
+    enterSelect();   // restart => re-pick specials, then play again
   }
 });
 
@@ -1710,9 +2360,10 @@ function render() {
   ctx.restore(); // end shake transform — UI must NOT jitter
 
   // ----- UI / OVERLAYS (no shake) -----
-  if (gameState !== GS.MENU) drawHUD();
+  if (gameState !== GS.MENU && gameState !== GS.SELECT) drawHUD();
 
   if (gameState === GS.MENU) drawTitle();
+  else if (gameState === GS.SELECT) drawSelect();
   else if (gameState === GS.COUNTDOWN) drawCountdown();
   else if (gameState === GS.ROUND_OVER) drawRoundOver();
   else if (gameState === GS.MATCH_OVER) drawMatchOver();
