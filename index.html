@@ -592,6 +592,7 @@ const ASSET_SRCS = {
   resultBanner: "assets/result_banner.webp",
   modeSlab:     "assets/mode_slab.webp",
   restartBtn:   "assets/restart_btn.webp",
+  gaugeFrame:   "assets/gauge_frame.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2766,11 +2767,17 @@ function drawFloaters() {
 // ---------------------------- UI (no shake) --------------------------
 function drawBalanceMeter(k, x, y, w, label, pal) {
   const h = 18;
-  // frame
-  ctx.fillStyle = PAL.ink;
-  ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
-  ctx.fillStyle = "#2a3146";
-  ctx.fillRect(x, y, w, h);
+  // life bar frame: Nordic stone sprite (with procedural fallback)
+  if (imgReady(IMG.gaugeFrame)) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.gaugeFrame, x - 6, y - 6, w + 12, h + 12);
+    ctx.imageSmoothingEnabled = false;
+  } else {
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+    ctx.fillStyle = "#2a3146";
+    ctx.fillRect(x, y, w, h);
+  }
   // fill proportional to balance
   const frac = k.balance / TUNE.balanceMax;
   const fillW = Math.max(0, Math.round(w * frac));
@@ -2798,10 +2805,17 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
 
   // ===== SP meter: a thinner accent bar beneath the life bar =====
   const spH = 7, spY = y + h + 4;
-  ctx.fillStyle = PAL.ink;
-  ctx.fillRect(x - 2, spY - 2, w + 4, spH + 4);
-  ctx.fillStyle = "#191f30";
-  ctx.fillRect(x, spY, w, spH);
+  // SP bar frame: same Nordic gauge sprite, scaled shorter
+  if (imgReady(IMG.gaugeFrame)) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.gaugeFrame, x - 6, spY - 4, w + 12, spH + 8);
+    ctx.imageSmoothingEnabled = false;
+  } else {
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(x - 2, spY - 2, w + 4, spH + 4);
+    ctx.fillStyle = "#191f30";
+    ctx.fillRect(x, spY, w, spH);
+  }
   const spFrac = Math.max(0, Math.min(1, k.special / TUNE.spMax));
   const spW = Math.round(w * spFrac);
   const full = k.special >= TUNE.spMax && k.chosenSpecial;
