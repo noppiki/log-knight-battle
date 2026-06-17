@@ -586,6 +586,7 @@ const ASSET_SRCS = {
   iconCounter:  "assets/icon_counter.png",
   iconDash:     "assets/icon_dash.png",
   iconAnchor:   "assets/icon_anchor.png",
+  log:          "assets/log.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2582,6 +2583,13 @@ function drawForest(trees, color) {
 
 function drawLog() {
   const x = logLeft, y = logTopY, w = logW, h = TUNE.logThickness;
+  if (imgReady(IMG.log)) {
+    ctx.imageSmoothingEnabled = true;          // smooth scale for the painted bark
+    ctx.drawImage(IMG.log, x, y, w, h);
+    ctx.imageSmoothingEnabled = false;
+    return;
+  }
+  // ---- fallback: legacy procedural log (kept as a safety net) ----
   // cylinder shading: horizontal bands from top (light) to bottom (dark)
   const bands = [
     { t: 0.00, c: PAL.logTop },

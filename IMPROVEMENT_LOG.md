@@ -18,6 +18,19 @@ Read this before each run to avoid repeating work; pick the highest-impact thing
 - Live 2-browser online play not yet verified in this env (agent-browser can't drive rAF).
 - Possible polish: round-intro/victory presentation, sound design depth, control remapping, mobile/touch, colorblind cues, performance audit, more special VFX variety.
 
+## Standing policy (producer directive 2026-06-17)
+**Prefer generated image assets over procedural Canvas drawing.** Any visual element still drawn procedurally (HUD gauges/frames/pips, the log, card frames, banner ribbons, particles, onomatopoeia, icons, the speaker indicator, the title controls strip, etc.) is a candidate to replace with a generated pixel-art asset that fits the established Nordic dusk aesthetic. Procedurally-driven MOTION is fine — but the pixels it draws should be sprites where reasonable. Reject AI-slop; commit to the world.
+
+Still procedural (replace candidates, roughly in priority order):
+- HUD frame, balance/SP gauges, win pips, timer slab, "TIME" label
+- Speaker / mute indicator
+- The log (cylinder + bark + end-grain rings)
+- SELECT card frames + cursor outlines
+- Round-over / Match-over banner backgrounds + restart button
+- Hit-spark particles + onomatopoeia floaters (consider a sprite-based stamp system)
+- Mode-selector slabs on the title
+
 ## Run log
 - 2026-06-17 — Online host wait-for-opponent no longer times out (watchdog now only guards reaching the relay; connect timeout 8s→12s). Decluttered the title screen (removed the redundant two-column controls panel; rebalanced spacing; prompt → "PRESS ENTER TO START").
 - 2026-06-17 — Audio: procedural Nordic-dusk BGM (A1/A2 drone with LFO-swept lowpass + A-minor-pentatonic triangle bell arpeggio through Schroeder feedback-delay reverb, ~75 BPM, sparse with rare octave-up shimmer accents every 8-16s); global M-key mute toggle (single `globalGain` node mutes BGM + SFX together, 0.05s linear ramp; persists across reloads under `localStorage["lkb_muted"]`; gated against the JOIN room-code input); procedural top-right speaker indicator with red diagonal slash when muted; BGM lazily starts on first user gesture (autoplay-safe) and tears down its scheduler on tab hide / restarts on show to avoid frozen-clock event bursts.
+- 2026-06-17 — Replaced procedural log drawing (cylinder bands + bark grooves + end-grain ellipse rings) with generated Nordic-style WebP sprite (assets/log.webp, 1800×400, transparent background); registered in ASSET_SRCS so loading screen counts it as a pip; drawLog() sprite-first with full procedural fallback if image not yet loaded; knight seat coordinate logTopY and TUNE.logThickness rectangle unchanged so combat geometry is unaffected; drone-and-bell BGM and HUD intact.
