@@ -1,0 +1,1533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LOG KNIGHT BATTLE</title>
+<style>
+  :root {
+    /* ===== DELIBERATE LIMITED PALETTE (~16 colors) ===== */
+    --c-night:    #1a2238; /* deep dusk sky top    */
+    --c-page:     #0d1320; /* page background      */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0d1320;
+    overflow: hidden;
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    color: #e8dcc0;
+  }
+  #stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(ellipse at 50% 30%, #1a2238 0%, #0d1320 70%);
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #1a2238;
+    box-shadow: 0 0 0 2px #2a3552, 0 18px 60px rgba(0,0,0,0.7);
+    /* sized by JS to keep aspect ratio, integer-ish scaling */
+  }
+  #hint {
+    position: absolute;
+    bottom: 8px;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: #5a6a8a;
+    pointer-events: none;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="game" width="960" height="540"></canvas>
+  </div>
+  <div id="hint">P1: A/D scoot · W hop · S guard · SPACE frying pan &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER frying pan</div>
+
+<script>
+"use strict";
+(function () {
+
+// =====================================================================
+//  LOG KNIGHT BATTLE — single-file Canvas 2D slapstick brawler
+//  Two armored knights SIT ASTRIDE a Nordic log and bonk each other
+//  with cast-iron FRYING PANS until one slips off. Bare-knuckle energy,
+//  no swords, no shields. Best of 3. PC keyboard, 2 players local.
+// =====================================================================
+
+// ----------------------------- CONSTANTS -----------------------------
+const VW = 960;            // internal virtual width
+const VH = 540;            // internal virtual height
+
+// --- Nordic limited palette (named, deliberately restricted) ---
+const PAL = {
+  skyTop:    "#1a2238",
+  skyMid:    "#3a3a63",
+  skyHorizon:"#b86a72",
+  skyAmber:  "#e7a36b",
+  sunGlow:   "#f6d8a0",
+  cloud:     "#42425f",
+  forestFar: "#222b40",
+  forestMid: "#1a2334",
+  forestNear:"#11192a",
+  logDark:   "#3a2a1c",
+  logBody:   "#6b4a2e",
+  logLight:  "#9c7244",
+  logTop:    "#c69a5e",
+  logGroove: "#2c2014",
+  ringDark:  "#4a3320",
+  ringLight: "#8a6238",
+  // knight reds (P1)
+  redDark:   "#6e1822",
+  redBody:   "#b22a33",
+  redLight:  "#e25548",
+  redTrim:   "#f0c060",
+  // knight blues (P2)
+  bluDark:   "#1c3658",
+  bluBody:   "#356a9c",
+  bluLight:  "#5fa0d6",
+  bluTrim:   "#cdd8e6",
+  // shared metal / accents
+  steel:     "#c2c8d2",
+  steelDk:   "#7c8595",
+  ink:       "#11151f",
+  bone:      "#e8dcc0",
+  spark:     "#ffe9a0",
+  clash:     "#fff4d0",
+};
+
+// --- Tuning constants (grouped for easy tweaking) ---
+const TUNE = {
+  // log geometry
+  logWidthFrac: 0.62,        // log spans 62% of width
+  logTopY:      VH * 0.66,   // y of the log's top surface (where the seat rests)
+  logThickness: 70,          // visual log height
+  spawnOffset:  118,         // each knight spawns this far from center
+
+  // knight body
+  knightW: 40,
+  knightH: 64,
+
+  // movement (units are px/sec, accel px/sec^2)
+  accel:       1700,
+  friction:    1400,         // decel when no input
+  maxSpeed:    260,
+  guardAccelMul: 0,          // cannot move while guarding
+
+  // seated hop / gravity (knights sit astride the log and can hop in place)
+  gravity:     1900,
+  jumpV:       620,
+
+  // attack timing (seconds)
+  atkStartup:  0.10,
+  atkActive:   0.10,
+  atkRecovery: 0.22,
+  atkCooldown: 0.10,         // extra lock after recovery before next attack
+  reach:       44,           // frying-pan whack reach in front of body
+  hitH:        40,           // vertical extent of pan-swing hitbox
+
+  // combat impulses
+  knockGround: 230,          // vx impulse on a clean ground hit
+  knockAir:    330,          // bigger from a jump attack
+  guardMul:    0.42,         // guard multiplies incoming knock & balance loss
+  clashPush:   140,          // mutual clash pushback
+
+  // balance
+  balanceMax:   100,
+  balHitLoss:   16,          // base balance loss per clean hit
+  balRecenter:  18,          // balance/sec recovered near center
+  balGuardBonus: 10,         // extra balance/sec recovered while guarding & still
+  balEdgeDrain: 26,          // max balance/sec drained at the very edge
+  staggerTime:  0.32,        // stagger lockout
+  staggerLowBalExtra: 0.18,  // extra stagger when balance is very low
+
+  // a low-balance knight gets shoved further (comeback / danger lever)
+  lowBalKnockMul: 1.5,       // up to this multiplier as balance -> 0
+
+  // round / match
+  countdownStep: 0.8,        // seconds per countdown number
+  roundOverDelay: 2.2,       // pause on round-over banner
+  roundsToWin:   2,          // best of 3
+
+  // fall
+  fallGravity: 1500,
+};
+
+// ----------------------------- CANVAS --------------------------------
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d", { alpha: false });
+ctx.imageSmoothingEnabled = false;
+
+function resize() {
+  // Letterbox: pick integer-ish scale to fill window while keeping aspect.
+  const sx = window.innerWidth / VW;
+  const sy = window.innerHeight / VH;
+  let scale = Math.min(sx, sy) * 0.96;
+  // prefer crisp scaling but don't force tiny windows below 1x oddly
+  canvas.style.width  = Math.round(VW * scale) + "px";
+  canvas.style.height = Math.round(VH * scale) + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ----------------------------- INPUT ---------------------------------
+// Held-keys set for continuous reads (move/guard).
+// Edge-triggered attack via a per-action "pressed this frame" flag that
+// is consumed by the knight and only re-armed on keyup.
+const held = new Set();
+// attackArmed: true means a fresh press is available to consume.
+const attackArmed = { p1: false, p2: false };
+
+const KEYS_PREVENT = new Set([
+  "ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Space","Enter",
+]);
+
+let audioInited = false;
+
+window.addEventListener("keydown", (e) => {
+  const code = e.code;
+  if (KEYS_PREVENT.has(e.key) || KEYS_PREVENT.has(code)) e.preventDefault();
+
+  if (!audioInited) initAudio();
+
+  // Ignore OS key-repeat entirely for state transitions.
+  if (e.repeat) return;
+
+  held.add(code);
+
+  // Edge-trigger attacks ONLY on a genuine fresh down (not repeat).
+  if (code === "Space") attackArmed.p1 = true;
+  if (code === "Enter") attackArmed.p2 = true;
+
+  // Global hotkeys handled by state machine
+  handleGlobalKey(code);
+});
+
+window.addEventListener("keyup", (e) => {
+  held.delete(e.code);
+  // Re-arming happens implicitly: a new keydown sets attackArmed=true again.
+});
+
+// also clear held keys if window loses focus (prevents stuck movement)
+window.addEventListener("blur", () => { held.clear(); });
+
+function consumeAttack(who) {
+  if (attackArmed[who]) { attackArmed[who] = false; return true; }
+  return false;
+}
+
+// ----------------------------- AUDIO ---------------------------------
+let actx = null;
+function initAudio() {
+  if (audioInited) return;
+  audioInited = true;
+  try {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (err) { actx = null; }
+}
+function blip(freq, dur, type, vol) {
+  if (!actx) return;
+  try {
+    if (actx.state === "suspended") actx.resume();
+    const t = actx.currentTime;
+    const osc = actx.createOscillator();
+    const g = actx.createGain();
+    osc.type = type || "square";
+    osc.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol || 0.12, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g); g.connect(actx.destination);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  } catch (err) {}
+}
+function sfxSwing() { blip(220, 0.08, "triangle", 0.05); }
+function sfxHit()   { blip(140, 0.14, "square", 0.10); blip(90, 0.16, "sawtooth", 0.06); }
+function sfxClang() { blip(880, 0.10, "square", 0.10); blip(1320, 0.10, "triangle", 0.07); }
+function sfxJump()  { blip(330, 0.10, "sine", 0.05); }
+function sfxFall()  { blip(120, 0.4, "sawtooth", 0.08); }
+function sfxCount() { blip(660, 0.08, "square", 0.07); }
+function sfxFight() { blip(523, 0.10, "square", 0.10); blip(784, 0.16, "square", 0.08); }
+
+// ----------------------------- LOG GEOMETRY --------------------------
+const logW = VW * TUNE.logWidthFrac;
+const logLeft  = (VW - logW) / 2;
+const logRight = logLeft + logW;
+const logTopY  = TUNE.logTopY;
+const logCenter = VW / 2;
+// A knight is "off" when its seat center passes beyond an edge margin.
+const EDGE_MARGIN = 6;
+
+// ----------------------------- KNIGHT --------------------------------
+const ST = {
+  IDLE: "idle", WALK: "walk", JUMP: "jump",
+  ATTACK: "attack", GUARD: "guard", STAGGER: "stagger", FALLING: "falling",
+};
+
+function makeKnight(side) {
+  return {
+    side,                       // "p1" | "p2"
+    x: 0, y: logTopY,           // y = seat (hips on top of log)
+    vx: 0, vy: 0,
+    onGround: true,
+    facing: side === "p1" ? 1 : -1,
+    balance: TUNE.balanceMax,
+    state: ST.IDLE,
+    // attack sub-state
+    atkPhase: "none",           // startup | active | recovery | none
+    atkTimer: 0,
+    atkCdTimer: 0,
+    atkIsAir: false,
+    atkHitLanded: false,        // already connected this swing
+    // stagger
+    stagTimer: 0,
+    // falling bookkeeping
+    fellAtFrame: -1,
+    // visual
+    bob: Math.random() * Math.PI * 2,
+    landDust: 0,
+    rounds: 0,
+  };
+}
+
+const p1 = makeKnight("p1");
+const p2 = makeKnight("p2");
+
+function resetKnightPositions() {
+  p1.x = logCenter - TUNE.spawnOffset;
+  p2.x = logCenter + TUNE.spawnOffset;
+  for (const k of [p1, p2]) {
+    k.y = logTopY; k.vx = 0; k.vy = 0; k.onGround = true;
+    k.balance = TUNE.balanceMax;
+    k.state = ST.IDLE; k.atkPhase = "none"; k.atkTimer = 0; k.atkCdTimer = 0;
+    k.atkIsAir = false; k.atkHitLanded = false; k.stagTimer = 0;
+    k.fellAtFrame = -1; k.landDust = 0;
+  }
+  p1.facing = 1; p2.facing = -1;
+}
+
+// ----------------------------- EFFECTS -------------------------------
+const particles = [];   // {x,y,vx,vy,life,maxLife,size,color}
+const floaters = [];    // {x,y,vy,life,maxLife,text,color,scale}
+let shake = 0;          // current screen-shake magnitude
+
+function spawnSparks(x, y, n, color) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 80 + Math.random() * 220;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp - 60,
+      life: 0, maxLife: 0.4 + Math.random() * 0.35,
+      size: 2 + Math.floor(Math.random() * 3),
+      color: color || PAL.spark,
+      grav: 520,
+    });
+  }
+}
+function spawnDust(x, y) {
+  for (let i = 0; i < 8; i++) {
+    const a = -Math.PI + Math.random() * Math.PI; // upper hemisphere outward
+    const sp = 30 + Math.random() * 70;
+    particles.push({
+      x: x + (Math.random() * 24 - 12), y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp * 0.4,
+      life: 0, maxLife: 0.5 + Math.random() * 0.3,
+      size: 2 + Math.floor(Math.random() * 3),
+      color: "#8a7a5a",
+      grav: -40,
+    });
+  }
+}
+function spawnFloater(x, y, text, color) {
+  floaters.push({ x, y, vy: -42, life: 0, maxLife: 0.85, text, color: color || PAL.bone, scale: 1 });
+}
+function addShake(amount) { shake = Math.min(18, shake + amount); }
+
+function updateEffects(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life += dt;
+    if (p.life >= p.maxLife) { particles.splice(i, 1); continue; }
+    p.vy += (p.grav || 0) * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+  }
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.life += dt;
+    if (f.life >= f.maxLife) { floaters.splice(i, 1); continue; }
+    f.y += f.vy * dt;
+    f.vy *= (1 - 1.5 * dt);
+  }
+  if (shake > 0) {
+    shake -= 36 * dt;
+    if (shake < 0) shake = 0;
+  }
+}
+
+// ----------------------------- GAME STATE ----------------------------
+const GS = { MENU: "menu", COUNTDOWN: "countdown", PLAYING: "playing", ROUND_OVER: "roundover", MATCH_OVER: "matchover" };
+let gameState = GS.MENU;
+
+let countdownTimer = 0;
+let countdownIndex = 0;         // 0..3 -> "3","2","1","FIGHT!"
+let roundOverTimer = 0;
+let roundWinner = null;         // p1 | p2
+let matchWinner = null;
+let frameCount = 0;
+
+const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
+
+function startMatch() {
+  p1.rounds = 0; p2.rounds = 0;
+  matchWinner = null;
+  startCountdown();
+}
+function startCountdown() {
+  resetKnightPositions();
+  particles.length = 0;
+  floaters.length = 0;
+  shake = 0;
+  roundWinner = null;
+  countdownIndex = 0;
+  countdownTimer = TUNE.countdownStep;
+  gameState = GS.COUNTDOWN;
+  sfxCount();
+}
+function beginPlaying() {
+  gameState = GS.PLAYING;
+}
+function awardRound(winnerKnight) {
+  if (gameState !== GS.PLAYING) return; // guard: only award once
+  roundWinner = winnerKnight;
+  winnerKnight.rounds += 1;
+  roundOverTimer = TUNE.roundOverDelay;
+  gameState = GS.ROUND_OVER;
+  sfxFall();
+  addShake(8);
+  // check match end
+  if (winnerKnight.rounds >= TUNE.roundsToWin) {
+    matchWinner = winnerKnight;
+  }
+}
+
+function handleGlobalKey(code) {
+  if (gameState === GS.MENU) {
+    if (code === "Enter" || code === "Space") startMatch();
+  } else if (gameState === GS.MATCH_OVER) {
+    if (code === "KeyR" || code === "Enter") startMatch();
+  }
+}
+
+// ----------------------------- PHYSICS / UPDATE ----------------------
+function approachZero(v, drop) {
+  if (v > 0) return Math.max(0, v - drop);
+  if (v < 0) return Math.min(0, v + drop);
+  return 0;
+}
+
+function updateKnight(k, dt, input) {
+  // --- FALLING: knight has gone off the log; tumble down, no input. ---
+  if (k.state === ST.FALLING) {
+    k.vy += TUNE.fallGravity * dt;
+    k.x += k.vx * dt;
+    k.y += k.vy * dt;
+    k.tumble = (k.tumble || 0) + dt * 8 * (k.vx >= 0 ? 1 : -1);
+    return;
+  }
+
+  // tick timers
+  if (k.atkCdTimer > 0) k.atkCdTimer = Math.max(0, k.atkCdTimer - dt);
+  if (k.stagTimer > 0) {
+    k.stagTimer -= dt;
+    if (k.stagTimer <= 0) { k.stagTimer = 0; if (k.state === ST.STAGGER) k.state = ST.IDLE; }
+  }
+
+  const guarding = input.guard && k.onGround && k.state !== ST.STAGGER &&
+                   k.atkPhase === "none";
+
+  // --- ATTACK state machine (can start in air or ground) ---
+  const canStartAttack =
+    k.atkPhase === "none" && k.atkCdTimer === 0 &&
+    k.state !== ST.STAGGER && !input.guard;
+  if (input.attack && canStartAttack) {
+    k.atkPhase = "startup";
+    k.atkTimer = TUNE.atkStartup;
+    k.atkIsAir = !k.onGround;
+    k.atkHitLanded = false;
+    if (k.onGround) k.state = ST.ATTACK;
+    sfxSwing();
+  }
+  if (k.atkPhase !== "none") {
+    k.atkTimer -= dt;
+    if (k.atkTimer <= 0) {
+      if (k.atkPhase === "startup") { k.atkPhase = "active"; k.atkTimer = TUNE.atkActive; }
+      else if (k.atkPhase === "active") { k.atkPhase = "recovery"; k.atkTimer = TUNE.atkRecovery; }
+      else if (k.atkPhase === "recovery") {
+        k.atkPhase = "none"; k.atkTimer = 0; k.atkCdTimer = TUNE.atkCooldown;
+        if (k.state === ST.ATTACK) k.state = ST.IDLE;
+      }
+    }
+  }
+
+  // --- HORIZONTAL MOVEMENT ---
+  const lockMove = (k.state === ST.STAGGER) || guarding ||
+                   (k.atkPhase !== "none" && k.onGround);
+  let moving = false;
+  if (!lockMove) {
+    if (input.left)  { k.vx -= TUNE.accel * dt; k.facing = -1; moving = true; }
+    if (input.right) { k.vx += TUNE.accel * dt; k.facing = 1;  moving = true; }
+  }
+  // friction when no directional input (always some friction on the log)
+  if (!moving || lockMove) {
+    k.vx = approachZero(k.vx, TUNE.friction * dt);
+  }
+  // clamp player-driven speed only. While staggered the knight is under
+  // knockback (which can exceed maxSpeed for jump/low-balance hits); let
+  // friction decay it naturally instead of capping it.
+  if (k.state !== ST.STAGGER) {
+    if (k.vx >  TUNE.maxSpeed) k.vx =  TUNE.maxSpeed;
+    if (k.vx < -TUNE.maxSpeed) k.vx = -TUNE.maxSpeed;
+  }
+
+  // --- JUMP ---
+  if (input.jump && k.onGround && !guarding && k.state !== ST.STAGGER &&
+      k.atkPhase === "none") {
+    k.vy = -TUNE.jumpV;
+    k.onGround = false;
+    k.state = ST.JUMP;
+    sfxJump();
+  }
+
+  // --- VERTICAL INTEGRATION ---
+  if (!k.onGround) {
+    k.vy += TUNE.gravity * dt;
+    k.y += k.vy * dt;
+    if (k.y >= logTopY) {
+      // land
+      k.y = logTopY;
+      k.vy = 0;
+      const wasAir = !k.onGround;
+      k.onGround = true;
+      if (k.state === ST.JUMP) k.state = ST.IDLE;
+      if (wasAir) { spawnDust(k.x, logTopY); k.landDust = 0.2; }
+    }
+  }
+  if (k.landDust > 0) k.landDust = Math.max(0, k.landDust - dt);
+
+  // --- HORIZONTAL INTEGRATION ---
+  k.x += k.vx * dt;
+
+  // --- STATE label for animation (when not in special states) ---
+  if (k.onGround && k.atkPhase === "none" && k.state !== ST.STAGGER) {
+    if (guarding) k.state = ST.GUARD;
+    else if (Math.abs(k.vx) > 12) k.state = ST.WALK;
+    else k.state = ST.IDLE;
+  } else if (!k.onGround && k.atkPhase === "none" && k.state !== ST.STAGGER) {
+    k.state = ST.JUMP;
+  }
+
+  // --- BALANCE / EDGE EFFECT ---
+  // distance from center, normalized 0 (center) .. 1 (edge)
+  const halfLog = logW / 2;
+  const distFromCenter = Math.abs(k.x - logCenter);
+  const edgeN = Math.min(1, distFromCenter / halfLog); // 0..1
+  if (edgeN > 0.55) {
+    // near edge: drain, steeper the closer to the edge
+    const t = (edgeN - 0.55) / 0.45; // 0..1 across the danger zone
+    k.balance -= TUNE.balEdgeDrain * t * dt;
+  } else {
+    // near center: recover
+    let rec = TUNE.balRecenter * (1 - edgeN / 0.55);
+    if (guarding && Math.abs(k.vx) < 8) rec += TUNE.balGuardBonus;
+    k.balance += rec * dt;
+  }
+  k.balance = Math.max(0, Math.min(TUNE.balanceMax, k.balance));
+
+  // --- bob phase for idle animation ---
+  k.bob += dt * (k.state === ST.WALK ? 12 : 4);
+
+  // --- OFF-LOG / LOSE DETECTION ---
+  // seat center beyond edge -> slip off & begin falling (do NOT award this frame).
+  if (k.onGround && (k.x < logLeft - EDGE_MARGIN || k.x > logRight + EDGE_MARGIN)) {
+    k.state = ST.FALLING;
+    k.onGround = false;
+    k.atkPhase = "none";
+    k.fellAtFrame = frameCount;
+    // launch in the direction it was already going (or off the nearest edge)
+    if (k.vx === 0) k.vx = (k.x < logCenter) ? -60 : 60;
+    k.vy = -120;
+    k.tumble = 0;
+    sfxFall();
+  }
+}
+
+// Compute the frying-pan hitbox for a knight whose attack is in the ACTIVE phase.
+function attackHitbox(k) {
+  if (k.atkPhase !== "active") return null;
+  const bodyFrontX = k.x + k.facing * (TUNE.knightW / 2);
+  const x1 = Math.min(bodyFrontX, bodyFrontX + k.facing * TUNE.reach);
+  const x2 = Math.max(bodyFrontX, bodyFrontX + k.facing * TUNE.reach);
+  const cy = k.y - TUNE.knightH * 0.55;
+  return { x1, x2, y1: cy - TUNE.hitH / 2, y2: cy + TUNE.hitH / 2, midx: bodyFrontX + k.facing * TUNE.reach * 0.6, midy: cy };
+}
+function bodyBox(k) {
+  return {
+    x1: k.x - TUNE.knightW / 2, x2: k.x + TUNE.knightW / 2,
+    y1: k.y - TUNE.knightH,     y2: k.y,
+  };
+}
+function boxesOverlap(a, b) {
+  return a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
+}
+
+// Resolve combat for the frame: GATHER both knights' hits, THEN apply,
+// so a simultaneous mutual hit becomes a CLANG rather than one-sided.
+function resolveCombat(dt) {
+  const hbA = attackHitbox(p1);
+  const hbB = attackHitbox(p2);
+  const boxA = bodyBox(p1);
+  const boxB = bodyBox(p2);
+
+  const aHitsB = hbA && !p1.atkHitLanded && boxesOverlap(hbA, boxB) && p2.state !== ST.FALLING;
+  const bHitsA = hbB && !p2.atkHitLanded && boxesOverlap(hbB, boxA) && p1.state !== ST.FALLING;
+
+  if (aHitsB && bHitsA) {
+    // CLANG: both frying pans meet (cast-iron on cast-iron) this frame.
+    p1.atkHitLanded = true; p2.atkHitLanded = true;
+    const cx = (p1.x + p2.x) / 2;
+    const cy = logTopY - TUNE.knightH * 0.6;
+    // push both apart (away from each other), no balance damage
+    if (p1.x < p2.x) { p1.vx = -TUNE.clashPush; p2.vx = TUNE.clashPush; }
+    else             { p1.vx =  TUNE.clashPush; p2.vx = -TUNE.clashPush; }
+    spawnSparks(cx, cy, 22, PAL.clash);
+    spawnFloater(cx, cy - 18, "CLANG!", PAL.clash);
+    addShake(7);
+    sfxClang();
+    return;
+  }
+  if (aHitsB) applyHit(p1, p2);
+  if (bHitsA) applyHit(p2, p1);
+}
+
+function applyHit(attacker, target) {
+  attacker.atkHitLanded = true;
+  const guarding = target.state === ST.GUARD;
+  // base impulse
+  let knock = attacker.atkIsAir ? TUNE.knockAir : TUNE.knockGround;
+  let balLoss = TUNE.balHitLoss + (attacker.atkIsAir ? 6 : 0);
+
+  // low-balance target gets shoved further (danger / comeback lever)
+  const balFrac = target.balance / TUNE.balanceMax; // 1 full .. 0 empty
+  const lowMul = 1 + (TUNE.lowBalKnockMul - 1) * (1 - balFrac);
+  knock *= lowMul;
+
+  if (guarding) { knock *= TUNE.guardMul; balLoss *= TUNE.guardMul; }
+
+  const dir = (target.x >= attacker.x) ? 1 : -1;
+  target.vx += knock * dir;
+  target.balance = Math.max(0, target.balance - balLoss);
+
+  // stagger (less if guarding)
+  if (!guarding) {
+    let st = TUNE.staggerTime;
+    if (target.balance < 30) st += TUNE.staggerLowBalExtra;
+    target.state = ST.STAGGER;
+    target.stagTimer = st;
+    target.atkPhase = "none"; // interrupt any swing
+  }
+
+  // effects
+  const hb = attackHitbox(attacker);
+  const cx = hb ? hb.midx : target.x;
+  const cy = hb ? hb.midy : target.y - TUNE.knightH * 0.55;
+  spawnSparks(cx, cy, guarding ? 10 : 16, guarding ? PAL.steel : PAL.spark);
+  const words = guarding ? ["CLANG!", "GUARD!"] : ["BONK!", "THWACK!", "DOINK!", "WHACK!"];
+  spawnFloater(cx, cy - 16, words[Math.floor(Math.random() * words.length)], guarding ? PAL.steel : PAL.redLight);
+  addShake(guarding ? 4 : 9);
+  sfxHit();
+}
+
+// After physics, check whether a falling knight has dropped off-screen
+// and resolve the round (with both-off tiebreak).
+function checkRoundResolution() {
+  if (gameState !== GS.PLAYING) return;
+  const p1Down = p1.state === ST.FALLING && p1.y > VH + 120;
+  const p2Down = p2.state === ST.FALLING && p2.y > VH + 120;
+
+  if (p1Down && p2Down) {
+    // both gone: whoever fell LATER survives longer -> wins.
+    // tiebreak on same frame: higher balance wins.
+    let winner;
+    if (p1.fellAtFrame > p2.fellAtFrame) winner = p1;
+    else if (p2.fellAtFrame > p1.fellAtFrame) winner = p2;
+    else winner = (p1.balance >= p2.balance) ? p1 : p2;
+    awardRound(winner);
+  } else if (p1Down) {
+    awardRound(p2);
+  } else if (p2Down) {
+    awardRound(p1);
+  }
+}
+
+// ----------------------------- MAIN UPDATE ---------------------------
+function readInputs() {
+  const i1 = {
+    left: held.has("KeyA"), right: held.has("KeyD"),
+    jump: held.has("KeyW"), guard: held.has("KeyS"),
+    attack: consumeAttack("p1"),
+  };
+  const i2 = {
+    left: held.has("ArrowLeft"), right: held.has("ArrowRight"),
+    jump: held.has("ArrowUp"), guard: held.has("ArrowDown"),
+    attack: consumeAttack("p2"),
+  };
+  return [i1, i2];
+}
+
+function update(dt) {
+  frameCount++;
+  updateEffects(dt);
+
+  if (gameState === GS.COUNTDOWN) {
+    // keep attack flags from leaking into the fight
+    consumeAttack("p1"); consumeAttack("p2");
+    countdownTimer -= dt;
+    if (countdownTimer <= 0) {
+      countdownIndex++;
+      if (countdownIndex >= COUNT_LABELS.length) {
+        beginPlaying();
+      } else {
+        countdownTimer = TUNE.countdownStep;
+        if (countdownIndex === COUNT_LABELS.length - 1) sfxFight();
+        else sfxCount();
+      }
+    }
+    // let knights settle (idle physics, no inputs) during countdown
+    const noInput = { left:false,right:false,jump:false,guard:false,attack:false };
+    updateKnight(p1, dt, noInput);
+    updateKnight(p2, dt, noInput);
+    return;
+  }
+
+  if (gameState === GS.PLAYING) {
+    const [i1, i2] = readInputs();
+    updateKnight(p1, dt, i1);
+    updateKnight(p2, dt, i2);
+    resolveCombat(dt);
+    checkRoundResolution();
+    return;
+  }
+
+  if (gameState === GS.ROUND_OVER) {
+    consumeAttack("p1"); consumeAttack("p2");
+    // keep falling knights animating
+    const noInput = { left:false,right:false,jump:false,guard:false,attack:false };
+    updateKnight(p1, dt, noInput);
+    updateKnight(p2, dt, noInput);
+    roundOverTimer -= dt;
+    if (roundOverTimer <= 0) {
+      if (matchWinner) {
+        gameState = GS.MATCH_OVER;
+      } else {
+        startCountdown();
+      }
+    }
+    return;
+  }
+
+  if (gameState === GS.MENU || gameState === GS.MATCH_OVER) {
+    consumeAttack("p1"); consumeAttack("p2");
+    return;
+  }
+}
+
+// ============================== RENDER ===============================
+
+// --- precomputed forest silhouette layers (stable across frames) ---
+function buildForest(seed, count, baseY, height, jitter) {
+  // simple deterministic pseudo-random from seed
+  let s = seed;
+  const rnd = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  const trees = [];
+  for (let i = 0; i < count; i++) {
+    const x = (i / count) * VW + (rnd() - 0.5) * jitter;
+    const h = height * (0.6 + rnd() * 0.7);
+    const w = h * (0.5 + rnd() * 0.2);
+    trees.push({ x, baseY, h, w });
+  }
+  return trees;
+}
+const forestNear = buildForest(11, 26, logTopY - 8, 64, 30);
+const forestMid  = buildForest(53, 22, logTopY - 38, 90, 46);
+const forestFar  = buildForest(91, 18, logTopY - 70, 120, 70);
+
+const clouds = [
+  { x: 180, y: 110, w: 150, h: 26 },
+  { x: 600, y: 80,  w: 200, h: 30 },
+  { x: 760, y: 150, w: 120, h: 22 },
+];
+
+function drawBackground() {
+  // sky gradient (night -> mid -> horizon rose -> amber band)
+  const g = ctx.createLinearGradient(0, 0, 0, logTopY + 20);
+  g.addColorStop(0.00, PAL.skyTop);
+  g.addColorStop(0.45, PAL.skyMid);
+  g.addColorStop(0.80, PAL.skyHorizon);
+  g.addColorStop(1.00, PAL.skyAmber);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, VW, logTopY + 20);
+
+  // faint distant sun glow near horizon
+  const sunX = VW * 0.5, sunY = logTopY - 30;
+  const sg = ctx.createRadialGradient(sunX, sunY, 6, sunX, sunY, 220);
+  sg.addColorStop(0, "rgba(246,216,160,0.55)");
+  sg.addColorStop(1, "rgba(246,216,160,0)");
+  ctx.fillStyle = sg;
+  ctx.fillRect(0, 0, VW, logTopY + 20);
+
+  // soft clouds
+  ctx.fillStyle = PAL.cloud;
+  for (const c of clouds) {
+    drawSoftCloud(c.x, c.y, c.w, c.h);
+  }
+
+  // forest layers far -> near
+  drawForest(forestFar, PAL.forestFar);
+  drawForest(forestMid, PAL.forestMid);
+  drawForest(forestNear, PAL.forestNear);
+
+  // dark ground fill below horizon
+  ctx.fillStyle = "#0f1422";
+  ctx.fillRect(0, logTopY + 8, VW, VH - (logTopY + 8));
+}
+
+function drawSoftCloud(x, y, w, h) {
+  // chunky cloud from a few overlapping blocky ellipses
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < 4; i++) {
+    const cx = x + (i - 1.5) * (w / 4);
+    const cw = w * (0.4 - Math.abs(i - 1.5) * 0.06);
+    ctx.fillRect(cx - cw / 2, y - h / 2 + Math.sin(i) * 3, cw, h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawForest(trees, color) {
+  ctx.fillStyle = color;
+  for (const t of trees) {
+    // spruce: stacked triangles
+    const tiers = 3;
+    for (let i = 0; i < tiers; i++) {
+      const frac = i / tiers;
+      const tierTop = t.baseY - t.h * (1 - frac);
+      const tierBot = t.baseY - t.h * (1 - (frac + 1 / tiers)) + 6;
+      const halfW = (t.w / 2) * (0.5 + frac * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(t.x, tierTop);
+      ctx.lineTo(t.x - halfW, tierBot);
+      ctx.lineTo(t.x + halfW, tierBot);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // trunk
+    ctx.fillRect(t.x - 2, t.baseY - 6, 4, 8);
+  }
+}
+
+function drawLog() {
+  const x = logLeft, y = logTopY, w = logW, h = TUNE.logThickness;
+  // cylinder shading: horizontal bands from top (light) to bottom (dark)
+  const bands = [
+    { t: 0.00, c: PAL.logTop },
+    { t: 0.14, c: PAL.logLight },
+    { t: 0.34, c: PAL.logBody },
+    { t: 0.70, c: PAL.logDark },
+  ];
+  for (let i = 0; i < bands.length; i++) {
+    const b = bands[i];
+    const next = bands[i + 1];
+    const y0 = y + b.t * h;
+    const y1 = next ? y + next.t * h : y + h;
+    ctx.fillStyle = b.c;
+    ctx.fillRect(x, y0, w, y1 - y0);
+  }
+  // top highlight band (light hits the top edge)
+  ctx.fillStyle = "rgba(255,236,190,0.30)";
+  ctx.fillRect(x, y, w, 5);
+
+  // bark vertical grooves / striations (blocky, limited)
+  ctx.fillStyle = PAL.logGroove;
+  for (let gx = x + 14; gx < x + w - 8; gx += 26) {
+    const jitter = ((gx * 7) % 9) - 4;
+    ctx.fillRect(gx + jitter, y + 10, 2, h - 14);
+  }
+  ctx.fillStyle = "rgba(196,154,94,0.25)";
+  for (let gx = x + 26; gx < x + w - 8; gx += 26) {
+    ctx.fillRect(gx, y + 8, 1, h - 12);
+  }
+
+  // near end cap with concentric ring grain (right end faces viewer-ish)
+  drawEndCap(x, y, h);     // left cap
+}
+
+function drawEndCap(x, y, h) {
+  // left end cap as an ellipse with tree rings
+  const cx = x;
+  const cyy = y + h / 2;
+  const rx = 16, ry = h / 2;
+  // base ellipse
+  ctx.fillStyle = PAL.ringDark;
+  fillEllipse(cx, cyy, rx, ry);
+  // concentric rings
+  const rings = 5;
+  for (let i = rings; i >= 1; i--) {
+    const f = i / rings;
+    ctx.fillStyle = (i % 2 === 0) ? PAL.ringLight : PAL.logBody;
+    fillEllipse(cx, cyy, rx * f, ry * f);
+  }
+  // center pith
+  ctx.fillStyle = PAL.logGroove;
+  fillEllipse(cx, cyy, 2.5, 4);
+  // rim shadow
+  ctx.strokeStyle = PAL.logDark;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(cx, cyy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+function fillEllipse(cx, cy, rx, ry) {
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ---- Knight rendering ----
+// Each knight SITS ASTRIDE the log: the seat (hips) rests on the log's top
+// surface at k.y, the torso rises UP above it, and BOTH legs drape DOWN over
+// the NEAR (camera-facing) side of the log — thigh down the log front, lower
+// leg / boot dangling. One hand wields a cast-iron FRYING PAN, the free hand
+// grips the log for balance. No sword, no shield. k.y is the seat reference
+// (top of the log); the whole figure fills the [k.y-H .. k.y] hitbox so the
+// combat boxes stay honest. Legs are drawn BELOW k.y, over the log front.
+function drawKnight(k) {
+  const pal = (k.side === "p1")
+    ? { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim }
+    : { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
+
+  ctx.save();
+  ctx.translate(k.x, k.y);
+
+  // falling tumble: rotate around body center
+  if (k.state === ST.FALLING) {
+    ctx.translate(0, -TUNE.knightH / 2);
+    ctx.rotate(k.tumble || 0);
+    ctx.translate(0, TUNE.knightH / 2);
+  }
+
+  const f = k.facing; // 1 right (faces toward opponent), -1 left
+  ctx.scale(f, 1);    // draw facing-right then mirror
+
+  // --- seated animation cues ---
+  // bobY  : small vertical breathing/scoot bounce of the seated torso
+  // lean  : torso tilt (deg). +forward toward foe, -back when hit
+  // hipShift: lateral seat shift while scooting (reads as shuffling, not strides)
+  // legPhase: drives the dangling-leg swing
+  let bobY = 0, lean = 0, hipShift = 0;
+  const legPhase = Math.sin(k.bob);
+  if (k.state === ST.WALK) {            // SCOOTING along the log
+    bobY = Math.abs(Math.sin(k.bob)) * 1.8;
+    hipShift = Math.sin(k.bob) * 3;     // hips shuffle side to side
+    lean = 6;                           // lean into the scoot
+  } else if (k.state === ST.IDLE) {
+    bobY = Math.sin(k.bob) * 1.2;
+  } else if (k.state === ST.GUARD) {
+    bobY = 0; lean = 8;                 // hunker / tuck forward low
+  } else if (k.state === ST.JUMP) {
+    lean = 7;                           // forward lunge-bounce
+  } else if (k.state === ST.STAGGER) {
+    lean = -10; bobY = 2;               // rock back on a pan to the helm
+  } else if (k.state === ST.ATTACK) {
+    // seated lean into the whack, timed to the swing phase
+    if (k.atkPhase === "startup") lean = -6;       // wind up, lean back
+    else if (k.atkPhase === "active") lean = 12;   // lunge into the swing
+    else if (k.atkPhase === "recovery") lean = 7;
+  }
+
+  ctx.translate(hipShift, bobY);
+
+  const W = TUNE.knightW, H = TUNE.knightH;
+  const hx = -W / 2;        // left of body (in facing-right local space)
+  const seatY = 0;          // hips/seat at origin (on the log's top surface)
+  const topY = -H;          // crown of the helm (top of the hitbox)
+
+  // GUARD tucks the seated torso lower; a seated hop tucks the legs up.
+  const tuck = (k.state === ST.GUARD) ? 6 : 0;
+
+  // ================= SEATED LEG (bent Γ/L over the log) =================
+  // THE seated cue (side profile): the near leg folds twice. From the hip the
+  // THIGH runs roughly HORIZONTAL FORWARD across the log top (straddling it),
+  // then the knee bends ~90° and the SHIN + boot drop STRAIGHT DOWN the brown
+  // front face. Horizontal-thigh + vertical-shin = "sitting astride." We draw
+  // ONE prominent bent near leg (two parallel vertical legs would read as
+  // standing). The FAR leg is occluded by the log/body — only a small dark
+  // hint peeks out behind. Legs are cosmetic (below k.y, outside the hitbox).
+  // Drawn FIRST so the rump/torso overlap the thigh root.
+  const tuckLeg = (k.state === ST.JUMP) ? 14 : 0;    // knee pulls up on a hop
+  const scootShift = (k.state === ST.WALK) ? legPhase * 2.5 : 0; // thigh shuffles
+  const footSway = Math.sin(k.bob) * 1.5;            // idle dangle of the shin
+
+  // FAR leg hint: a small darker thigh/knee nub peeking behind the body, far
+  // side of the log. NOT a full second leg.
+  ctx.fillStyle = pal.dark;
+  ctx.fillRect(hx + 2, seatY - 6, 11, 9);            // far thigh stub on the log top
+  ctx.fillStyle = "rgba(0,0,0,0.30)";
+  ctx.fillRect(hx + 2, seatY + 1, 11, 3);            // its shadow on the crown
+
+  // NEAR leg (bright team color, the dominant read):
+  drawSeatedLeg(k, hx, W, seatY, tuckLeg, scootShift, footSway, pal);
+
+  // ================= RUMP / SEAT (clamps the rounded log crown) ==========
+  // A wide hip block that visibly CROSSES the crown (y<0 above, y>0 over the
+  // log top) so it reads as a seat resting on / gripping the rounded log.
+  ctx.fillStyle = pal.dark;
+  ctx.fillRect(hx + 1, seatY - 9, W - 2, 14);          // broad seat straddling crown
+  ctx.fillStyle = pal.body;
+  ctx.fillRect(hx + 3, seatY - 9, W - 6, 7);           // upper hip (lit)
+  // saddle-shadow where the rump meets the log crown
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.fillRect(hx + 2, seatY + 2, W - 4, 4);
+
+  ctx.translate(0, tuck);
+  if (lean) ctx.rotate(lean * Math.PI / 180 * 0.5); // halved: keep it readable
+
+  // ================= SEATED TORSO (compact, sits LOW on the rump) ========
+  // The trunk is short & chunky (a seated person is compact). It still spans
+  // the hit-critical band: torso fills y ~ -52..-6, fully covering the
+  // attackHitbox center (k.y - knightH*0.55 = -35.2, +/-20).
+  const torsoBotY = seatY - 4;          // sits right on top of the rump
+  const torsoTopY = topY + 12;          // y = -52 (helm overlaps above this)
+  const torsoY = torsoTopY;
+  const tH = torsoBotY - torsoTopY;     // ~48px tall, chunky seated trunk
+  // armor body (slightly wider/hunched than a standing torso)
+  ctx.fillStyle = pal.body;
+  ctx.fillRect(hx + 2, torsoY, W - 4, tH);
+  // shading left/right
+  ctx.fillStyle = pal.dark;
+  ctx.fillRect(hx + 2, torsoY, 4, tH);
+  ctx.fillStyle = pal.light;
+  ctx.fillRect(hx + W - 6, torsoY, 4, tH);
+  // tabard (vertical cloth panel)
+  ctx.fillStyle = pal.light;
+  ctx.fillRect(hx + W / 2 - 7, torsoY + 3, 14, tH - 4);
+  // heraldic emblem on tabard
+  drawEmblem(k.side, hx + W / 2, torsoY + tH / 2, pal);
+  // belt at the waist / seat line
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(hx + 2, torsoBotY - 5, W - 4, 4);
+
+  // ---- pauldrons (shoulders, broad & hunched) ----
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(hx, torsoY - 1, 12, 8);
+  ctx.fillRect(hx + W - 12, torsoY - 1, 12, 8);
+
+  // ---- head / great helm (LOWERED & hunched into the shoulders) ----
+  // Helm top stays at topY so the figure still fills the top of the hitbox,
+  // but it sits squat & wide (seated hunch), not towering on a long neck.
+  const headY = topY;        // y = -64
+  const headH = 16;
+  ctx.fillStyle = PAL.steel;
+  ctx.fillRect(hx + W / 2 - 10, headY, 20, headH);
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillRect(hx + W / 2 - 10, headY, 4, headH);    // left shadow
+  ctx.fillStyle = "#dfe4ec";
+  ctx.fillRect(hx + W / 2 + 5, headY, 3, headH);     // right hi-light
+  // vision slit
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(hx + W / 2 - 7, headY + 6, 14, 3);
+  // cross reinforce on helm
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillRect(hx + W / 2 - 1, headY + 1, 2, headH - 2);
+  // crest plume on top (team color)
+  ctx.fillStyle = pal.light;
+  ctx.fillRect(hx + W / 2 - 2, headY - 6, 4, 6);
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(hx + W / 2 - 1, headY - 9, 2, 4);
+
+  // ---- FREE HAND gripping the log for balance (back hand) ----
+  // A gauntleted arm reaching DOWN to clamp the log crown beside the seat.
+  if (k.state !== ST.STAGGER) {
+    ctx.fillStyle = pal.light;
+    ctx.fillRect(hx - 1, torsoBotY - 10, 7, 12);   // back arm down to the log
+    ctx.fillStyle = pal.trim;
+    ctx.fillRect(hx - 4, torsoBotY + 1, 9, 5);     // gauntlet gripping the log top
+  }
+
+  // ---- FRYING-PAN arm (front), animated by attack / guard phase ----
+  drawPanArm(k, hx, torsoY, W, tH, pal);
+
+  ctx.restore();
+}
+
+// The NEAR seated leg, bent into a Γ/L (side profile):
+//   HIP  ->  THIGH horizontal forward across the log top (straddling it)
+//        ->  KNEE bends ~90°
+//        ->  SHIN drops straight DOWN the brown front face -> BOOT dangling.
+// This double-fold (90° at hip, 90° at knee) is the unmistakable "sitting
+// astride" silhouette. Drawn in bright team color so it's clear against the
+// brown log front. Purely cosmetic: lives below k.y, outside the hitbox.
+//   hx,W      : body left edge & width (local facing-right space)
+//   seatY     : seat line (=0, the log crown)
+//   tuckLeg   : pulls the knee/shin UP (seated hop)
+//   scootShift: shifts the horizontal thigh fore/back while scooting
+//   footSway  : idle swing of the dangling boot
+function drawSeatedLeg(k, hx, W, seatY, tuckLeg, scootShift, footSway, pal) {
+  ctx.save();
+  // ---- hip joint at the FRONT of the body, on the seat line ----
+  const hipX = hx + W - 13;
+  const hipY = seatY - 6;
+  const thighLen = 17 + scootShift;     // horizontal reach of the thigh
+  const thighThk = 11;                  // thigh thickness
+
+  // ---- THIGH: horizontal, forward across the log top (the hip fold) ----
+  ctx.fillStyle = pal.body;
+  ctx.fillRect(hipX, hipY, thighLen, thighThk);
+  ctx.fillStyle = "rgba(255,236,190,0.16)";
+  ctx.fillRect(hipX, hipY, thighLen, 3);              // top-lit cuisse
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.fillRect(hipX, hipY + thighThk - 3, thighLen, 3); // underside shade
+
+  // ---- KNEE (poleyn) at the forward end — where the leg folds down ----
+  const kneeX = hipX + thighLen - 2;
+  const kneeY = hipY - 1;
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(kneeX, kneeY, 11, thighThk + 3);
+
+  // ---- SHIN: drops STRAIGHT DOWN the front face from the knee ----
+  const shinW = 11;
+  const shinTopY = kneeY + 2 + tuckLeg;              // hop tucks the shin up
+  const shinBotY = 40 - tuckLeg * 0.7;              // boot region top (front face)
+  const shinX = kneeX + footSway;                    // gentle idle sway
+  ctx.fillStyle = pal.body;
+  ctx.fillRect(shinX, shinTopY, shinW, shinBotY - shinTopY);
+  ctx.fillStyle = "rgba(255,236,190,0.14)";
+  ctx.fillRect(shinX + shinW - 3, shinTopY, 3, shinBotY - shinTopY); // front-lit
+  ctx.fillStyle = "rgba(0,0,0,0.24)";
+  ctx.fillRect(shinX, shinTopY, 3, shinBotY - shinTopY);             // back shade
+
+  // ---- SABATON / BOOT at the bottom, toe pointing forward (toward foe) ----
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(shinX - 1, shinBotY, shinW + 7, 7);
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(shinX - 1, shinBotY + 5, shinW + 7, 2);  // sole shadow
+  ctx.restore();
+}
+
+function drawEmblem(side, cx, cy, pal) {
+  // distinct heraldry per player (beyond hue)
+  if (side === "p1") {
+    // RED: upward chevron + flame dot (warm)
+    ctx.fillStyle = pal.trim;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 7);
+    ctx.lineTo(cx + 6, cy + 2);
+    ctx.lineTo(cx + 3, cy + 2);
+    ctx.lineTo(cx, cy - 2);
+    ctx.lineTo(cx - 3, cy + 2);
+    ctx.lineTo(cx - 6, cy + 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = PAL.redLight;
+    ctx.fillRect(cx - 2, cy + 4, 4, 4);
+  } else {
+    // BLUE: four-pointed star / cross fitchy (cool)
+    ctx.fillStyle = pal.trim;
+    ctx.fillRect(cx - 1, cy - 7, 2, 14);
+    ctx.fillRect(cx - 7, cy - 1, 14, 2);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 4);
+    ctx.lineTo(cx + 4, cy);
+    ctx.lineTo(cx, cy + 4);
+    ctx.lineTo(cx - 4, cy);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+// The FRYING-PAN arm. One gauntleted hand grips a cast-iron pan (a stubby
+// handle + a round black pan head). Animated by attack phase (big wind-up +
+// downward whack arc) and by guard (pan held up across the face/helm).
+// During the ACTIVE phase the pan head is positioned forward so it lands
+// near attackHitbox()'s center (cy = seat - knightH*0.55 ≈ seat-35).
+function drawPanArm(k, hx, torsoY, W, torsoH, pal) {
+  // shoulder pivot near the front of the torso
+  const px = hx + W - 8;
+  const py = torsoY + 5;
+  let armAngle;          // radians; 0 = arm horizontal forward (+x)
+  let handle = 16;       // length of the pan handle from the gauntlet
+  let panR = 9;          // radius of the round pan head
+
+  switch (k.state) {
+    case ST.GUARD:
+      // pan raised vertically in front of the face/helm as a bulwark
+      armAngle = -1.5; handle = 13; break;
+    case ST.STAGGER:
+      armAngle = -2.2; break;   // arm flung up/back from the bonk
+    default:
+      armAngle = -0.45;         // relaxed, pan resting forward-down
+  }
+  // whack arc: cock the pan up & behind, then swing down/forward, follow-through
+  if (k.atkPhase === "startup") armAngle = -2.3;          // wound up overhead/behind
+  else if (k.atkPhase === "active") armAngle = -0.05;     // swinging through, forward & level
+  else if (k.atkPhase === "recovery") armAngle = 0.85;    // follow-through low
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(armAngle);
+
+  // upper arm
+  ctx.fillStyle = pal.light;
+  ctx.fillRect(0, -3, 13, 6);
+  // gauntlet gripping the handle
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(11, -4, 7, 8);
+
+  // ---- frying pan: handle + round cast-iron head ----
+  const handleX0 = 17;
+  // wooden-dark handle
+  ctx.fillStyle = "#2a211a";
+  ctx.fillRect(handleX0, -2, handle, 4);
+  ctx.fillStyle = "#43352a";
+  ctx.fillRect(handleX0, -2, handle, 1);             // handle top highlight
+  // handle collar where it meets the pan
+  ctx.fillStyle = PAL.steelDk;
+  ctx.fillRect(handleX0 + handle - 2, -3, 3, 6);
+
+  // round pan head (cast iron = near-black with a steel rim highlight)
+  const panCx = handleX0 + handle + panR - 1;
+  const panCy = 0;
+  ctx.fillStyle = "#15151a";                          // cast-iron body
+  ctx.beginPath();
+  ctx.arc(panCx, panCy, panR, 0, Math.PI * 2);
+  ctx.fill();
+  // rim
+  ctx.strokeStyle = "#34343c";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(panCx, panCy, panR - 1, 0, Math.PI * 2);
+  ctx.stroke();
+  // cooking-surface inner ring + a glint (sells the round pan read)
+  ctx.fillStyle = "#23232b";
+  ctx.beginPath();
+  ctx.arc(panCx, panCy, panR - 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(220,228,240,0.45)";
+  ctx.fillRect(panCx - panR + 2, panCy - 3, 3, 3);   // top-left glint
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const a = 1 - p.life / p.maxLife;
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawFloaters() {
+  ctx.textAlign = "center";
+  for (const f of floaters) {
+    const a = 1 - f.life / f.maxLife;
+    const pop = f.life < 0.12 ? 1 + (0.12 - f.life) * 3 : 1;
+    ctx.globalAlpha = Math.max(0, a);
+    const size = Math.round(20 * pop);
+    ctx.font = `900 ${size}px "Trebuchet MS", sans-serif`;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(f.text, f.x, f.y);
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "left";
+}
+
+// ---------------------------- UI (no shake) --------------------------
+function drawBalanceMeter(k, x, y, w, label, pal) {
+  const h = 18;
+  // frame
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+  ctx.fillStyle = "#2a3146";
+  ctx.fillRect(x, y, w, h);
+  // fill proportional to balance
+  const frac = k.balance / TUNE.balanceMax;
+  const fillW = Math.max(0, Math.round(w * frac));
+  // color shifts to warning when low
+  let c = pal.body;
+  if (frac < 0.3) c = "#d44"; else if (frac < 0.55) c = pal.light;
+  // P2 fills from the right so meters mirror toward center
+  if (k.side === "p1") {
+    ctx.fillStyle = c; ctx.fillRect(x, y, fillW, h);
+  } else {
+    ctx.fillStyle = c; ctx.fillRect(x + (w - fillW), y, fillW, h);
+  }
+  // teetering balance marker (tilts with how off-center the knight is)
+  const halfLog = logW / 2;
+  const off = (k.x - logCenter) / halfLog; // -1..1
+  const mx = k.side === "p1" ? x + fillW : x + (w - fillW);
+  ctx.save();
+  ctx.translate(Math.max(x + 6, Math.min(x + w - 6, mx)), y + h / 2);
+  ctx.rotate(off * 0.5);
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(-9, -2, 18, 4);    // the balance beam
+  ctx.fillStyle = PAL.steel;
+  ctx.fillRect(-1, -6, 2, 12);    // fulcrum post
+  ctx.restore();
+
+  // label + win pips
+  ctx.fillStyle = PAL.bone;
+  ctx.font = '700 16px "Trebuchet MS", sans-serif';
+  ctx.textAlign = k.side === "p1" ? "left" : "right";
+  const lx = k.side === "p1" ? x : x + w;
+  ctx.fillText(label, lx, y - 8);
+
+  // pips ●●○
+  const pipR = 6;
+  for (let i = 0; i < TUNE.roundsToWin; i++) {
+    const px = k.side === "p1"
+      ? x + w - 12 - i * 18
+      : x + 12 + i * 18;
+    ctx.beginPath();
+    ctx.arc(px, y - 13, pipR, 0, Math.PI * 2);
+    if (i < k.rounds) { ctx.fillStyle = pal.light; ctx.fill(); }
+    else { ctx.strokeStyle = PAL.steelDk; ctx.lineWidth = 2; ctx.stroke(); }
+  }
+  ctx.textAlign = "left";
+}
+
+function drawHUD() {
+  const palR = { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim };
+  const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
+  const mw = 320;
+  drawBalanceMeter(p1, 30, 40, mw, "P1  CRIMSON", palR);
+  drawBalanceMeter(p2, VW - 30 - mw, 40, mw, "AZURE  P2", palB);
+}
+
+function drawCenterText(text, sub, big) {
+  ctx.textAlign = "center";
+  ctx.fillStyle = PAL.bone;
+  ctx.strokeStyle = PAL.ink;
+  ctx.lineWidth = 6;
+  ctx.font = `900 ${big}px "Trebuchet MS", sans-serif`;
+  ctx.strokeText(text, VW / 2, VH / 2);
+  ctx.fillText(text, VW / 2, VH / 2);
+  if (sub) {
+    ctx.font = '600 22px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 4;
+    ctx.strokeText(sub, VW / 2, VH / 2 + 44);
+    ctx.fillStyle = PAL.bone;
+    ctx.fillText(sub, VW / 2, VH / 2 + 44);
+  }
+  ctx.textAlign = "left";
+}
+
+function drawCountdown() {
+  const label = COUNT_LABELS[Math.min(countdownIndex, COUNT_LABELS.length - 1)];
+  // pop scale based on time within the step
+  const t = 1 - (countdownTimer / TUNE.countdownStep); // 0..1
+  const scale = 1 + (1 - Math.min(1, t * 2)) * 0.6;
+  const isFight = countdownIndex === COUNT_LABELS.length - 1;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.translate(VW / 2, VH / 2 - 30);
+  ctx.scale(scale, scale);
+  ctx.font = `900 ${isFight ? 96 : 130}px "Trebuchet MS", sans-serif`;
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = PAL.ink;
+  ctx.fillStyle = isFight ? PAL.skyAmber : PAL.bone;
+  ctx.strokeText(label, 0, 0);
+  ctx.fillText(label, 0, 0);
+  ctx.restore();
+  ctx.textAlign = "left";
+}
+
+function drawTitle() {
+  // dim overlay
+  ctx.fillStyle = "rgba(8,12,20,0.55)";
+  ctx.fillRect(0, 0, VW, VH);
+
+  ctx.textAlign = "center";
+  // title
+  ctx.font = '900 78px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 10; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("LOG KNIGHT", VW / 2, 150);
+  ctx.fillStyle = PAL.redLight;  ctx.fillText("LOG KNIGHT", VW / 2, 150);
+  ctx.strokeText("BATTLE", VW / 2, 226);
+  ctx.fillStyle = PAL.bluLight;  ctx.fillText("BATTLE", VW / 2, 226);
+
+  ctx.font = 'italic 600 20px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("A bare-knuckle frying-pan duel — astride a log, last seat wins.", VW / 2, 268);
+
+  // controls panel
+  ctx.font = '700 17px "Trebuchet MS", sans-serif';
+  ctx.textAlign = "left";
+  const colL = VW / 2 - 300, colR = VW / 2 + 40;
+  ctx.fillStyle = PAL.redLight;
+  ctx.fillText("PLAYER 1 — CRIMSON", colL, 330);
+  ctx.fillStyle = PAL.bone;
+  ctx.font = '500 16px "Trebuchet MS", sans-serif';
+  ctx.fillText("A / D  ......  SCOOT", colL, 358);
+  ctx.fillText("W  .........  HOP", colL, 380);
+  ctx.fillText("S  ........  GUARD", colL, 402);
+  ctx.fillText("SPACE  ..  FRYING PAN", colL, 424);
+
+  ctx.font = '700 17px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bluLight;
+  ctx.fillText("PLAYER 2 — AZURE", colR, 330);
+  ctx.fillStyle = PAL.bone;
+  ctx.font = '500 16px "Trebuchet MS", sans-serif';
+  ctx.fillText("◄ / ►  ....  SCOOT", colR, 358);
+  ctx.fillText("▲  .........  HOP", colR, 380);
+  ctx.fillText("▼  ........  GUARD", colR, 402);
+  ctx.fillText("ENTER  ..  FRYING PAN", colR, 424);
+
+  // prompt (blink)
+  const blink = (Math.sin(frameCount * 0.12) > -0.2);
+  if (blink) {
+    ctx.textAlign = "center";
+    ctx.font = '900 26px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText("PRESS  ENTER  TO  START", VW / 2, 492);
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillText("PRESS  ENTER  TO  START", VW / 2, 492);
+  }
+  ctx.textAlign = "left";
+}
+
+function drawRoundOver() {
+  if (!roundWinner) return;
+  const isRed = roundWinner.side === "p1";
+  const txt = isRed ? "CRIMSON WINS THE ROUND!" : "AZURE WINS THE ROUND!";
+  ctx.fillStyle = "rgba(8,12,20,0.35)";
+  ctx.fillRect(0, 0, VW, VH);
+  ctx.textAlign = "center";
+  ctx.font = '900 48px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 8; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(txt, VW / 2, VH / 2 - 30);
+  ctx.fillStyle = isRed ? PAL.redLight : PAL.bluLight;
+  ctx.fillText(txt, VW / 2, VH / 2 - 30);
+  ctx.textAlign = "left";
+}
+
+function drawMatchOver() {
+  ctx.fillStyle = "rgba(8,12,20,0.7)";
+  ctx.fillRect(0, 0, VW, VH);
+  const isRed = matchWinner && matchWinner.side === "p1";
+  const txt = isRed ? "CRIMSON IS VICTORIOUS" : "AZURE IS VICTORIOUS";
+  ctx.textAlign = "center";
+  ctx.font = '900 60px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 10; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(txt, VW / 2, VH / 2 - 40);
+  ctx.fillStyle = isRed ? PAL.redLight : PAL.bluLight;
+  ctx.fillText(txt, VW / 2, VH / 2 - 40);
+
+  ctx.font = '700 24px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText(`${p1.rounds}  —  ${p2.rounds}`, VW / 2, VH / 2 + 8);
+
+  // restart button (visual; key R/Enter also works)
+  const bw = 230, bh = 54, bx = VW / 2 - bw / 2, by = VH / 2 + 44;
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(bx, by, bw, 4);
+  ctx.font = '900 24px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.ink;
+  ctx.fillText("RESTART  (R)", VW / 2, by + 36);
+  matchBtn = { bx, by, bw, bh };
+  ctx.textAlign = "left";
+}
+let matchBtn = null;
+
+// click restart button
+canvas.addEventListener("click", (e) => {
+  if (gameState !== GS.MATCH_OVER || !matchBtn) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = VW / rect.width, scaleY = VH / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top) * scaleY;
+  const b = matchBtn;
+  if (mx >= b.bx && mx <= b.bx + b.bw && my >= b.by && my <= b.by + b.bh) {
+    startMatch();
+  }
+});
+
+// ---------------------------- RENDER FRAME ---------------------------
+function render() {
+  // clear
+  ctx.fillStyle = PAL.skyTop;
+  ctx.fillRect(0, 0, VW, VH);
+
+  // ----- WORLD (subject to screen shake) -----
+  ctx.save();
+  if (shake > 0) {
+    const sxk = (Math.random() * 2 - 1) * shake;
+    const syk = (Math.random() * 2 - 1) * shake;
+    ctx.translate(sxk, syk);
+  }
+
+  drawBackground();
+  drawLog();
+
+  // draw knights (back-most by x for slight depth: draw farther first)
+  const order = [p1, p2];
+  for (const k of order) drawKnight(k);
+
+  drawParticles();
+  drawFloaters();
+
+  ctx.restore(); // end shake transform — UI must NOT jitter
+
+  // ----- UI / OVERLAYS (no shake) -----
+  if (gameState !== GS.MENU) drawHUD();
+
+  if (gameState === GS.MENU) drawTitle();
+  else if (gameState === GS.COUNTDOWN) drawCountdown();
+  else if (gameState === GS.ROUND_OVER) drawRoundOver();
+  else if (gameState === GS.MATCH_OVER) drawMatchOver();
+}
+
+// ---------------------------- MAIN LOOP ------------------------------
+let lastTime = performance.now();
+function frame(now) {
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+  // cap dt to avoid spiral-of-death (e.g. tab refocus)
+  if (dt > 1 / 20) dt = 1 / 20;
+  if (dt < 0) dt = 0;
+
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
