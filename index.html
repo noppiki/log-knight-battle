@@ -2035,7 +2035,7 @@ function drawSelect() {
   ctx.textAlign = "right";
   ctx.fillStyle = PAL.bluLight;
   if (gameMode === "1p") {
-    ctx.fillText("AZURE CPU  ·  computer picks automatically", VW - 40, 140);
+    ctx.fillText("AZURE  —  CPU  (auto)", VW - 40, 116);
   } else {
     ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 140);
   }
@@ -2088,15 +2088,17 @@ function drawSelect() {
     if (p1Here) drawCardOutline(cx, y0, cardW, cardH, PAL.redLight, sel.p1.locked, -3);
     if (p2Here) drawCardOutline(cx, y0, cardW, cardH, PAL.bluLight, sel.p2.locked, 3);
 
-    // tiny "CPU" tag above the azure cursor card in 1p so it's clear P2 is the AI
+    // "CPU" badge INSIDE the top of the azure-picked card (1p) — clear of the
+    // header hint lines so nothing overlaps.
     if (p2Here && gameMode === "1p") {
       ctx.save();
       ctx.textAlign = "center";
-      ctx.font = '900 14px "Trebuchet MS", sans-serif';
-      ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink;
-      ctx.strokeText("CPU", cx + cardW / 2, y0 - 10);
+      ctx.font = '900 13px "Trebuchet MS", sans-serif';
+      const bcx = cx + cardW / 2, bby = y0 + 6, bbw = 46, bbh = 18;
+      ctx.fillStyle = PAL.ink;
+      ctx.fillRect(bcx - bbw / 2, bby, bbw, bbh);
       ctx.fillStyle = PAL.bluLight;
-      ctx.fillText("CPU", cx + cardW / 2, y0 - 10);
+      ctx.fillText("CPU", bcx, bby + 14);
       ctx.restore();
     }
 
