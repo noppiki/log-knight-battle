@@ -590,6 +590,7 @@ const ASSET_SRCS = {
   hudTimer:     "assets/hud_timer.webp",
   cardFrame:    "assets/card_frame.webp",
   resultBanner: "assets/result_banner.webp",
+  modeSlab:     "assets/mode_slab.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -3453,13 +3454,31 @@ function drawTitle() {
     const isCur = gameMode === m.id;
     const by = mY - 24;
     // slab
-    ctx.fillStyle = PAL.ink;
-    ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
-    ctx.fillStyle = isCur ? "#2e3a56" : "#1a2234";
-    ctx.fillRect(bx, by, bw, bh);
-    if (isCur) {
-      ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
-      ctx.strokeRect(bx, by, bw, bh);
+    if (imgReady(IMG.modeSlab)) {
+      // soft amber glow halo behind the active slab (so it stands out without re-tinting the stone)
+      if (isCur) {
+        ctx.fillStyle = "rgba(216,164,90,0.22)";
+        ctx.fillRect(bx - 8, by - 8, bw + 16, bh + 16);
+        ctx.fillStyle = "rgba(216,164,90,0.35)";
+        ctx.fillRect(bx - 4, by - 4, bw + 8, bh + 8);
+      }
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(IMG.modeSlab, bx - 3, by - 3, bw + 6, bh + 6);
+      ctx.imageSmoothingEnabled = false;
+      if (isCur) {
+        ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+        ctx.strokeRect(bx, by, bw, bh);                 // keep crisp amber rim on top
+      }
+    } else {
+      // ---- fallback: original procedural slab ----
+      ctx.fillStyle = PAL.ink;
+      ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
+      ctx.fillStyle = isCur ? "#2e3a56" : "#1a2234";
+      ctx.fillRect(bx, by, bw, bh);
+      if (isCur) {
+        ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+        ctx.strokeRect(bx, by, bw, bh);
+      }
     }
     ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
     ctx.strokeText(m.label, cxm, mY);
