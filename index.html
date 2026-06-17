@@ -593,6 +593,7 @@ const ASSET_SRCS = {
   modeSlab:     "assets/mode_slab.webp",
   restartBtn:   "assets/restart_btn.webp",
   gaugeFrame:   "assets/gauge_frame.webp",
+  countdownMedallion: "assets/countdown_medallion.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -3263,6 +3264,18 @@ function drawCountdown() {
   ctx.textAlign = "center";
   ctx.translate(VW / 2, VH / 2 - 30);
   ctx.scale(scale, scale);
+
+  // Nordic medallion backdrop (drawn first; text overlays it)
+  if (imgReady(IMG.countdownMedallion)) {
+    const ms = 320;
+    ctx.save();
+    ctx.globalAlpha = isFight ? 0.85 : 1.0;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.countdownMedallion, -ms / 2, -ms / 2, ms, ms);
+    ctx.imageSmoothingEnabled = false;
+    ctx.restore();
+  }
+
   ctx.font = `900 ${isFight ? 96 : 130}px "Trebuchet MS", sans-serif`;
   ctx.lineWidth = 8;
   ctx.strokeStyle = PAL.ink;
