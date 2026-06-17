@@ -291,7 +291,7 @@ const SPECIALS = [
 // the local helpers, and calls render(). All net code is gated on
 // gameMode==="online" so the offline 1p/2p paths are byte-for-byte unchanged.
 const NET_BASE_URL = "wss://lkb-relay.noppiki.workers.dev/r/";
-const NET_CONNECT_TIMEOUT = 8000;   // ms before a stalled connect is treated as error
+const NET_CONNECT_TIMEOUT = 12000;  // ms before a stalled connect is treated as error
 
 const net = {
   mode: null,        // null | "host" | "guest"
@@ -365,6 +365,7 @@ function netConnect(code, intended) {
   }, NET_CONNECT_TIMEOUT);
 
   ws.onopen = () => {
+    if (net.connectTimer != null) { clearTimeout(net.connectTimer); net.connectTimer = null; }
     net.status = (intended === "host")
       ? "Room ready. Waiting for opponent…"
       : "Joined. Waiting for host…";
@@ -3066,7 +3067,7 @@ function drawTitle() {
     { id: "2p",     label: "2P  LOCAL" },
     { id: "online", label: "ONLINE" },
   ];
-  const mY = 332;
+  const mY = 384;
   const bw = 184, bh = 34, mGap = 16;
   const totalW = modes.length * bw + (modes.length - 1) * mGap;
   const mX0 = VW / 2 - totalW / 2;
@@ -3094,8 +3095,7 @@ function drawTitle() {
   }
   ctx.font = '600 13px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bone;
-  const enterLabel = (gameMode === "online") ? "ENTER  go online" : "ENTER  choose specials";
-  ctx.fillText("↑↓ / W S / 1 2 3  select mode  ·  " + enterLabel, VW / 2, mY + 24);
+  ctx.fillText("↑↓ / 1 2 3  select mode", VW / 2, mY + 26);
   ctx.textAlign = "left";
 
   // disconnect notice (shown once after an online session ends abnormally)
@@ -3103,46 +3103,10 @@ function drawTitle() {
     ctx.textAlign = "center";
     ctx.font = '800 16px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
-    ctx.strokeText(onlineDisconnectMsg, VW / 2, 360);
+    ctx.strokeText(onlineDisconnectMsg, VW / 2, mY + 50);
     ctx.fillStyle = "#ff9090";
-    ctx.fillText(onlineDisconnectMsg, VW / 2, 360);
+    ctx.fillText(onlineDisconnectMsg, VW / 2, mY + 50);
     ctx.textAlign = "left";
-  }
-
-  // controls panel (compact two columns)
-  ctx.font = '700 16px "Trebuchet MS", sans-serif';
-  ctx.textAlign = "left";
-  const colL = VW / 2 - 300, colR = VW / 2 + 40;
-  ctx.fillStyle = PAL.redLight;
-  ctx.fillText("PLAYER 1 — CRIMSON", colL, 384);
-  ctx.fillStyle = PAL.bone;
-  ctx.font = '500 15px "Trebuchet MS", sans-serif';
-  ctx.fillText("A / D  ......  SCOOT", colL, 404);
-  ctx.fillText("W  .........  HOP", colL, 422);
-  ctx.fillText("S  ........  GUARD", colL, 440);
-  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 458);
-  ctx.fillStyle = PAL.skyAmber;
-  ctx.fillText("F  ......  SPECIAL", colL, 476);
-
-  // P2 column: human controls in 2p, "CPU controlled" note in 1p.
-  ctx.font = '700 16px "Trebuchet MS", sans-serif';
-  ctx.fillStyle = PAL.bluLight;
-  ctx.fillText(gameMode === "1p" ? "PLAYER 2 — AZURE (CPU)" : "PLAYER 2 — AZURE", colR, 384);
-  ctx.fillStyle = PAL.bone;
-  ctx.font = '500 15px "Trebuchet MS", sans-serif';
-  if (gameMode === "1p") {
-    ctx.fillText("Computer-controlled", colR, 404);
-    ctx.fillText("opponent — medium AI.", colR, 422);
-    ctx.fillStyle = PAL.steelDk;
-    ctx.fillText("Switch to 2P for local", colR, 448);
-    ctx.fillText("two-player play.", colR, 466);
-  } else {
-    ctx.fillText("◄ / ►  ....  SCOOT", colR, 404);
-    ctx.fillText("▲  .........  HOP", colR, 422);
-    ctx.fillText("▼  ........  GUARD", colR, 440);
-    ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 458);
-    ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText("/  ......  SPECIAL", colR, 476);
   }
 
   // prompt (blink)
@@ -3151,9 +3115,9 @@ function drawTitle() {
     ctx.textAlign = "center";
     ctx.font = '900 22px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
-    ctx.strokeText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 512);
+    ctx.strokeText("PRESS  ENTER  TO  START", VW / 2, 462);
     ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 512);
+    ctx.fillText("PRESS  ENTER  TO  START", VW / 2, 462);
   }
   ctx.textAlign = "left";
 }
