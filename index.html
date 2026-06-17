@@ -51,7 +51,7 @@
   <div id="stage">
     <canvas id="game" width="960" height="540"></canvas>
   </div>
-  <div id="hint">P1: A/D scoot · W hop · S guard · SPACE frying pan &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER frying pan</div>
+  <div id="hint">P1: A/D scoot · W hop · S guard · TAP SPACE to swing the pan &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · TAP ENTER to swing</div>
 
 <script>
 "use strict";
@@ -121,39 +121,58 @@ const TUNE = {
   accel:       1700,
   friction:    1400,         // decel when no input
   maxSpeed:    260,
-  guardAccelMul: 0,          // cannot move while guarding
 
   // seated hop / gravity (knights sit astride the log and can hop in place)
   gravity:     1900,
   jumpV:       620,
 
-  // attack timing (seconds)
-  atkStartup:  0.10,
-  atkActive:   0.10,
-  atkRecovery: 0.22,
-  atkCooldown: 0.10,         // extra lock after recovery before next attack
-  reach:       44,           // frying-pan whack reach in front of body
-  hitH:        40,           // vertical extent of pan-swing hitbox
+  // ===== SAUSAGE-LEGEND PENDULUM COMBAT =====
+  // The upper body is a rigid torsional pendulum hinged at the seat.
+  // angAccel = -SPRING_K*angle - SPRING_DAMP*vel  (underdamped: it overshoots
+  // and oscillates a couple times before settling). Critical damping would be
+  // 2*sqrt(K); we keep DAMP well below that so a tap visibly springs & bounces.
+  springK:     58,           // torsional stiffness (rad/s^2 per rad)
+  springDamp:  6.2,          // damping (2*sqrt(58) ~= 15.2 is critical; 6.2 < that = underdamped)
+  swingMax:    1.30,         // |swingAngle| clamp (rad)
+  swingImpulse: 7.6,         // angular velocity added per tap (rad/s) toward foe
+  swingReflect: 0.45,        // velocity retained (reversed) when hitting the angle clamp
+  swingConsume: 0.40,        // fraction of MY swingVel kept after I land a hit (energy spent)
+  tapMinInterval: 0.06,      // min seconds between taps (auto-repeat guard backstop)
 
-  // combat impulses
-  knockGround: 230,          // vx impulse on a clean ground hit
-  knockAir:    330,          // bigger from a jump attack
-  guardMul:    0.42,         // guard multiplies incoming knock & balance loss
-  clashPush:   140,          // mutual clash pushback
+  // physics-driven hit
+  hitSpeed:    2.25,         // min |swingVel| (rad/s) toward foe for the pan to "bite"
+  knockScale:  17,           // seat vx impulse per (rad/s) of pan-tip approach speed
+  reaction:    1.4,          // opponent swingVel kick per unit force (rocks them back)
+  hitCooldown: 0.22,         // per-attacker lockout after a hit (one swing = one hit;
+                             // longer than a swing arc so one tap = at most one bite)
+  forceCap:    9.0,          // cap on effective pan-tip speed used for force (anti one-shot)
+  balHitScale: 1.15,         // balance lost per unit of (capped) pan-tip approach speed
+  armRestAngle: -0.42,       // rest tilt of the pan arm (drawPanArm uses this; panTip derives from it)
+  panTipR:     11,           // pan-tip hit circle radius
+
+  // clash
+  clashPush:   150,          // mutual clash seat pushback
+  clashReflect: 0.55,        // swingVel retained (reversed) on a clash
+  guardMul:    0.50,         // guard halves incoming seat-knock & reaction
+  guardSpringMul: 4.5,       // guard stiffens the spring toward upright
+
+  // hit-stop (impact freeze)
+  hitStopMin:  0.040,        // light hit freeze (s)
+  hitStopMax:  0.070,        // heavy hit freeze (s)
 
   // balance
   balanceMax:   100,
-  balHitLoss:   16,          // base balance loss per clean hit
-  balRecenter:  18,          // balance/sec recovered near center
+  balRecenter:  8,           // balance/sec recovered near center (kept modest so
+                             // sustained hit pressure isn't fully erased by recovery)
   balGuardBonus: 10,         // extra balance/sec recovered while guarding & still
   balEdgeDrain: 26,          // max balance/sec drained at the very edge
-  staggerTime:  0.32,        // stagger lockout
-  staggerLowBalExtra: 0.18,  // extra stagger when balance is very low
 
   // a low-balance knight gets shoved further (comeback / danger lever)
   lowBalKnockMul: 1.5,       // up to this multiplier as balance -> 0
 
   // round / match
+  roundTime:     99,         // seconds per round (countdown timer)
+  timeUpTieEps:  3,          // balance within this at time-up => DRAW (replay)
   countdownStep: 0.8,        // seconds per countdown number
   roundOverDelay: 2.2,       // pause on round-over banner
   roundsToWin:   2,          // best of 3
@@ -270,7 +289,7 @@ const EDGE_MARGIN = 6;
 // ----------------------------- KNIGHT --------------------------------
 const ST = {
   IDLE: "idle", WALK: "walk", JUMP: "jump",
-  ATTACK: "attack", GUARD: "guard", STAGGER: "stagger", FALLING: "falling",
+  ATTACK: "attack", GUARD: "guard", FALLING: "falling",
 };
 
 function makeKnight(side) {
@@ -282,14 +301,13 @@ function makeKnight(side) {
     facing: side === "p1" ? 1 : -1,
     balance: TUNE.balanceMax,
     state: ST.IDLE,
-    // attack sub-state
-    atkPhase: "none",           // startup | active | recovery | none
-    atkTimer: 0,
-    atkCdTimer: 0,
-    atkIsAir: false,
-    atkHitLanded: false,        // already connected this swing
-    // stagger
-    stagTimer: 0,
+    // ===== pendulum (rigid upper body about the seat pivot) =====
+    swingAngle: 0,              // rad; 0 = upright, + = leaning toward opponent
+    swingVel: 0,               // rad/s
+    tapCdTimer: 0,             // backstop min interval between taps
+    hitCdTimer: 0,             // post-hit lockout (one swing = one hit)
+    knockTimer: 0,             // window where vx is NOT clamped (knockback in flight)
+    attackFlash: 0,            // brief ATTACK label timer (for SFX/anim only)
     // falling bookkeeping
     fellAtFrame: -1,
     // visual
@@ -308,8 +326,9 @@ function resetKnightPositions() {
   for (const k of [p1, p2]) {
     k.y = logTopY; k.vx = 0; k.vy = 0; k.onGround = true;
     k.balance = TUNE.balanceMax;
-    k.state = ST.IDLE; k.atkPhase = "none"; k.atkTimer = 0; k.atkCdTimer = 0;
-    k.atkIsAir = false; k.atkHitLanded = false; k.stagTimer = 0;
+    k.state = ST.IDLE;
+    k.swingAngle = 0; k.swingVel = 0;
+    k.tapCdTimer = 0; k.hitCdTimer = 0; k.knockTimer = 0; k.attackFlash = 0;
     k.fellAtFrame = -1; k.landDust = 0;
   }
   p1.facing = 1; p2.facing = -1;
@@ -388,6 +407,16 @@ let roundWinner = null;         // p1 | p2
 let matchWinner = null;
 let frameCount = 0;
 
+// round timer + hit-stop
+let roundTimer = TUNE.roundTime;   // seconds remaining (counts down only in PLAYING)
+let hitStopTimer = 0;              // >0 freezes the sim (and the round clock)
+let timeUpBanner = false;          // show "TIME UP!" on the round-over banner
+let drawBanner = false;            // round was a DRAW (replay, no pip)
+
+function triggerHitStop(sec) {
+  if (sec > hitStopTimer) hitStopTimer = sec;
+}
+
 const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
 
 function startMatch() {
@@ -401,6 +430,10 @@ function startCountdown() {
   floaters.length = 0;
   shake = 0;
   roundWinner = null;
+  timeUpBanner = false;
+  drawBanner = false;
+  roundTimer = TUNE.roundTime;   // reset to 99 every round (incl. replays/draws)
+  hitStopTimer = 0;
   countdownIndex = 0;
   countdownTimer = TUNE.countdownStep;
   gameState = GS.COUNTDOWN;
@@ -420,6 +453,25 @@ function awardRound(winnerKnight) {
   // check match end
   if (winnerKnight.rounds >= TUNE.roundsToWin) {
     matchWinner = winnerKnight;
+  }
+}
+
+// TIME UP with no faller: decide by higher balance, or DRAW (replay) if tied.
+function resolveTimeUp() {
+  if (gameState !== GS.PLAYING) return;
+  timeUpBanner = true;
+  const diff = p1.balance - p2.balance;
+  if (Math.abs(diff) <= TUNE.timeUpTieEps) {
+    // DRAW: no pip to either side, replay the round. Do NOT route through
+    // awardRound (it would increment rounds and miscount best-of-3).
+    drawBanner = true;
+    roundWinner = null;
+    roundOverTimer = TUNE.roundOverDelay;
+    gameState = GS.ROUND_OVER;
+    sfxFall();
+    addShake(6);
+  } else {
+    awardRound(diff > 0 ? p1 : p2);
   }
 }
 
@@ -449,42 +501,43 @@ function updateKnight(k, dt, input) {
   }
 
   // tick timers
-  if (k.atkCdTimer > 0) k.atkCdTimer = Math.max(0, k.atkCdTimer - dt);
-  if (k.stagTimer > 0) {
-    k.stagTimer -= dt;
-    if (k.stagTimer <= 0) { k.stagTimer = 0; if (k.state === ST.STAGGER) k.state = ST.IDLE; }
-  }
+  if (k.tapCdTimer  > 0) k.tapCdTimer  = Math.max(0, k.tapCdTimer  - dt);
+  if (k.hitCdTimer  > 0) k.hitCdTimer  = Math.max(0, k.hitCdTimer  - dt);
+  if (k.knockTimer  > 0) k.knockTimer  = Math.max(0, k.knockTimer  - dt);
+  if (k.attackFlash > 0) k.attackFlash = Math.max(0, k.attackFlash - dt);
 
-  const guarding = input.guard && k.onGround && k.state !== ST.STAGGER &&
-                   k.atkPhase === "none";
+  const guarding = input.guard && k.onGround;
 
-  // --- ATTACK state machine (can start in air or ground) ---
-  const canStartAttack =
-    k.atkPhase === "none" && k.atkCdTimer === 0 &&
-    k.state !== ST.STAGGER && !input.guard;
-  if (input.attack && canStartAttack) {
-    k.atkPhase = "startup";
-    k.atkTimer = TUNE.atkStartup;
-    k.atkIsAir = !k.onGround;
-    k.atkHitLanded = false;
-    if (k.onGround) k.state = ST.ATTACK;
+  // --- ATTACK = TAP-TO-SWING -------------------------------------------
+  // Each genuine keypress (input.attack is already edge-triggered + repeat
+  // guarded by the input layer) adds a forward angular impulse toward the
+  // opponent. A tiny min-interval is a backstop against any residual repeat.
+  // Cannot swing while guarding. No startup/active/recovery state anymore;
+  // the "hit" is purely velocity-driven (see resolveCombat).
+  if (input.attack && !guarding && k.tapCdTimer === 0) {
+    k.swingVel += TUNE.swingImpulse;     // + = toward opponent
+    k.tapCdTimer = TUNE.tapMinInterval;
+    k.attackFlash = 0.16;                 // anim/SFX label only
     sfxSwing();
   }
-  if (k.atkPhase !== "none") {
-    k.atkTimer -= dt;
-    if (k.atkTimer <= 0) {
-      if (k.atkPhase === "startup") { k.atkPhase = "active"; k.atkTimer = TUNE.atkActive; }
-      else if (k.atkPhase === "active") { k.atkPhase = "recovery"; k.atkTimer = TUNE.atkRecovery; }
-      else if (k.atkPhase === "recovery") {
-        k.atkPhase = "none"; k.atkTimer = 0; k.atkCdTimer = TUNE.atkCooldown;
-        if (k.state === ST.ATTACK) k.state = ST.IDLE;
-      }
-    }
+
+  // --- PENDULUM SPRING (rigid upper-body rotation about the seat) -------
+  // Underdamped torsional spring: overshoots and oscillates. Guarding stiffens
+  // it hard toward upright (brace), so a guarding knight can't wind up a swing.
+  const springK = guarding ? TUNE.springK * TUNE.guardSpringMul : TUNE.springK;
+  const angAccel = -springK * k.swingAngle - TUNE.springDamp * k.swingVel;
+  k.swingVel += angAccel * dt;
+  k.swingAngle += k.swingVel * dt;
+  if (k.swingAngle > TUNE.swingMax) {
+    k.swingAngle = TUNE.swingMax;
+    if (k.swingVel > 0) k.swingVel = -k.swingVel * TUNE.swingReflect;
+  } else if (k.swingAngle < -TUNE.swingMax) {
+    k.swingAngle = -TUNE.swingMax;
+    if (k.swingVel < 0) k.swingVel = -k.swingVel * TUNE.swingReflect;
   }
 
   // --- HORIZONTAL MOVEMENT ---
-  const lockMove = (k.state === ST.STAGGER) || guarding ||
-                   (k.atkPhase !== "none" && k.onGround);
+  const lockMove = guarding;
   let moving = false;
   if (!lockMove) {
     if (input.left)  { k.vx -= TUNE.accel * dt; k.facing = -1; moving = true; }
@@ -494,18 +547,18 @@ function updateKnight(k, dt, input) {
   if (!moving || lockMove) {
     k.vx = approachZero(k.vx, TUNE.friction * dt);
   }
-  // clamp player-driven speed only. While staggered the knight is under
-  // knockback (which can exceed maxSpeed for jump/low-balance hits); let
-  // friction decay it naturally instead of capping it.
-  if (k.state !== ST.STAGGER) {
+  // clamp player-driven speed only. While knockback is in flight (knockTimer>0)
+  // the seat impulse may far exceed maxSpeed — that's exactly the shove that
+  // pushes a knight off the log — so leave it uncapped and let friction decay it.
+  if (k.knockTimer === 0) {
     if (k.vx >  TUNE.maxSpeed) k.vx =  TUNE.maxSpeed;
     if (k.vx < -TUNE.maxSpeed) k.vx = -TUNE.maxSpeed;
   }
 
-  // --- JUMP ---
-  if (input.jump && k.onGround && !guarding && k.state !== ST.STAGGER &&
-      k.atkPhase === "none") {
+  // --- HOP (also lunges the seat toward the opponent: a closing move) ---
+  if (input.jump && k.onGround && !guarding) {
     k.vy = -TUNE.jumpV;
+    k.vx += k.facing * 90;       // small forward lunge on the hop
     k.onGround = false;
     k.state = ST.JUMP;
     sfxJump();
@@ -530,13 +583,17 @@ function updateKnight(k, dt, input) {
   // --- HORIZONTAL INTEGRATION ---
   k.x += k.vx * dt;
 
-  // --- STATE label for animation (when not in special states) ---
-  if (k.onGround && k.atkPhase === "none" && k.state !== ST.STAGGER) {
-    if (guarding) k.state = ST.GUARD;
-    else if (Math.abs(k.vx) > 12) k.state = ST.WALK;
-    else k.state = ST.IDLE;
-  } else if (!k.onGround && k.atkPhase === "none" && k.state !== ST.STAGGER) {
+  // --- STATE label for animation only (physics is the spring above) ---
+  if (!k.onGround) {
     k.state = ST.JUMP;
+  } else if (guarding) {
+    k.state = ST.GUARD;
+  } else if (k.attackFlash > 0) {
+    k.state = ST.ATTACK;
+  } else if (Math.abs(k.vx) > 12) {
+    k.state = ST.WALK;
+  } else {
+    k.state = ST.IDLE;
   }
 
   // --- BALANCE / EDGE EFFECT ---
@@ -564,7 +621,6 @@ function updateKnight(k, dt, input) {
   if (k.onGround && (k.x < logLeft - EDGE_MARGIN || k.x > logRight + EDGE_MARGIN)) {
     k.state = ST.FALLING;
     k.onGround = false;
-    k.atkPhase = "none";
     k.fellAtFrame = frameCount;
     // launch in the direction it was already going (or off the nearest edge)
     if (k.vx === 0) k.vx = (k.x < logCenter) ? -60 : 60;
@@ -574,14 +630,30 @@ function updateKnight(k, dt, input) {
   }
 }
 
-// Compute the frying-pan hitbox for a knight whose attack is in the ACTIVE phase.
-function attackHitbox(k) {
-  if (k.atkPhase !== "active") return null;
-  const bodyFrontX = k.x + k.facing * (TUNE.knightW / 2);
-  const x1 = Math.min(bodyFrontX, bodyFrontX + k.facing * TUNE.reach);
-  const x2 = Math.max(bodyFrontX, bodyFrontX + k.facing * TUNE.reach);
-  const cy = k.y - TUNE.knightH * 0.55;
-  return { x1, x2, y1: cy - TUNE.hitH / 2, y2: cy + TUNE.hitH / 2, midx: bodyFrontX + k.facing * TUNE.reach * 0.6, midy: cy };
+// World-space frying-pan TIP, computed from the seat pivot + swingAngle so it
+// tracks the rigidly-rotated upper body EXACTLY as drawn. Render order is:
+//   translate(k.x,k.y) · scale(f,1) · rotate(swingAngle)   [pivot = seat]
+// so a torso-local point (lx,ly) lands on screen at:
+//   X = k.x + f*( cosθ*lx - sinθ*ly )
+//   Y = k.y +     sinθ*lx + cosθ*ly
+// PAN_LX/PAN_LY are the pan-head CENTER in torso-local coords, DERIVED from the
+// exact same constants drawPanArm() uses, so the hitbox sits on the drawn pan:
+//   shoulder pivot      px = hx+W-8 = -W/2 + W - 8 = W/2 - 8
+//                       py = torsoY+5, torsoY = topY+12 = -knightH+12
+//   pan center on arm   (panCx,0), panCx = handleX0+handle+panR-1 = 17+16+9-1 = 41
+//   rotated by armRestAngle then offset by (px,py).
+const _PAN_PX = TUNE.knightW / 2 - 8;                 // = 12
+const _PAN_PY = -TUNE.knightH + 12 + 5;               // = -47
+const _PAN_ARM = 41;                                  // panCx along the arm
+const PAN_LX = _PAN_PX + _PAN_ARM * Math.cos(TUNE.armRestAngle);
+const PAN_LY = _PAN_PY + _PAN_ARM * Math.sin(TUNE.armRestAngle);
+function panTip(k) {
+  const f = k.facing;
+  const t = k.swingAngle;
+  const c = Math.cos(t), s = Math.sin(t);
+  const x = k.x + f * (c * PAN_LX - s * PAN_LY);
+  const y = k.y + (s * PAN_LX + c * PAN_LY);
+  return { x, y };
 }
 function bodyBox(k) {
   return {
@@ -589,74 +661,101 @@ function bodyBox(k) {
     y1: k.y - TUNE.knightH,     y2: k.y,
   };
 }
-function boxesOverlap(a, b) {
-  return a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
+// circle (cx,cy,r) vs axis-aligned box
+function circleHitsBox(cx, cy, r, box) {
+  const nx = Math.max(box.x1, Math.min(cx, box.x2));
+  const ny = Math.max(box.y1, Math.min(cy, box.y2));
+  const dx = cx - nx, dy = cy - ny;
+  return dx * dx + dy * dy <= r * r;
 }
 
-// Resolve combat for the frame: GATHER both knights' hits, THEN apply,
-// so a simultaneous mutual hit becomes a CLANG rather than one-sided.
+// PHYSICS-DRIVEN combat. A knight "bites" when its pan tip is moving toward the
+// foe (swingVel > HIT_SPEED, positive = toward opponent) AND the pan-tip circle
+// overlaps the opponent's body box. Mutual fast swings that meet => CLANG.
 function resolveCombat(dt) {
-  const hbA = attackHitbox(p1);
-  const hbB = attackHitbox(p2);
-  const boxA = bodyBox(p1);
-  const boxB = bodyBox(p2);
+  const tipA = panTip(p1), tipB = panTip(p2);
+  const boxA = bodyBox(p1), boxB = bodyBox(p2);
 
-  const aHitsB = hbA && !p1.atkHitLanded && boxesOverlap(hbA, boxB) && p2.state !== ST.FALLING;
-  const bHitsA = hbB && !p2.atkHitLanded && boxesOverlap(hbB, boxA) && p1.state !== ST.FALLING;
+  // A guarding knight can NEVER deal damage: its stiff brace-spring can fling
+  // the raised pan forward fast enough to clear hitSpeed, but guard must be
+  // purely defensive. Exclude GUARD (and FALLING) from being a live attacker.
+  const aLive = p1.hitCdTimer === 0 && p1.swingVel > TUNE.hitSpeed &&
+                p1.state !== ST.FALLING && p1.state !== ST.GUARD;
+  const bLive = p2.hitCdTimer === 0 && p2.swingVel > TUNE.hitSpeed &&
+                p2.state !== ST.FALLING && p2.state !== ST.GUARD;
 
-  if (aHitsB && bHitsA) {
-    // CLANG: both frying pans meet (cast-iron on cast-iron) this frame.
-    p1.atkHitLanded = true; p2.atkHitLanded = true;
-    const cx = (p1.x + p2.x) / 2;
-    const cy = logTopY - TUNE.knightH * 0.6;
-    // push both apart (away from each other), no balance damage
-    if (p1.x < p2.x) { p1.vx = -TUNE.clashPush; p2.vx = TUNE.clashPush; }
-    else             { p1.vx =  TUNE.clashPush; p2.vx = -TUNE.clashPush; }
-    spawnSparks(cx, cy, 22, PAL.clash);
+  const aReach = aLive && circleHitsBox(tipA.x, tipA.y, TUNE.panTipR, boxB) && p2.state !== ST.FALLING;
+  const bReach = bLive && circleHitsBox(tipB.x, tipB.y, TUNE.panTipR, boxA) && p1.state !== ST.FALLING;
+
+  // CLASH: both pans fast toward each other and either tip overlaps the other.
+  const tipsMeet =
+    circleHitsBox(tipA.x, tipA.y, TUNE.panTipR, bodyBoxAround(tipB.x, tipB.y, TUNE.panTipR)) ;
+  if (aLive && bLive && (tipsMeet || (aReach && bReach))) {
+    const dirP1 = (p1.x <= p2.x) ? -1 : 1;   // shove each away from the other
+    p1.swingVel = -p1.swingVel * TUNE.clashReflect;
+    p2.swingVel = -p2.swingVel * TUNE.clashReflect;
+    p1.vx += TUNE.clashPush * dirP1;  p1.knockTimer = 0.20;
+    p2.vx += TUNE.clashPush * -dirP1; p2.knockTimer = 0.20;
+    p1.hitCdTimer = TUNE.hitCooldown; p2.hitCdTimer = TUNE.hitCooldown;
+    const cx = (tipA.x + tipB.x) / 2, cy = (tipA.y + tipB.y) / 2;
+    spawnSparks(cx, cy, 24, PAL.clash);
     spawnFloater(cx, cy - 18, "CLANG!", PAL.clash);
-    addShake(7);
+    addShake(8);
+    triggerHitStop(TUNE.hitStopMin);
     sfxClang();
     return;
   }
-  if (aHitsB) applyHit(p1, p2);
-  if (bHitsA) applyHit(p2, p1);
+
+  if (aReach) applyHit(p1, p2, tipA);
+  if (bReach) applyHit(p2, p1, tipB);
+}
+function bodyBoxAround(cx, cy, r) {
+  return { x1: cx - r, x2: cx + r, y1: cy - r, y2: cy + r };
 }
 
-function applyHit(attacker, target) {
-  attacker.atkHitLanded = true;
+function applyHit(attacker, target, tip) {
   const guarding = target.state === ST.GUARD;
-  // base impulse
-  let knock = attacker.atkIsAir ? TUNE.knockAir : TUNE.knockGround;
-  let balLoss = TUNE.balHitLoss + (attacker.atkIsAir ? 6 : 0);
+
+  // force scales with pan-tip approach speed (swingVel), capped to avoid one-shots
+  const speed = Math.min(TUNE.forceCap, attacker.swingVel);
+  let knock = TUNE.knockScale * speed;
+  let balLoss = TUNE.balHitScale * speed;
+  let react = TUNE.reaction * speed;
 
   // low-balance target gets shoved further (danger / comeback lever)
-  const balFrac = target.balance / TUNE.balanceMax; // 1 full .. 0 empty
+  const balFrac = target.balance / TUNE.balanceMax;            // 1 full .. 0 empty
   const lowMul = 1 + (TUNE.lowBalKnockMul - 1) * (1 - balFrac);
   knock *= lowMul;
 
-  if (guarding) { knock *= TUNE.guardMul; balLoss *= TUNE.guardMul; }
+  if (guarding) { knock *= TUNE.guardMul; balLoss *= TUNE.guardMul; react *= TUNE.guardMul; }
 
+  // seat knockback away from me (this is what shoves them toward the edge)
   const dir = (target.x >= attacker.x) ? 1 : -1;
   target.vx += knock * dir;
+  target.knockTimer = 0.30;                  // let the shove exceed maxSpeed briefly
   target.balance = Math.max(0, target.balance - balLoss);
+  // rock the opponent backward: a swing AWAY from me = negative swingVel for them
+  target.swingVel -= react;
 
-  // stagger (less if guarding)
-  if (!guarding) {
-    let st = TUNE.staggerTime;
-    if (target.balance < 30) st += TUNE.staggerLowBalExtra;
-    target.state = ST.STAGGER;
-    target.stagTimer = st;
-    target.atkPhase = "none"; // interrupt any swing
-  }
+  // consume MY energy + one-hit lockout
+  attacker.swingVel *= TUNE.swingConsume;
+  attacker.hitCdTimer = TUNE.hitCooldown;
 
-  // effects
-  const hb = attackHitbox(attacker);
-  const cx = hb ? hb.midx : target.x;
-  const cy = hb ? hb.midy : target.y - TUNE.knightH * 0.55;
-  spawnSparks(cx, cy, guarding ? 10 : 16, guarding ? PAL.steel : PAL.spark);
-  const words = guarding ? ["CLANG!", "GUARD!"] : ["BONK!", "THWACK!", "DOINK!", "WHACK!"];
-  spawnFloater(cx, cy - 16, words[Math.floor(Math.random() * words.length)], guarding ? PAL.steel : PAL.redLight);
-  addShake(guarding ? 4 : 9);
+  // effects (size scales with force)
+  const heavy = speed > TUNE.hitSpeed + 2.5;
+  const cx = tip.x, cy = tip.y;
+  spawnSparks(cx, cy, guarding ? 10 : (heavy ? 22 : 15), guarding ? PAL.steel : PAL.spark);
+  let words;
+  if (guarding) words = ["CLANG!", "GUARD!"];
+  else if (heavy) words = ["POW!", "THWACK!", "WHAM!"];
+  else words = ["BONK!", "DOINK!", "WHACK!"];
+  spawnFloater(cx, cy - 16, words[Math.floor(Math.random() * words.length)],
+               guarding ? PAL.steel : (attacker.side === "p1" ? PAL.redLight : PAL.bluLight));
+  addShake(guarding ? 4 : (heavy ? 12 : 8));
+  // hit-stop scaled to force
+  const hs = TUNE.hitStopMin + (TUNE.hitStopMax - TUNE.hitStopMin) *
+             Math.min(1, (speed - TUNE.hitSpeed) / (TUNE.forceCap - TUNE.hitSpeed));
+  if (!guarding) triggerHitStop(hs);
   sfxHit();
 }
 
@@ -699,6 +798,16 @@ function readInputs() {
 
 function update(dt) {
   frameCount++;
+
+  // --- HIT-STOP: freeze the sim (and the round clock) for a few ms, then
+  // resume. lastTime advances every frame, so the frame after a freeze has a
+  // normal small dt — no accumulation, no spiral. Effects + render still run.
+  if (hitStopTimer > 0) {
+    hitStopTimer = Math.max(0, hitStopTimer - dt);
+    updateEffects(dt);
+    return;
+  }
+
   updateEffects(dt);
 
   if (gameState === GS.COUNTDOWN) {
@@ -727,7 +836,16 @@ function update(dt) {
     updateKnight(p1, dt, i1);
     updateKnight(p2, dt, i2);
     resolveCombat(dt);
-    checkRoundResolution();
+    checkRoundResolution();      // a fall (once off-screen) flips state to ROUND_OVER
+    // Round clock: ticks ONLY while still PLAYING and NEITHER knight is mid-fall.
+    // A knight is flagged FALLING the instant its seat clears the edge but only
+    // resolves the round after tumbling off-screen (~0.7s); freezing the clock
+    // during that window keeps "fall = instant priority over the timer".
+    const falling = p1.state === ST.FALLING || p2.state === ST.FALLING;
+    if (gameState === GS.PLAYING && !falling) {
+      roundTimer -= dt;
+      if (roundTimer <= 0) { roundTimer = 0; resolveTimeUp(); }
+    }
     return;
   }
 
@@ -940,30 +1058,20 @@ function drawKnight(k) {
   const f = k.facing; // 1 right (faces toward opponent), -1 left
   ctx.scale(f, 1);    // draw facing-right then mirror
 
-  // --- seated animation cues ---
+  // --- seated animation cues (LEGS / SEAT only; the torso tilt is physics) ---
   // bobY  : small vertical breathing/scoot bounce of the seated torso
-  // lean  : torso tilt (deg). +forward toward foe, -back when hit
   // hipShift: lateral seat shift while scooting (reads as shuffling, not strides)
   // legPhase: drives the dangling-leg swing
-  let bobY = 0, lean = 0, hipShift = 0;
+  // The upper-body lean is NO LONGER a scripted value: it is the rigid
+  // pendulum rotation `k.swingAngle` applied below. The springy overshoot of
+  // that angle is the ONLY source of bounce — the art is never deformed.
+  let bobY = 0, hipShift = 0;
   const legPhase = Math.sin(k.bob);
   if (k.state === ST.WALK) {            // SCOOTING along the log
     bobY = Math.abs(Math.sin(k.bob)) * 1.8;
     hipShift = Math.sin(k.bob) * 3;     // hips shuffle side to side
-    lean = 6;                           // lean into the scoot
   } else if (k.state === ST.IDLE) {
     bobY = Math.sin(k.bob) * 1.2;
-  } else if (k.state === ST.GUARD) {
-    bobY = 0; lean = 8;                 // hunker / tuck forward low
-  } else if (k.state === ST.JUMP) {
-    lean = 7;                           // forward lunge-bounce
-  } else if (k.state === ST.STAGGER) {
-    lean = -10; bobY = 2;               // rock back on a pan to the helm
-  } else if (k.state === ST.ATTACK) {
-    // seated lean into the whack, timed to the swing phase
-    if (k.atkPhase === "startup") lean = -6;       // wind up, lean back
-    else if (k.atkPhase === "active") lean = 12;   // lunge into the swing
-    else if (k.atkPhase === "recovery") lean = 7;
   }
 
   ctx.translate(hipShift, bobY);
@@ -1011,12 +1119,15 @@ function drawKnight(k) {
   ctx.fillRect(hx + 2, seatY + 2, W - 4, 4);
 
   ctx.translate(0, tuck);
-  if (lean) ctx.rotate(lean * Math.PI / 180 * 0.5); // halved: keep it readable
+  // RIGID PENDULUM: rotate the whole upper body (torso+helm+pauldrons+pan arm
+  // +free hand) about the seat by the physics angle. Positive => leans toward
+  // the opponent. Same θ as panTip() so the hitbox sits on the drawn pan.
+  // (After ctx.scale(f,1) above, +θ tilts the top toward the foe for both sides.)
+  if (k.swingAngle) ctx.rotate(k.swingAngle);
 
   // ================= SEATED TORSO (compact, sits LOW on the rump) ========
-  // The trunk is short & chunky (a seated person is compact). It still spans
-  // the hit-critical band: torso fills y ~ -52..-6, fully covering the
-  // attackHitbox center (k.y - knightH*0.55 = -35.2, +/-20).
+  // The trunk is short & chunky (a seated person is compact). The torso fills
+  // y ~ -52..-6, covering the pan-tip strike height (panTip ~ k.y-0.55*H).
   const torsoBotY = seatY - 4;          // sits right on top of the rump
   const torsoTopY = topY + 12;          // y = -52 (helm overlaps above this)
   const torsoY = torsoTopY;
@@ -1068,14 +1179,14 @@ function drawKnight(k) {
 
   // ---- FREE HAND gripping the log for balance (back hand) ----
   // A gauntleted arm reaching DOWN to clamp the log crown beside the seat.
-  if (k.state !== ST.STAGGER) {
-    ctx.fillStyle = pal.light;
-    ctx.fillRect(hx - 1, torsoBotY - 10, 7, 12);   // back arm down to the log
-    ctx.fillStyle = pal.trim;
-    ctx.fillRect(hx - 4, torsoBotY + 1, 9, 5);     // gauntlet gripping the log top
-  }
+  // (Rides with the rigid upper-body rotation — it's part of the pendulum.)
+  ctx.fillStyle = pal.light;
+  ctx.fillRect(hx - 1, torsoBotY - 10, 7, 12);   // back arm down to the log
+  ctx.fillStyle = pal.trim;
+  ctx.fillRect(hx - 4, torsoBotY + 1, 9, 5);     // gauntlet gripping the log top
 
-  // ---- FRYING-PAN arm (front), animated by attack / guard phase ----
+  // ---- FRYING-PAN arm (front): rest/guard pose; the swing arc is the body's
+  // rigid rotation (k.swingAngle), so the pan rides forward when the body leans.
   drawPanArm(k, hx, torsoY, W, tH, pal);
 
   ctx.restore();
@@ -1167,10 +1278,10 @@ function drawEmblem(side, cx, cy, pal) {
 }
 
 // The FRYING-PAN arm. One gauntleted hand grips a cast-iron pan (a stubby
-// handle + a round black pan head). Animated by attack phase (big wind-up +
-// downward whack arc) and by guard (pan held up across the face/helm).
-// During the ACTIVE phase the pan head is positioned forward so it lands
-// near attackHitbox()'s center (cy = seat - knightH*0.55 ≈ seat-35).
+// handle + a round black pan head). The arm holds a FIXED rest pose relative
+// to the torso (or a raised guard pose); the forward whack arc is produced by
+// the rigid upper-body rotation (k.swingAngle) in drawKnight, and panTip()
+// uses that same angle + armLen so the hitbox sits on the drawn pan head.
 function drawPanArm(k, hx, torsoY, W, torsoH, pal) {
   // shoulder pivot near the front of the torso
   const px = hx + W - 8;
@@ -1183,15 +1294,13 @@ function drawPanArm(k, hx, torsoY, W, torsoH, pal) {
     case ST.GUARD:
       // pan raised vertically in front of the face/helm as a bulwark
       armAngle = -1.5; handle = 13; break;
-    case ST.STAGGER:
-      armAngle = -2.2; break;   // arm flung up/back from the bonk
     default:
-      armAngle = -0.45;         // relaxed, pan resting forward-down
+      // Rest pose. The forward whack arc now comes ENTIRELY from the rigid
+      // upper-body rotation (k.swingAngle) applied by drawKnight — the arm
+      // keeps a fixed pose relative to the torso so the pan-tip math matches
+      // the art exactly (no double animation).
+      armAngle = TUNE.armRestAngle;
   }
-  // whack arc: cock the pan up & behind, then swing down/forward, follow-through
-  if (k.atkPhase === "startup") armAngle = -2.3;          // wound up overhead/behind
-  else if (k.atkPhase === "active") armAngle = -0.05;     // swinging through, forward & level
-  else if (k.atkPhase === "recovery") armAngle = 0.85;    // follow-through low
 
   ctx.save();
   ctx.translate(px, py);
@@ -1325,6 +1434,51 @@ function drawHUD() {
   const mw = 320;
   drawBalanceMeter(p1, 30, 40, mw, "P1  CRIMSON", palR);
   drawBalanceMeter(p2, VW - 30 - mw, 40, mw, "AZURE  P2", palB);
+  drawRoundTimer();
+}
+
+// Chunky pixel-HUD round clock, top-center between the two balance gauges.
+// Carved stone slab + bold numerals; turns urgent crimson in the last 10s.
+function drawRoundTimer() {
+  const secs = Math.max(0, Math.ceil(roundTimer));
+  const urgent = roundTimer <= 10;
+  const blink = urgent && (Math.floor(roundTimer * 4) % 2 === 0);
+  const label = (secs < 10 ? "0" : "") + secs;
+
+  const cx = VW / 2;
+  const w = 108, h = 56, top = 24;
+  const bx = cx - w / 2, by = top;
+
+  // slab: dark frame + inset face
+  ctx.fillStyle = PAL.ink;
+  ctx.fillRect(bx - 4, by - 4, w + 8, h + 8);
+  ctx.fillStyle = urgent ? "#3a1620" : "#202a40";
+  ctx.fillRect(bx, by, w, h);
+  // top bevel highlight
+  ctx.fillStyle = urgent ? "#5a2230" : "#2e3a56";
+  ctx.fillRect(bx, by, w, 5);
+  // rivets at the corners (pixel-HUD flavor)
+  ctx.fillStyle = PAL.steelDk;
+  for (const [rx, ry] of [[bx + 6, by + 6], [bx + w - 8, by + 6], [bx + 6, by + h - 8], [bx + w - 8, by + h - 8]]) {
+    ctx.fillRect(rx, ry, 3, 3);
+  }
+
+  // numerals
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.font = '900 40px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 6; ctx.strokeStyle = PAL.ink;
+  const col = urgent ? (blink ? "#ff5a5a" : "#ff9090") : PAL.bone;
+  const cyT = by + h / 2 + 14;
+  ctx.strokeText(label, cx, cyT);
+  ctx.fillStyle = col;
+  ctx.fillText(label, cx, cyT);
+  // tiny "TIME" caption
+  ctx.font = '700 11px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = urgent ? "#e08a8a" : PAL.steelDk;
+  ctx.fillText("TIME", cx, by + 14);
+  ctx.restore();
+  ctx.textAlign = "left";
 }
 
 function drawCenterText(text, sub, big) {
@@ -1394,7 +1548,7 @@ function drawTitle() {
   ctx.fillText("A / D  ......  SCOOT", colL, 358);
   ctx.fillText("W  .........  HOP", colL, 380);
   ctx.fillText("S  ........  GUARD", colL, 402);
-  ctx.fillText("SPACE  ..  FRYING PAN", colL, 424);
+  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 424);
 
   ctx.font = '700 17px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bluLight;
@@ -1404,7 +1558,7 @@ function drawTitle() {
   ctx.fillText("◄ / ►  ....  SCOOT", colR, 358);
   ctx.fillText("▲  .........  HOP", colR, 380);
   ctx.fillText("▼  ........  GUARD", colR, 402);
-  ctx.fillText("ENTER  ..  FRYING PAN", colR, 424);
+  ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 424);
 
   // prompt (blink)
   const blink = (Math.sin(frameCount * 0.12) > -0.2);
@@ -1420,16 +1574,34 @@ function drawTitle() {
 }
 
 function drawRoundOver() {
-  if (!roundWinner) return;
-  const isRed = roundWinner.side === "p1";
-  const txt = isRed ? "CRIMSON WINS THE ROUND!" : "AZURE WINS THE ROUND!";
   ctx.fillStyle = "rgba(8,12,20,0.35)";
   ctx.fillRect(0, 0, VW, VH);
   ctx.textAlign = "center";
+
+  // optional "TIME UP!" kicker above the result
+  if (timeUpBanner) {
+    ctx.font = '900 34px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 7; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText("TIME UP!", VW / 2, VH / 2 - 86);
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillText("TIME UP!", VW / 2, VH / 2 - 86);
+  }
+
+  let txt, col;
+  if (drawBanner) {
+    txt = "DRAW — REPLAY!"; col = PAL.bone;
+  } else if (roundWinner) {
+    const isRed = roundWinner.side === "p1";
+    txt = isRed ? "CRIMSON WINS THE ROUND!" : "AZURE WINS THE ROUND!";
+    col = isRed ? PAL.redLight : PAL.bluLight;
+  } else {
+    ctx.textAlign = "left";
+    return;
+  }
   ctx.font = '900 48px "Trebuchet MS", sans-serif';
   ctx.lineWidth = 8; ctx.strokeStyle = PAL.ink;
   ctx.strokeText(txt, VW / 2, VH / 2 - 30);
-  ctx.fillStyle = isRed ? PAL.redLight : PAL.bluLight;
+  ctx.fillStyle = col;
   ctx.fillText(txt, VW / 2, VH / 2 - 30);
   ctx.textAlign = "left";
 }
