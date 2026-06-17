@@ -152,8 +152,11 @@ const TUNE = {
                              // re-stack swingVel to forceCap(9), so a solid hit costs
                              // ~1.15*9 = 10.4 balance => a full bar takes ~10 clean hits
                              // (~14 for isolated lighter taps). Sits in the 8-16 target band.
-  armRestAngle: -0.42,       // rest tilt of the pan arm (drawPanArm uses this; panTip derives from it)
-  panTipR:     11,           // pan-tip hit circle radius
+  armRestAngle: -0.42,       // legacy rest tilt of the procedural pan arm (kept for
+                             // reference; sprite knights derive pan geometry from
+                             // measured sprite anchors, not from this).
+  panTipR:     13.5,         // pan-tip hit circle radius ~ 0.12*spriteW*S (matches
+                             // the drawn cast-iron pan-head radius on the sprite).
 
   // clash
   clashPush:   150,          // mutual clash seat pushback
@@ -243,6 +246,46 @@ const SPECIALS = [
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d", { alpha: false });
 ctx.imageSmoothingEnabled = false;
+
+// ----------------------------- ASSET PRELOAD -------------------------
+// All art is loaded from sibling files (relative paths => works on file://
+// and GitHub Pages). The game NEVER calls getImageData/toDataURL, so the
+// canvas is never tainted by these (possibly cross-origin under some hosts)
+// images. Each draw site guards on img.complete && img.naturalWidth so a
+// mid-load image is simply skipped that frame (no throw, no half-drawn art).
+const ASSET_SRCS = {
+  bg:           "assets/bg.jpg",
+  knightRed:    "assets/knight_red.png",
+  knightBlue:   "assets/knight_blue.png",
+  titleCrest:   "assets/title_crest.png",
+  iconMega:     "assets/icon_mega.png",
+  iconCounter:  "assets/icon_counter.png",
+  iconDash:     "assets/icon_dash.png",
+  iconAnchor:   "assets/icon_anchor.png",
+};
+const IMG = {};
+let assetsLoaded = 0;
+const ASSET_TOTAL = Object.keys(ASSET_SRCS).length;
+for (const key in ASSET_SRCS) {
+  const img = new Image();
+  // count both success AND error so a missing/broken file can't wedge the
+  // LOADING screen forever; a failed image just stays naturalWidth===0 and
+  // its guarded draw site skips it.
+  img.onload  = () => { assetsLoaded++; };
+  img.onerror = () => { assetsLoaded++; };
+  img.src = ASSET_SRCS[key];
+  IMG[key] = img;
+}
+function imgReady(img) { return !!img && img.complete && img.naturalWidth > 0; }
+function allAssetsLoaded() { return assetsLoaded >= ASSET_TOTAL; }
+
+// map a special id -> its medallion icon image (SELECT screen cards)
+const SPECIAL_ICON = {
+  mega:    "iconMega",
+  counter: "iconCounter",
+  dash:    "iconDash",
+  anchor:  "iconAnchor",
+};
 
 function resize() {
   // Letterbox: pick integer-ish scale to fill window while keeping aspect.
@@ -965,23 +1008,37 @@ function applyBodyShove(attacker, target, knockBase, balBase, label, color) {
   triggerHitStop(TUNE.hitStopMax);
 }
 
+// ===== SPRITE GEOMETRY (image-art knights) =====
+// Measured anchors as fractions of EACH sprite's own (W,H), identical for both
+// colors:
+//   SEAT / pivot           = (0.375*spriteW, 0.64*spriteH)  -> sits at (k.x,k.y)
+//   FRYING-PAN HEAD center = (0.80*spriteW,  0.22*spriteH)
+// Both sprites are 256 tall (W = 182 red / 181 blue; the 1px diff is cosmetic).
+// In-game draw scale: targets sprite ~150-175px tall on the 540px canvas so the
+// knights read substantial sitting on the log (seat-to-helm span 0.64*256*S maps
+// to a bit above the old knightH=64 for presence). S=0.62 => 256*0.62 = 158.7px
+// tall, seat-to-helm ~101.6px. BOTH knights share this S.
+const SEAT_FX = 0.375, SEAT_FY = 0.64;
+const PAN_FX  = 0.80,  PAN_FY  = 0.22;
+const SPRITE_S = 0.62;            // in-game draw scale for both knight sprites
+// Nominal sprite dims for hit geometry (1px W diff between colors is ignored).
+const SPRITE_W = 182, SPRITE_H = 256;
+const KNIGHT_DRAW_H = SPRITE_H * SPRITE_S;   // ~158.7px on-screen sprite height
+const KNIGHT_SEAT_TO_TOP = SEAT_FY * SPRITE_H * SPRITE_S; // ~101.6px seat->helm
+
 // World-space frying-pan TIP, computed from the seat pivot + swingAngle so it
-// tracks the rigidly-rotated upper body EXACTLY as drawn. Render order is:
+// tracks the rigidly-rotated sprite EXACTLY as drawn. Render order is:
 //   translate(k.x,k.y) · scale(f,1) · rotate(swingAngle)   [pivot = seat]
-// so a torso-local point (lx,ly) lands on screen at:
+// so a sprite-local point (lx,ly) lands on screen at:
 //   X = k.x + f*( cosθ*lx - sinθ*ly )
 //   Y = k.y +     sinθ*lx + cosθ*ly
-// PAN_LX/PAN_LY are the pan-head CENTER in torso-local coords, DERIVED from the
-// exact same constants drawPanArm() uses, so the hitbox sits on the drawn pan:
-//   shoulder pivot      px = hx+W-8 = -W/2 + W - 8 = W/2 - 8
-//                       py = torsoY+5, torsoY = topY+12 = -knightH+12
-//   pan center on arm   (panCx,0), panCx = handleX0+handle+panR-1 = 17+16+9-1 = 41
-//   rotated by armRestAngle then offset by (px,py).
-const _PAN_PX = TUNE.knightW / 2 - 8;                 // = 12
-const _PAN_PY = -TUNE.knightH + 12 + 5;               // = -47
-const _PAN_ARM = 41;                                  // panCx along the arm
-const PAN_LX = _PAN_PX + _PAN_ARM * Math.cos(TUNE.armRestAngle);
-const PAN_LY = _PAN_PY + _PAN_ARM * Math.sin(TUNE.armRestAngle);
+// PAN_LX/PAN_LY are the pan-head CENTER offset FROM the seat anchor in scaled
+// sprite pixels (the same frame the sprite is drawn in, BEFORE scale·rotate),
+// so the hit point coincides with the drawn pan head at ANY swingAngle:
+//   PAN_LX =  (0.80-0.375)*spriteW*S =  0.425*spriteW*S
+//   PAN_LY =  (0.22 -0.64 )*spriteH*S = -0.42 *spriteH*S
+const PAN_LX = (PAN_FX - SEAT_FX) * SPRITE_W * SPRITE_S;   // ~ +47.96 (forward)
+const PAN_LY = (PAN_FY - SEAT_FY) * SPRITE_H * SPRITE_S;   // ~ -66.66 (up)
 function panTip(k) {
   const f = k.facing;
   const t = k.swingAngle;
@@ -990,10 +1047,15 @@ function panTip(k) {
   const y = k.y + (s * PAN_LX + c * PAN_LY);
   return { x, y };
 }
+// bodyBox covers the VISIBLE sprite torso: horizontally seat ± ~0.32*spriteW*S,
+// vertically from the seat (k.y) UP to the helm top (k.y - 0.64*spriteH*S). This
+// keeps received hits landing on the body, and at spawn spacing two idle knights
+// neither overlap bodies nor pans (see the report).
+const BODY_HALF_W = 0.32 * SPRITE_W * SPRITE_S;           // ~ 36.1
 function bodyBox(k) {
   return {
-    x1: k.x - TUNE.knightW / 2, x2: k.x + TUNE.knightW / 2,
-    y1: k.y - TUNE.knightH,     y2: k.y,
+    x1: k.x - BODY_HALF_W,        x2: k.x + BODY_HALF_W,
+    y1: k.y - KNIGHT_SEAT_TO_TOP, y2: k.y,
   };
 }
 // circle (cx,cy,r) vs axis-aligned box
@@ -1331,37 +1393,16 @@ const clouds = [
 ];
 
 function drawBackground() {
-  // sky gradient (night -> mid -> horizon rose -> amber band)
-  const g = ctx.createLinearGradient(0, 0, 0, logTopY + 20);
-  g.addColorStop(0.00, PAL.skyTop);
-  g.addColorStop(0.45, PAL.skyMid);
-  g.addColorStop(0.80, PAL.skyHorizon);
-  g.addColorStop(1.00, PAL.skyAmber);
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, VW, logTopY + 20);
-
-  // faint distant sun glow near horizon
-  const sunX = VW * 0.5, sunY = logTopY - 30;
-  const sg = ctx.createRadialGradient(sunX, sunY, 6, sunX, sunY, 220);
-  sg.addColorStop(0, "rgba(246,216,160,0.55)");
-  sg.addColorStop(1, "rgba(246,216,160,0)");
-  ctx.fillStyle = sg;
-  ctx.fillRect(0, 0, VW, logTopY + 20);
-
-  // soft clouds
-  ctx.fillStyle = PAL.cloud;
-  for (const c of clouds) {
-    drawSoftCloud(c.x, c.y, c.w, c.h);
+  // The hand-painted 960x540 Nordic-dusk plate replaces the old procedural
+  // sky/sun/clouds/forest. Drawn full-frame; the procedural LOG (drawLog) is
+  // still painted ON TOP so the knights sit on it at the same coordinates.
+  // Guarded so a mid-load image never throws (falls back to the dusk fill).
+  if (imgReady(IMG.bg)) {
+    ctx.drawImage(IMG.bg, 0, 0, VW, VH);
+  } else {
+    ctx.fillStyle = PAL.skyTop;
+    ctx.fillRect(0, 0, VW, VH);
   }
-
-  // forest layers far -> near
-  drawForest(forestFar, PAL.forestFar);
-  drawForest(forestMid, PAL.forestMid);
-  drawForest(forestNear, PAL.forestNear);
-
-  // dark ground fill below horizon
-  ctx.fillStyle = "#0f1422";
-  ctx.fillRect(0, logTopY + 8, VW, VH - (logTopY + 8));
 }
 
 function drawSoftCloud(x, y, w, h) {
@@ -1490,319 +1531,54 @@ function drawKnight(k) {
   else if (k.counterFlash > 0){ auraCol = PAL.clash;  auraA = 0.5 * (k.counterFlash / 0.4); }
   else if (spFull)            { auraCol = PAL.sunGlow; auraA = 0.16 + 0.08 * Math.sin(frameCount * 0.18); }
   if (auraCol && auraA > 0) {
-    const gx = k.x, gy = k.y - TUNE.knightH * 0.5;
-    const gr = ctx.createRadialGradient(gx, gy, 6, gx, gy, TUNE.knightH * 0.85);
+    // size the aura to the SPRITE torso (seat -> helm-top), centered mid-torso,
+    // so the cue reads behind the bigger image knight (not the old 64px body).
+    const auraR = KNIGHT_SEAT_TO_TOP * 0.75;
+    const gx = k.x, gy = k.y - KNIGHT_SEAT_TO_TOP * 0.5;
+    const gr = ctx.createRadialGradient(gx, gy, 6, gx, gy, auraR);
     gr.addColorStop(0, auraCol);
     gr.addColorStop(1, "rgba(0,0,0,0)");
     ctx.save();
     ctx.globalAlpha = Math.max(0, Math.min(0.6, auraA));
     ctx.fillStyle = gr;
     ctx.beginPath();
-    ctx.arc(gx, gy, TUNE.knightH * 0.85, 0, Math.PI * 2);
+    ctx.arc(gx, gy, auraR, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
-  ctx.save();
-  ctx.translate(k.x, k.y);
+  // ===== SPRITE BODY =====
+  // The whole seated knight is a single transparent PNG. Motion comes from the
+  // transform, never from deforming the art:
+  //   translate(seat) · scale(facing,1) · [tumble while FALLING] · rotate(swingAngle)
+  // The seat anchor (SEAT_FX,SEAT_FY of the sprite) is placed at (k.x,k.y) and the
+  // pendulum swing rotates the whole figure about that seat — so the pan arcs
+  // exactly where panTip() computes its hit point. facing flips P2 to face left.
+  // A tiny seated bob/scoot shuffle is applied as a translate (the art stays rigid).
+  const sprite = (k.side === "p1") ? IMG.knightRed : IMG.knightBlue;
+  if (imgReady(sprite)) {
+    // small seated cues: idle breathing bob + scooting shuffle (translate only)
+    let bobY = 0, hipShift = 0;
+    if (k.state === ST.WALK) {
+      bobY = Math.abs(Math.sin(k.bob)) * 1.8;
+      hipShift = Math.sin(k.bob) * 3;
+    } else if (k.state === ST.IDLE) {
+      bobY = Math.sin(k.bob) * 1.2;
+    }
 
-  // falling tumble: rotate around body center
-  if (k.state === ST.FALLING) {
-    ctx.translate(0, -TUNE.knightH / 2);
-    ctx.rotate(k.tumble || 0);
-    ctx.translate(0, TUNE.knightH / 2);
+    const sw = sprite.naturalWidth, sh = sprite.naturalHeight;
+    const dw = sw * SPRITE_S, dh = sh * SPRITE_S;
+
+    ctx.save();
+    ctx.translate(k.x + hipShift, k.y + bobY);
+    ctx.scale(k.facing, 1);                 // mirror P2 to face left
+    if (k.state === ST.FALLING) ctx.rotate(k.tumble || 0); // tumble off the log
+    ctx.rotate(k.swingAngle);               // rigid pendulum swing about the seat
+    ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
+    // place the seat anchor at the origin: shift so (SEAT_FX*sw, SEAT_FY*sh) -> 0,0
+    ctx.drawImage(sprite, -SEAT_FX * dw, -SEAT_FY * dh, dw, dh);
+    ctx.restore();
   }
-
-  const f = k.facing; // 1 right (faces toward opponent), -1 left
-  ctx.scale(f, 1);    // draw facing-right then mirror
-
-  // --- seated animation cues (LEGS / SEAT only; the torso tilt is physics) ---
-  // bobY  : small vertical breathing/scoot bounce of the seated torso
-  // hipShift: lateral seat shift while scooting (reads as shuffling, not strides)
-  // legPhase: drives the dangling-leg swing
-  // The upper-body lean is NO LONGER a scripted value: it is the rigid
-  // pendulum rotation `k.swingAngle` applied below. The springy overshoot of
-  // that angle is the ONLY source of bounce — the art is never deformed.
-  let bobY = 0, hipShift = 0;
-  const legPhase = Math.sin(k.bob);
-  if (k.state === ST.WALK) {            // SCOOTING along the log
-    bobY = Math.abs(Math.sin(k.bob)) * 1.8;
-    hipShift = Math.sin(k.bob) * 3;     // hips shuffle side to side
-  } else if (k.state === ST.IDLE) {
-    bobY = Math.sin(k.bob) * 1.2;
-  }
-
-  ctx.translate(hipShift, bobY);
-
-  const W = TUNE.knightW, H = TUNE.knightH;
-  const hx = -W / 2;        // left of body (in facing-right local space)
-  const seatY = 0;          // hips/seat at origin (on the log's top surface)
-  const topY = -H;          // crown of the helm (top of the hitbox)
-
-  // GUARD tucks the seated torso lower; a seated hop tucks the legs up.
-  const tuck = (k.state === ST.GUARD) ? 6 : 0;
-
-  // ================= SEATED LEG (bent Γ/L over the log) =================
-  // THE seated cue (side profile): the near leg folds twice. From the hip the
-  // THIGH runs roughly HORIZONTAL FORWARD across the log top (straddling it),
-  // then the knee bends ~90° and the SHIN + boot drop STRAIGHT DOWN the brown
-  // front face. Horizontal-thigh + vertical-shin = "sitting astride." We draw
-  // ONE prominent bent near leg (two parallel vertical legs would read as
-  // standing). The FAR leg is occluded by the log/body — only a small dark
-  // hint peeks out behind. Legs are cosmetic (below k.y, outside the hitbox).
-  // Drawn FIRST so the rump/torso overlap the thigh root.
-  const tuckLeg = (k.state === ST.JUMP) ? 14 : 0;    // knee pulls up on a hop
-  const scootShift = (k.state === ST.WALK) ? legPhase * 2.5 : 0; // thigh shuffles
-  const footSway = Math.sin(k.bob) * 1.5;            // idle dangle of the shin
-
-  // FAR leg hint: a small darker thigh/knee nub peeking behind the body, far
-  // side of the log. NOT a full second leg.
-  ctx.fillStyle = pal.dark;
-  ctx.fillRect(hx + 2, seatY - 6, 11, 9);            // far thigh stub on the log top
-  ctx.fillStyle = "rgba(0,0,0,0.30)";
-  ctx.fillRect(hx + 2, seatY + 1, 11, 3);            // its shadow on the crown
-
-  // NEAR leg (bright team color, the dominant read):
-  drawSeatedLeg(k, hx, W, seatY, tuckLeg, scootShift, footSway, pal);
-
-  // ================= RUMP / SEAT (clamps the rounded log crown) ==========
-  // A wide hip block that visibly CROSSES the crown (y<0 above, y>0 over the
-  // log top) so it reads as a seat resting on / gripping the rounded log.
-  ctx.fillStyle = pal.dark;
-  ctx.fillRect(hx + 1, seatY - 9, W - 2, 14);          // broad seat straddling crown
-  ctx.fillStyle = pal.body;
-  ctx.fillRect(hx + 3, seatY - 9, W - 6, 7);           // upper hip (lit)
-  // saddle-shadow where the rump meets the log crown
-  ctx.fillStyle = "rgba(0,0,0,0.22)";
-  ctx.fillRect(hx + 2, seatY + 2, W - 4, 4);
-
-  ctx.translate(0, tuck);
-  // RIGID PENDULUM: rotate the whole upper body (torso+helm+pauldrons+pan arm
-  // +free hand) about the seat by the physics angle. Positive => leans toward
-  // the opponent. Same θ as panTip() so the hitbox sits on the drawn pan.
-  // (After ctx.scale(f,1) above, +θ tilts the top toward the foe for both sides.)
-  if (k.swingAngle) ctx.rotate(k.swingAngle);
-
-  // ================= SEATED TORSO (compact, sits LOW on the rump) ========
-  // The trunk is short & chunky (a seated person is compact). The torso fills
-  // y ~ -52..-6, covering the pan-tip strike height (panTip ~ k.y-0.55*H).
-  const torsoBotY = seatY - 4;          // sits right on top of the rump
-  const torsoTopY = topY + 12;          // y = -52 (helm overlaps above this)
-  const torsoY = torsoTopY;
-  const tH = torsoBotY - torsoTopY;     // ~48px tall, chunky seated trunk
-  // armor body (slightly wider/hunched than a standing torso)
-  ctx.fillStyle = pal.body;
-  ctx.fillRect(hx + 2, torsoY, W - 4, tH);
-  // shading left/right
-  ctx.fillStyle = pal.dark;
-  ctx.fillRect(hx + 2, torsoY, 4, tH);
-  ctx.fillStyle = pal.light;
-  ctx.fillRect(hx + W - 6, torsoY, 4, tH);
-  // tabard (vertical cloth panel)
-  ctx.fillStyle = pal.light;
-  ctx.fillRect(hx + W / 2 - 7, torsoY + 3, 14, tH - 4);
-  // heraldic emblem on tabard
-  drawEmblem(k.side, hx + W / 2, torsoY + tH / 2, pal);
-  // belt at the waist / seat line
-  ctx.fillStyle = pal.trim;
-  ctx.fillRect(hx + 2, torsoBotY - 5, W - 4, 4);
-
-  // ---- pauldrons (shoulders, broad & hunched) ----
-  ctx.fillStyle = pal.trim;
-  ctx.fillRect(hx, torsoY - 1, 12, 8);
-  ctx.fillRect(hx + W - 12, torsoY - 1, 12, 8);
-
-  // ---- head / great helm (LOWERED & hunched into the shoulders) ----
-  // Helm top stays at topY so the figure still fills the top of the hitbox,
-  // but it sits squat & wide (seated hunch), not towering on a long neck.
-  const headY = topY;        // y = -64
-  const headH = 16;
-  ctx.fillStyle = PAL.steel;
-  ctx.fillRect(hx + W / 2 - 10, headY, 20, headH);
-  ctx.fillStyle = PAL.steelDk;
-  ctx.fillRect(hx + W / 2 - 10, headY, 4, headH);    // left shadow
-  ctx.fillStyle = "#dfe4ec";
-  ctx.fillRect(hx + W / 2 + 5, headY, 3, headH);     // right hi-light
-  // vision slit
-  ctx.fillStyle = PAL.ink;
-  ctx.fillRect(hx + W / 2 - 7, headY + 6, 14, 3);
-  // cross reinforce on helm
-  ctx.fillStyle = PAL.steelDk;
-  ctx.fillRect(hx + W / 2 - 1, headY + 1, 2, headH - 2);
-  // crest plume on top (team color)
-  ctx.fillStyle = pal.light;
-  ctx.fillRect(hx + W / 2 - 2, headY - 6, 4, 6);
-  ctx.fillStyle = pal.trim;
-  ctx.fillRect(hx + W / 2 - 1, headY - 9, 2, 4);
-
-  // ---- FREE HAND gripping the log for balance (back hand) ----
-  // A gauntleted arm reaching DOWN to clamp the log crown beside the seat.
-  // (Rides with the rigid upper-body rotation — it's part of the pendulum.)
-  ctx.fillStyle = pal.light;
-  ctx.fillRect(hx - 1, torsoBotY - 10, 7, 12);   // back arm down to the log
-  ctx.fillStyle = pal.trim;
-  ctx.fillRect(hx - 4, torsoBotY + 1, 9, 5);     // gauntlet gripping the log top
-
-  // ---- FRYING-PAN arm (front): rest/guard pose; the swing arc is the body's
-  // rigid rotation (k.swingAngle), so the pan rides forward when the body leans.
-  drawPanArm(k, hx, torsoY, W, tH, pal);
-
-  ctx.restore();
-}
-
-// The NEAR seated leg, bent into a Γ/L (side profile):
-//   HIP  ->  THIGH horizontal forward across the log top (straddling it)
-//        ->  KNEE bends ~90°
-//        ->  SHIN drops straight DOWN the brown front face -> BOOT dangling.
-// This double-fold (90° at hip, 90° at knee) is the unmistakable "sitting
-// astride" silhouette. Drawn in bright team color so it's clear against the
-// brown log front. Purely cosmetic: lives below k.y, outside the hitbox.
-//   hx,W      : body left edge & width (local facing-right space)
-//   seatY     : seat line (=0, the log crown)
-//   tuckLeg   : pulls the knee/shin UP (seated hop)
-//   scootShift: shifts the horizontal thigh fore/back while scooting
-//   footSway  : idle swing of the dangling boot
-function drawSeatedLeg(k, hx, W, seatY, tuckLeg, scootShift, footSway, pal) {
-  ctx.save();
-  // ---- hip joint at the FRONT of the body, on the seat line ----
-  const hipX = hx + W - 13;
-  const hipY = seatY - 6;
-  const thighLen = 17 + scootShift;     // horizontal reach of the thigh
-  const thighThk = 11;                  // thigh thickness
-
-  // ---- THIGH: horizontal, forward across the log top (the hip fold) ----
-  ctx.fillStyle = pal.body;
-  ctx.fillRect(hipX, hipY, thighLen, thighThk);
-  ctx.fillStyle = "rgba(255,236,190,0.16)";
-  ctx.fillRect(hipX, hipY, thighLen, 3);              // top-lit cuisse
-  ctx.fillStyle = "rgba(0,0,0,0.22)";
-  ctx.fillRect(hipX, hipY + thighThk - 3, thighLen, 3); // underside shade
-
-  // ---- KNEE (poleyn) at the forward end — where the leg folds down ----
-  const kneeX = hipX + thighLen - 2;
-  const kneeY = hipY - 1;
-  ctx.fillStyle = pal.trim;
-  ctx.fillRect(kneeX, kneeY, 11, thighThk + 3);
-
-  // ---- SHIN: drops STRAIGHT DOWN the front face from the knee ----
-  const shinW = 11;
-  const shinTopY = kneeY + 2 + tuckLeg;              // hop tucks the shin up
-  const shinBotY = 40 - tuckLeg * 0.7;              // boot region top (front face)
-  const shinX = kneeX + footSway;                    // gentle idle sway
-  ctx.fillStyle = pal.body;
-  ctx.fillRect(shinX, shinTopY, shinW, shinBotY - shinTopY);
-  ctx.fillStyle = "rgba(255,236,190,0.14)";
-  ctx.fillRect(shinX + shinW - 3, shinTopY, 3, shinBotY - shinTopY); // front-lit
-  ctx.fillStyle = "rgba(0,0,0,0.24)";
-  ctx.fillRect(shinX, shinTopY, 3, shinBotY - shinTopY);             // back shade
-
-  // ---- SABATON / BOOT at the bottom, toe pointing forward (toward foe) ----
-  ctx.fillStyle = PAL.ink;
-  ctx.fillRect(shinX - 1, shinBotY, shinW + 7, 7);
-  ctx.fillStyle = "rgba(0,0,0,0.4)";
-  ctx.fillRect(shinX - 1, shinBotY + 5, shinW + 7, 2);  // sole shadow
-  ctx.restore();
-}
-
-function drawEmblem(side, cx, cy, pal) {
-  // distinct heraldry per player (beyond hue)
-  if (side === "p1") {
-    // RED: upward chevron + flame dot (warm)
-    ctx.fillStyle = pal.trim;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - 7);
-    ctx.lineTo(cx + 6, cy + 2);
-    ctx.lineTo(cx + 3, cy + 2);
-    ctx.lineTo(cx, cy - 2);
-    ctx.lineTo(cx - 3, cy + 2);
-    ctx.lineTo(cx - 6, cy + 2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = PAL.redLight;
-    ctx.fillRect(cx - 2, cy + 4, 4, 4);
-  } else {
-    // BLUE: four-pointed star / cross fitchy (cool)
-    ctx.fillStyle = pal.trim;
-    ctx.fillRect(cx - 1, cy - 7, 2, 14);
-    ctx.fillRect(cx - 7, cy - 1, 14, 2);
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - 4);
-    ctx.lineTo(cx + 4, cy);
-    ctx.lineTo(cx, cy + 4);
-    ctx.lineTo(cx - 4, cy);
-    ctx.closePath();
-    ctx.fill();
-  }
-}
-
-// The FRYING-PAN arm. One gauntleted hand grips a cast-iron pan (a stubby
-// handle + a round black pan head). The arm holds a FIXED rest pose relative
-// to the torso (or a raised guard pose); the forward whack arc is produced by
-// the rigid upper-body rotation (k.swingAngle) in drawKnight, and panTip()
-// uses that same angle + armLen so the hitbox sits on the drawn pan head.
-function drawPanArm(k, hx, torsoY, W, torsoH, pal) {
-  // shoulder pivot near the front of the torso
-  const px = hx + W - 8;
-  const py = torsoY + 5;
-  let armAngle;          // radians; 0 = arm horizontal forward (+x)
-  let handle = 16;       // length of the pan handle from the gauntlet
-  let panR = 9;          // radius of the round pan head
-
-  switch (k.state) {
-    case ST.GUARD:
-      // pan raised vertically in front of the face/helm as a bulwark
-      armAngle = -1.5; handle = 13; break;
-    default:
-      // Rest pose. The forward whack arc now comes ENTIRELY from the rigid
-      // upper-body rotation (k.swingAngle) applied by drawKnight — the arm
-      // keeps a fixed pose relative to the torso so the pan-tip math matches
-      // the art exactly (no double animation).
-      armAngle = TUNE.armRestAngle;
-  }
-
-  ctx.save();
-  ctx.translate(px, py);
-  ctx.rotate(armAngle);
-
-  // upper arm
-  ctx.fillStyle = pal.light;
-  ctx.fillRect(0, -3, 13, 6);
-  // gauntlet gripping the handle
-  ctx.fillStyle = pal.trim;
-  ctx.fillRect(11, -4, 7, 8);
-
-  // ---- frying pan: handle + round cast-iron head ----
-  const handleX0 = 17;
-  // wooden-dark handle
-  ctx.fillStyle = "#2a211a";
-  ctx.fillRect(handleX0, -2, handle, 4);
-  ctx.fillStyle = "#43352a";
-  ctx.fillRect(handleX0, -2, handle, 1);             // handle top highlight
-  // handle collar where it meets the pan
-  ctx.fillStyle = PAL.steelDk;
-  ctx.fillRect(handleX0 + handle - 2, -3, 3, 6);
-
-  // round pan head (cast iron = near-black with a steel rim highlight)
-  const panCx = handleX0 + handle + panR - 1;
-  const panCy = 0;
-  ctx.fillStyle = "#15151a";                          // cast-iron body
-  ctx.beginPath();
-  ctx.arc(panCx, panCy, panR, 0, Math.PI * 2);
-  ctx.fill();
-  // rim
-  ctx.strokeStyle = "#34343c";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(panCx, panCy, panR - 1, 0, Math.PI * 2);
-  ctx.stroke();
-  // cooking-surface inner ring + a glint (sells the round pan read)
-  ctx.fillStyle = "#23232b";
-  ctx.beginPath();
-  ctx.arc(panCx, panCy, panR - 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "rgba(220,228,240,0.45)";
-  ctx.fillRect(panCx - panR + 2, panCy - 3, 3, 3);   // top-left glint
-  ctx.restore();
 }
 
 function drawParticles() {
@@ -2116,8 +1892,18 @@ function drawLockStamp(cx, cy, color) {
   ctx.restore();
 }
 
-// chunky little icon per special (on-theme, not generic clip-art)
+// chunky little icon per special (on-theme, not generic clip-art).
+// Prefers the painted 96x96 round medallion PNG; falls back to the procedural
+// vector glyph if the image isn't decoded yet (guarded, never throws).
 function drawSpecialIcon(id, cx, cy) {
+  const iconImg = IMG[SPECIAL_ICON[id]];
+  if (imgReady(iconImg)) {
+    const sz = 84;   // medallion render size on the card
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(iconImg, cx - sz / 2, cy - sz / 2, sz, sz);
+    ctx.imageSmoothingEnabled = false;
+    return;
+  }
   ctx.save();
   ctx.translate(cx, cy);
   if (id === "mega") {
@@ -2204,51 +1990,66 @@ function drawTitle() {
   ctx.fillStyle = "rgba(8,12,20,0.55)";
   ctx.fillRect(0, 0, VW, VH);
 
+  // ----- heraldic crest, centered ABOVE the title text -----
+  // The emblem (crossed frying pans + helm + shield) crowns the title. Scaled
+  // to ~150px tall to sit in the top band without crowding the title/controls
+  // below it. Guarded so a mid-load image never throws.
+  if (imgReady(IMG.titleCrest)) {
+    const cs = IMG.titleCrest;          // 263x256
+    const crestH = 150;
+    const crestW = crestH * (cs.naturalWidth / cs.naturalHeight);
+    const crestX = VW / 2 - crestW / 2;
+    const crestY = 8;                   // top margin
+    ctx.imageSmoothingEnabled = true;   // smooth scale for the painted emblem
+    ctx.drawImage(cs, crestX, crestY, crestW, crestH);
+    ctx.imageSmoothingEnabled = false;
+  }
+
   ctx.textAlign = "center";
-  // title
-  ctx.font = '900 78px "Trebuchet MS", sans-serif';
+  // title (just below the crest)
+  ctx.font = '900 64px "Trebuchet MS", sans-serif';
   ctx.lineWidth = 10; ctx.strokeStyle = PAL.ink;
-  ctx.strokeText("LOG KNIGHT", VW / 2, 150);
-  ctx.fillStyle = PAL.redLight;  ctx.fillText("LOG KNIGHT", VW / 2, 150);
-  ctx.strokeText("BATTLE", VW / 2, 226);
-  ctx.fillStyle = PAL.bluLight;  ctx.fillText("BATTLE", VW / 2, 226);
+  ctx.strokeText("LOG KNIGHT", VW / 2, 216);
+  ctx.fillStyle = PAL.redLight;  ctx.fillText("LOG KNIGHT", VW / 2, 216);
+  ctx.strokeText("BATTLE", VW / 2, 276);
+  ctx.fillStyle = PAL.bluLight;  ctx.fillText("BATTLE", VW / 2, 276);
 
-  ctx.font = 'italic 600 20px "Trebuchet MS", sans-serif';
+  ctx.font = 'italic 600 18px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bone;
-  ctx.fillText("A bare-knuckle frying-pan duel — astride a log, last seat wins.", VW / 2, 268);
+  ctx.fillText("A bare-knuckle frying-pan duel — astride a log, last seat wins.", VW / 2, 306);
 
-  // controls panel
-  ctx.font = '700 17px "Trebuchet MS", sans-serif';
+  // controls panel (compact two columns)
+  ctx.font = '700 16px "Trebuchet MS", sans-serif';
   ctx.textAlign = "left";
   const colL = VW / 2 - 300, colR = VW / 2 + 40;
   ctx.fillStyle = PAL.redLight;
-  ctx.fillText("PLAYER 1 — CRIMSON", colL, 330);
+  ctx.fillText("PLAYER 1 — CRIMSON", colL, 350);
   ctx.fillStyle = PAL.bone;
-  ctx.font = '500 16px "Trebuchet MS", sans-serif';
-  ctx.fillText("A / D  ......  SCOOT", colL, 352);
-  ctx.fillText("W  .........  HOP", colL, 372);
-  ctx.fillText("S  ........  GUARD", colL, 392);
-  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 412);
+  ctx.font = '500 15px "Trebuchet MS", sans-serif';
+  ctx.fillText("A / D  ......  SCOOT", colL, 370);
+  ctx.fillText("W  .........  HOP", colL, 388);
+  ctx.fillText("S  ........  GUARD", colL, 406);
+  ctx.fillText("SPACE  ..  TAP: SWING PAN", colL, 424);
   ctx.fillStyle = PAL.skyAmber;
-  ctx.fillText("F  ......  SPECIAL", colL, 432);
+  ctx.fillText("F  ......  SPECIAL", colL, 442);
 
-  ctx.font = '700 17px "Trebuchet MS", sans-serif';
+  ctx.font = '700 16px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bluLight;
-  ctx.fillText("PLAYER 2 — AZURE", colR, 330);
+  ctx.fillText("PLAYER 2 — AZURE", colR, 350);
   ctx.fillStyle = PAL.bone;
-  ctx.font = '500 16px "Trebuchet MS", sans-serif';
-  ctx.fillText("◄ / ►  ....  SCOOT", colR, 352);
-  ctx.fillText("▲  .........  HOP", colR, 372);
-  ctx.fillText("▼  ........  GUARD", colR, 392);
-  ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 412);
+  ctx.font = '500 15px "Trebuchet MS", sans-serif';
+  ctx.fillText("◄ / ►  ....  SCOOT", colR, 370);
+  ctx.fillText("▲  .........  HOP", colR, 388);
+  ctx.fillText("▼  ........  GUARD", colR, 406);
+  ctx.fillText("ENTER  ..  TAP: SWING PAN", colR, 424);
   ctx.fillStyle = PAL.skyAmber;
-  ctx.fillText("/  ......  SPECIAL", colR, 432);
+  ctx.fillText("/  ......  SPECIAL", colR, 442);
 
   // prompt (blink)
   const blink = (Math.sin(frameCount * 0.12) > -0.2);
   if (blink) {
     ctx.textAlign = "center";
-    ctx.font = '900 26px "Trebuchet MS", sans-serif';
+    ctx.font = '900 24px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
     ctx.strokeText("PRESS  ENTER  TO  CHOOSE  SPECIALS", VW / 2, 492);
     ctx.fillStyle = PAL.skyAmber;
@@ -2334,10 +2135,41 @@ canvas.addEventListener("click", (e) => {
 });
 
 // ---------------------------- RENDER FRAME ---------------------------
+// Simple "LOADING…" beat shown until every asset is decoded. A small pip row
+// reflects how many of the assets have resolved (loaded or failed).
+function drawLoadingScreen() {
+  ctx.fillStyle = PAL.skyTop;
+  ctx.fillRect(0, 0, VW, VH);
+  ctx.textAlign = "center";
+  ctx.font = '900 40px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 7; ctx.strokeStyle = PAL.ink;
+  const dots = ".".repeat(1 + (Math.floor(frameCount * 0.06) % 3));
+  ctx.strokeText("LOADING" + dots, VW / 2, VH / 2);
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("LOADING" + dots, VW / 2, VH / 2);
+  // progress pips
+  const pipW = 22, gap = 8, total = ASSET_TOTAL;
+  const rowW = total * pipW + (total - 1) * gap;
+  const sx = (VW - rowW) / 2, sy = VH / 2 + 30;
+  for (let i = 0; i < total; i++) {
+    ctx.fillStyle = i < assetsLoaded ? PAL.skyAmber : "#2a3146";
+    ctx.fillRect(sx + i * (pipW + gap), sy, pipW, 8);
+  }
+  ctx.textAlign = "left";
+}
+
 function render() {
   // clear
   ctx.fillStyle = PAL.skyTop;
   ctx.fillRect(0, 0, VW, VH);
+
+  // ----- LOADING gate: hold the title/world until all art is decoded -----
+  // The sim already runs (state stays MENU until ENTER), but we don't want a
+  // half-loaded title/bg flashing in. Show a simple LOADING beat instead.
+  if (!allAssetsLoaded()) {
+    drawLoadingScreen();
+    return;
+  }
 
   // ----- WORLD (subject to screen shake) -----
   ctx.save();
