@@ -588,6 +588,7 @@ const ASSET_SRCS = {
   iconAnchor:   "assets/icon_anchor.png",
   log:          "assets/log.webp",
   hudTimer:     "assets/hud_timer.webp",
+  cardFrame:    "assets/card_frame.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -3055,18 +3056,25 @@ function drawSelect() {
     const p1Here = sel.p1.cursor === i;
     const p2Here = sel.p2.cursor === i;
 
-    // card slab: dark frame + inset face (stone-HUD flavor)
-    ctx.fillStyle = PAL.ink;
-    ctx.fillRect(cx - 4, y0 - 4, cardW + 8, cardH + 8);
-    ctx.fillStyle = "#202a40";
-    ctx.fillRect(cx, y0, cardW, cardH);
-    ctx.fillStyle = "#2e3a56";
-    ctx.fillRect(cx, y0, cardW, 6);   // top bevel
-    // corner rivets
-    ctx.fillStyle = PAL.steelDk;
-    for (const [rx, ry] of [[cx + 7, y0 + 9], [cx + cardW - 10, y0 + 9],
-                            [cx + 7, y0 + cardH - 12], [cx + cardW - 10, y0 + cardH - 12]]) {
-      ctx.fillRect(rx, ry, 3, 3);
+    // card backplate: Nordic carved-stone tablet sprite (with procedural fallback)
+    if (imgReady(IMG.cardFrame)) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(IMG.cardFrame, cx - 4, y0 - 4, cardW + 8, cardH + 8);
+      ctx.imageSmoothingEnabled = false;
+    } else {
+      // ---- fallback: procedural backplate ----
+      ctx.fillStyle = PAL.ink;
+      ctx.fillRect(cx - 4, y0 - 4, cardW + 8, cardH + 8);
+      ctx.fillStyle = "#202a40";
+      ctx.fillRect(cx, y0, cardW, cardH);
+      ctx.fillStyle = "#2e3a56";
+      ctx.fillRect(cx, y0, cardW, 6);   // top bevel
+      // corner rivets
+      ctx.fillStyle = PAL.steelDk;
+      for (const [rx, ry] of [[cx + 7, y0 + 9], [cx + cardW - 10, y0 + 9],
+                              [cx + 7, y0 + cardH - 12], [cx + cardW - 10, y0 + cardH - 12]]) {
+        ctx.fillRect(rx, ry, 3, 3);
+      }
     }
 
     // emblem-ish icon plate per special
