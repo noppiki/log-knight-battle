@@ -591,6 +591,7 @@ const ASSET_SRCS = {
   cardFrame:    "assets/card_frame.webp",
   resultBanner: "assets/result_banner.webp",
   modeSlab:     "assets/mode_slab.webp",
+  restartBtn:   "assets/restart_btn.webp",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -3586,12 +3587,22 @@ function drawMatchOver() {
 
   // restart button (visual; key R/Enter also works)
   const bw = 230, bh = 54, bx = VW / 2 - bw / 2, by = VH / 2 + 44;
-  ctx.fillStyle = PAL.skyAmber;
-  ctx.fillRect(bx, by, bw, bh);
-  ctx.fillStyle = PAL.ink;
-  ctx.fillRect(bx, by, bw, 4);
+  if (imgReady(IMG.restartBtn)) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.restartBtn, bx, by, bw, bh);
+    ctx.imageSmoothingEnabled = false;
+  } else {
+    // ---- fallback: original procedural button ----
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = PAL.ink;
+    ctx.fillRect(bx, by, bw, 4);
+  }
   ctx.font = '900 24px "Trebuchet MS", sans-serif';
-  ctx.fillStyle = PAL.ink;
+  ctx.textAlign = "center";
+  ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("RESTART  (R)", VW / 2, by + 36);
+  ctx.fillStyle = imgReady(IMG.restartBtn) ? PAL.sunGlow : PAL.ink;
   ctx.fillText("RESTART  (R)", VW / 2, by + 36);
   matchBtn = { bx, by, bw, bh };
   ctx.textAlign = "left";
