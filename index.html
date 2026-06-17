@@ -1785,14 +1785,15 @@ function drawSelect() {
   ctx.fillStyle = PAL.bone;
   ctx.fillText("CHOOSE YOUR SPECIAL", VW / 2, 86);
 
-  // player banners (crimson left / azure right) with their special key binding
-  ctx.font = '800 20px "Trebuchet MS", sans-serif';
+  // player banners (crimson left / azure right) with their special key binding —
+  // on two separate lines so the long hint strings never overlap in the middle.
+  ctx.font = '800 17px "Trebuchet MS", sans-serif';
   ctx.textAlign = "left";
   ctx.fillStyle = PAL.redLight;
-  ctx.fillText("P1 CRIMSON  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", 40, 124);
+  ctx.fillText("P1 CRIMSON  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", 40, 116);
   ctx.textAlign = "right";
   ctx.fillStyle = PAL.bluLight;
-  ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 124);
+  ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 140);
   ctx.textAlign = "left";
 
   // ---- card grid ----
