@@ -1034,6 +1034,8 @@ const ASSET_SRCS = {
   restartBtn:   "assets/restart_btn.webp",
   gaugeFrame:   "assets/gauge_frame.webp",
   countdownMedallion: "assets/countdown_medallion.webp",
+  snowLayer:          "assets/snow_layer.png",
+  cloudsLayer:        "assets/clouds_layer.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2702,6 +2704,14 @@ let roundWinner = null;         // p1 | p2
 let matchWinner = null;
 let frameCount = 0;
 
+// Stage atmospheric overlay parallax scroll offsets (advance every frame;
+// drawBackground reads these). Wrap-around in the drawImage tiling keeps
+// memory bounded. Advances even while paused so bg stays alive.
+let snowScrollY  = 0;
+let cloudScrollX = 0;
+const SNOW_SCROLL_PX_PER_SEC  = 25;
+const CLOUD_SCROLL_PX_PER_SEC = 15;
+
 // ===== ATTRACT MODE: after ATTRACT_IDLE_SEC of MENU idle, start an AI-vs-AI demo.
 // gameMode="attract" is INTERNAL only — never exposed on the title's mode-cycle UI.
 const ATTRACT_IDLE_SEC = 30;
@@ -4170,6 +4180,11 @@ function update(dt) {
   // Achievement toast advances regardless of pause / hit-stop / game state so a
   // tail-end toast can finish dismissing while the world is frozen.
   updateAchToast(dt);
+  // Atmospheric parallax offsets advance every frame — including PAUSE — so
+  // the background stays alive behind the pause overlay (purely visual, never
+  // serialized to online snapshots).
+  snowScrollY  = (snowScrollY  + SNOW_SCROLL_PX_PER_SEC  * dt) % VH;
+  cloudScrollX = (cloudScrollX + CLOUD_SCROLL_PX_PER_SEC * dt) % VW;
   // ===== PAUSE: freeze entire simulation when paused. =====
   // render() still runs (called unconditionally from frame()), so the game
   // world stays visible with the PAUSED overlay drawn on top.
@@ -4471,6 +4486,17 @@ function drawBackground() {
   } else {
     ctx.fillStyle = PAL.skyTop;
     ctx.fillRect(0, 0, VW, VH);
+  }
+  // --- Atmospheric parallax overlays (drawn above bg, below log+knights) ---
+  const stageId = stage.id;
+  if (stageId === "tundra" && imgReady(IMG.snowLayer)) {
+    // Two copies stacked vertically for seamless downward scroll
+    ctx.drawImage(IMG.snowLayer, 0, snowScrollY - VH, VW, VH);
+    ctx.drawImage(IMG.snowLayer, 0, snowScrollY,      VW, VH);
+  } else if (stageId === "dusk" && imgReady(IMG.cloudsLayer)) {
+    // Two copies side-by-side for seamless rightward scroll
+    ctx.drawImage(IMG.cloudsLayer, cloudScrollX - VW, 0, VW, VH);
+    ctx.drawImage(IMG.cloudsLayer, cloudScrollX,      0, VW, VH);
   }
 }
 
