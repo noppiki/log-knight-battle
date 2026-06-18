@@ -120,6 +120,14 @@
   .tb-att{ right: 14px; bottom: 100px; width: 120px; height: 120px; font-size: 28px; }
   .tb-sp { right: 142px; bottom: 100px; width: 84px;  height: 80px; font-size: 14px; }
   .tb-gd { right: 142px; bottom: 188px; width: 84px;  height: 60px; font-size: 16px; }
+  .tb-pause {
+    left: 50%; transform: translateX(-50%);
+    top: 14px; width: 60px; height: 44px;
+    font-size: 22px; letter-spacing: 4px;
+    background: rgba(20,26,40,0.62);
+    border-color: #4a5a7a;
+  }
+  body.show-touch.paused-mobile .tb:not(.tb-pause) { display: none; }
   /* ===== SETTINGS PANEL =====
      Hidden by default (display:none); .open shows it. Sits above everything except
      the portrait-orientation toast (z-index 100). Backdrop is a translucent ink
@@ -307,6 +315,7 @@
       <div class="tb tb-gd" data-act="guard">🛡 GUARD</div>
       <div class="tb tb-sp" data-act="special">✦ SP</div>
       <div class="tb tb-att" data-act="attack">⚔ HIT</div>
+      <div class="tb tb-pause" data-act="pause">II</div>
     </div>
     <!-- JOIN-screen room-code entry. Hidden by default; shown only on the ONLINE
          JOIN screen. Positioned over the canvas via JS. Isolated from the global
@@ -1354,6 +1363,23 @@ function shakeMul() {
   return shakeIntensity === "off" ? 0 : (shakeIntensity === "reduced" ? 0.4 : 1.0);
 }
 
+// Mobile haptic feedback gated by IS_MOBILE + shakeIntensity setting.
+// "off" disables vibration; "reduced" scales patterns to 0.4x.
+// Browsers without navigator.vibrate are silently no-ops.
+function tryVibrate(ms) {
+  if (!IS_MOBILE) return;
+  if (typeof navigator === "undefined" || typeof navigator.vibrate !== "function") return;
+  if (shakeIntensity === "off") return;
+  const scale = shakeIntensity === "reduced" ? 0.4 : 1.0;
+  try {
+    if (Array.isArray(ms)) {
+      navigator.vibrate(ms.map(function(x) { return Math.round(x * scale); }));
+    } else {
+      navigator.vibrate(Math.round(ms * scale));
+    }
+  } catch (e) {}
+}
+
 // Returns an object of multipliers for each AI tunable based on cpuDifficulty.
 // Multipliers are applied at the site of use so they take effect immediately
 // when the player changes difficulty (no need to re-enter SELECT/PLAYING).
@@ -1815,6 +1841,13 @@ const IS_MOBILE = ('ontouchstart' in window) ||
     let activePointers = 0;
 
     const onDown = (ev) => {
+      // Pause button: fire on pointerdown only, do NOT track as held input.
+      if (act === "pause") {
+        ev.preventDefault();
+        if (typeof togglePause === "function") togglePause();
+        if (typeof tryVibrate === "function") tryVibrate(15);
+        return;
+      }
       ev.preventDefault();
       activePointers++;
       btn.classList.add("active");
@@ -1833,6 +1866,8 @@ const IS_MOBILE = ('ontouchstart' in window) ||
     };
 
     const onUp = (ev) => {
+      // Pause button has no held state — nothing to release.
+      if (act === "pause") { if (ev && ev.preventDefault) ev.preventDefault(); return; }
       // Don't preventDefault if there's no event (synthetic call) — and
       // tolerate any cancel/leave/cancel sequence.
       if (ev && ev.preventDefault) ev.preventDefault();
@@ -2701,6 +2736,7 @@ function startKoSlowmo(k) {
   // never get stuck ducked.
   bgm.duck(0.012, 0.10);
   addBigShake(16);   // dramatic punctuation; netRecord'd → guest sees the same kick
+  tryVibrate([60, 30, 80]);   // heavy thump → short pause → heavier thump on KO
 }
 
 // SINGLE exit point for the slow-mo. Called from EVERY interruption path so
@@ -3257,6 +3293,7 @@ function gainSp(k, amt) {
   if (was < TUNE.spMax && k.special >= TUNE.spMax && k.chosenSpecial && !specialActive(k)) {
     k.spReadyPulse = 0.6;
     sfxSpReady();
+    tryVibrate(40);   // mid-tap when SP gauge fills
   }
 }
 
@@ -3746,6 +3783,7 @@ function applyHit(attacker, target, tip) {
              Math.min(1, (speed - TUNE.hitSpeed) / (TUNE.forceCap - TUNE.hitSpeed));
   if (!guarding) triggerHitStop(mega ? TUNE.hitStopMax : hs);
   if (mega) sfxMega(); else sfxHit();
+  tryVibrate(20);   // haptic tap on every confirmed landed hit
 }
 
 // After physics, check whether a falling knight has dropped off-screen
@@ -5763,9 +5801,11 @@ function frame(now) {
     const showButtons = (
       gameState === GS.PLAYING ||
       gameState === GS.COUNTDOWN ||
-      gameState === GS.ROUND_OVER
+      gameState === GS.ROUND_OVER ||
+      gameState === GS.PAUSED
     );
     document.body.classList.toggle("show-touch", showButtons);
+    document.body.classList.toggle("paused-mobile", gameState === GS.PAUSED);
   }
 
   if (gameMode === "online" && net.mode === "guest") {
