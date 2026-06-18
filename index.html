@@ -4411,7 +4411,7 @@ function drawMatchOver() {
 }
 let matchBtn = null;
 
-// click restart button (or, on mobile, tap-to-Enter from MENU)
+// click restart button (or, on mobile, tap-to-Enter from MENU / SELECT / ONLINE_MENU)
 canvas.addEventListener("click", (e) => {
   // ===== MOBILE TAP-TO-START on MENU =====
   // Phones can't press Enter without a keyboard popping up, so a canvas tap
@@ -4426,13 +4426,80 @@ canvas.addEventListener("click", (e) => {
     return;
   }
 
-  if (gameState !== GS.MATCH_OVER || !matchBtn) return;
-  // online guest never drives restart locally (host is authoritative); ignore.
-  if (gameMode === "online" && net.mode === "guest") return;
+  // ===== Click-to-coord helper (canvas-relative) =====
   const rect = canvas.getBoundingClientRect();
   const scaleX = VW / rect.width, scaleY = VH / rect.height;
   const mx = (e.clientX - rect.left) * scaleX;
   const my = (e.clientY - rect.top) * scaleY;
+
+  // ===== ONLINE_MENU: HOST / JOIN buttons (tap-to-action) =====
+  // Buttons drawn via drawSlabButton(VW/2, 250, 300, 70, ...) — center-based.
+  // Host rect: x=VW/2-150, y=215, w=300, h=70
+  // Join rect: x=VW/2-150, y=305, w=300, h=70
+  if (gameState === GS.ONLINE_MENU) {
+    const bw = 300, bh = 70, bx = VW / 2 - bw / 2;
+    const hostY = 250 - bh / 2;   // 215
+    const joinY = 340 - bh / 2;   // 305
+    if (mx >= bx && mx <= bx + bw && my >= hostY && my <= hostY + bh) {
+      onlineMenuCursor = 0;
+      startHost();
+      return;
+    }
+    if (mx >= bx && mx <= bx + bw && my >= joinY && my <= joinY + bh) {
+      onlineMenuCursor = 1;
+      startJoin();
+      return;
+    }
+    return;   // tap elsewhere on ONLINE_MENU: no-op
+  }
+
+  // ===== SELECT: tap-to-pick for P1 (one tap = move cursor + lock) =====
+  // Card geometry matches drawSelectScreen: gap=18, cardW=160, cardH=240, y0=158.
+  // Tapping an already-locked card of the same index: UNLOCK (toggle).
+  // Tapping a different card while locked: silently unlock, move, re-lock in one gesture.
+  // Online guest's P2 selection still uses keyboard this iteration (KNOWN LIMITATION —
+  // guest controls sel.p2 via host-authoritative snapshot; tap driving sel.p1 on the
+  // guest side would mismatch. Will be addressed in mobile iter 3.)
+  // Guard: if readyTimer > 0 both players are locked and countdown is running — ignore tap.
+  if (gameState === GS.SELECT) {
+    if (sel.readyTimer > 0) return;   // READY beat in progress: freeze input
+    const N = SPECIALS.length;
+    const gap = 18, cardW = 160, cardH = 240;
+    const totalW = N * cardW + (N - 1) * gap;
+    const x0 = (VW - totalW) / 2, y0 = 158;
+    for (let i = 0; i < N; i++) {
+      const cx = x0 + i * (cardW + gap);
+      if (mx >= cx && mx <= cx + cardW && my >= y0 && my <= y0 + cardH) {
+        if (sel.p1.locked && sel.p1.cursor === i) {
+          // Tap same locked card => UNLOCK
+          sel.p1.locked = false;
+          p1.chosenSpecial = null;
+          sfxSelect();
+        } else {
+          // Move cursor + lock in one tap (fastest mobile UX)
+          if (sel.p1.locked) {
+            // Already locked on another card: silently unlock first
+            sel.p1.locked = false;
+            p1.chosenSpecial = null;
+          }
+          if (sel.p1.cursor !== i) {
+            sel.p1.cursor = i;
+            sfxSelect();
+          }
+          sel.p1.locked = true;
+          p1.chosenSpecial = SPECIALS[sel.p1.cursor].id;
+          sfxLock();
+        }
+        return;
+      }
+    }
+    return;   // tap empty area on SELECT: no-op
+  }
+
+  // ===== MATCH_OVER: existing RESTART button =====
+  if (gameState !== GS.MATCH_OVER || !matchBtn) return;
+  // online guest never drives restart locally (host is authoritative); ignore.
+  if (gameMode === "online" && net.mode === "guest") return;
   const b = matchBtn;
   if (mx >= b.bx && mx <= b.bx + b.bw && my >= b.by && my <= b.by + b.bh) {
     enterSelect();   // restart => re-pick specials, then play again
