@@ -348,6 +348,14 @@
             <option value="1">ON</option>
           </select>
         </div>
+        <div class="setting-row">
+          <label for="set_cpu">CPU DIFFICULTY</label>
+          <select id="set_cpu">
+            <option value="easy">EASY</option>
+            <option value="normal">NORMAL</option>
+            <option value="hard">HARD</option>
+          </select>
+        </div>
         <div class="stats-section">
           <h3>YOUR STATS</h3>
           <div class="stats-grid">
@@ -1116,6 +1124,7 @@ let bgmVolume      = 100;       // 0..100
 let sfxVolume      = 100;       // 0..100
 let shakeIntensity = "normal";  // "off" | "reduced" | "normal"
 let koSlowmoEnabled = true;     // false = skip slow-mo, ROUND_OVER as before
+let cpuDifficulty = "normal";   // "easy" | "normal" | "hard"
 function loadSettings() {
   try {
     const raw = localStorage.getItem("lkb_settings");
@@ -1125,12 +1134,15 @@ function loadSettings() {
     if (typeof s.sfxVolume === "number") sfxVolume = Math.max(0, Math.min(100, s.sfxVolume));
     if (s.shakeIntensity === "off" || s.shakeIntensity === "reduced" || s.shakeIntensity === "normal") shakeIntensity = s.shakeIntensity;
     if (typeof s.koSlowmoEnabled === "boolean") koSlowmoEnabled = s.koSlowmoEnabled;
+    if (s.cpuDifficulty === "easy" || s.cpuDifficulty === "normal" || s.cpuDifficulty === "hard") {
+      cpuDifficulty = s.cpuDifficulty;
+    }
   } catch (e) {}
 }
 function saveSettings() {
   try {
     localStorage.setItem("lkb_settings", JSON.stringify({
-      bgmVolume, sfxVolume, shakeIntensity, koSlowmoEnabled
+      bgmVolume, sfxVolume, shakeIntensity, koSlowmoEnabled, cpuDifficulty
     }));
   } catch (e) {}
 }
@@ -1316,6 +1328,34 @@ function shakeMul() {
   return shakeIntensity === "off" ? 0 : (shakeIntensity === "reduced" ? 0.4 : 1.0);
 }
 
+// Returns an object of multipliers for each AI tunable based on cpuDifficulty.
+// Multipliers are applied at the site of use so they take effect immediately
+// when the player changes difficulty (no need to re-enter SELECT/PLAYING).
+function cpuMul() {
+  // Defaults (normal) leave existing behavior byte-identical.
+  if (cpuDifficulty === "easy") {
+    return {
+      react: 1.0 + (400 / 180),   // base aiReactDelay = 0.18s; easy adds ~400ms slack
+      swingCd: 1.50,              // 50% longer between swings
+      special: 0.50,              // half as likely to fire a special this tick
+      guard: 0.60,                // less likely to guard a telegraphed hit
+      edgeMargin: 0.60,           // less edge awareness (more likely to get pushed off)
+      pickDelay: 1.30,            // slightly slower to pick on SELECT
+    };
+  }
+  if (cpuDifficulty === "hard") {
+    return {
+      react: 1.0 - (150 / 180),   // base 0.18s; hard drops by ~150ms (becomes ~0.03s)
+      swingCd: 0.70,              // 30% shorter between swings
+      special: 1.50,              // more eager with specials
+      guard: 1.25,                // more reliable defense
+      edgeMargin: 1.40,           // stronger edge avoidance
+      pickDelay: 0.60,            // faster to pick on SELECT
+    };
+  }
+  return { react: 1, swingCd: 1, special: 1, guard: 1, edgeMargin: 1, pickDelay: 1 };
+}
+
 // applyAudioSettings — push current slider values into live WebAudio nodes.
 // Safe to call before initAudio() runs (both gains are null then; each branch
 // no-ops). Called from inside initAudio() after node creation AND on every
@@ -1351,6 +1391,8 @@ function syncSettingsUI() {
   setSfxVal.textContent = String(sfxVolume);
   setShake.value = shakeIntensity;
   setKoslow.value = koSlowmoEnabled ? "1" : "0";
+  const setCpuEl = document.getElementById("set_cpu");
+  if (setCpuEl) setCpuEl.value = cpuDifficulty;
 }
 syncSettingsUI();   // mirror saved settings into the markup before first open
 
@@ -1429,6 +1471,15 @@ if (settingsEl) {
     koSlowmoEnabled = setKoslow.value === "1";
     saveSettings();
   });
+  const setCpu = document.getElementById("set_cpu");
+  if (setCpu) {
+    setCpu.addEventListener("change", () => {
+      if (setCpu.value === "easy" || setCpu.value === "normal" || setCpu.value === "hard") {
+        cpuDifficulty = setCpu.value;
+        saveSettings();
+      }
+    });
+  }
   setClose.addEventListener("click", () => closeSettings());
   // Keep keys typed into the settings form (arrows on slider, etc.) from leaking
   // to the game. stopPropagation here mirrors joinInput's defensive pattern.
@@ -2675,7 +2726,7 @@ function enterSelect() {
   // 1p: arm the CPU's pick countdown (re-randomized each SELECT entry). In 2p it
   // stays 0 and the CPU auto-pick logic never runs.
   cpuPickTimer = (gameMode === "1p")
-    ? TUNE.aiPickDelayMin + Math.random() * (TUNE.aiPickDelayMax - TUNE.aiPickDelayMin)
+    ? (TUNE.aiPickDelayMin + Math.random() * (TUNE.aiPickDelayMax - TUNE.aiPickDelayMin)) * cpuMul().pickDelay
     : 0;
   cpuPickTarget = -1;   // re-randomized lazily on the first 1p SELECT frame
   cpuStepTimer = 0;
@@ -3708,6 +3759,7 @@ function readInputs() {
 // > special > hop. A FALLING self or foe => the AI idles (no actions).
 function aiInputs(self, foe, dt) {
   const idle = { left:false, right:false, jump:false, guard:false, attack:false, special:false };
+  const mul = cpuMul();   // per-difficulty multipliers; normal = all 1 (byte-identical)
 
   // tick AI cadence/reaction timers
   if (self.aiSwingCd    > 0) self.aiSwingCd    = Math.max(0, self.aiSwingCd    - dt);
@@ -3734,8 +3786,8 @@ function aiInputs(self, foe, dt) {
   // distance from self to its OWN nearest log edge (small => danger)
   const distToLeft  = self.x - logLeft;
   const distToRight = logRight - self.x;
-  const nearLeftEdge  = distToLeft  < TUNE.aiEdgeMargin;
-  const nearRightEdge = distToRight < TUNE.aiEdgeMargin;
+  const nearLeftEdge  = distToLeft  < TUNE.aiEdgeMargin * mul.edgeMargin;
+  const nearRightEdge = distToRight < TUNE.aiEdgeMargin * mul.edgeMargin;
   const nearEdge = nearLeftEdge || nearRightEdge;
 
   // (a) SELF-PRESERVATION (highest): if near our own edge, scoot toward CENTER.
@@ -3747,7 +3799,7 @@ function aiInputs(self, foe, dt) {
     if (self.chosenSpecial === "anchor" && self.special >= TUNE.spMax &&
         !specialActive(self) && self.aiReactTimer === 0) {
       out.special = true;
-      self.aiReactTimer = TUNE.aiReactDelay;
+      self.aiReactTimer = Math.max(0, TUNE.aiReactDelay * mul.react);
     }
     return out;   // commit to escaping the edge this frame
   }
@@ -3776,9 +3828,9 @@ function aiInputs(self, foe, dt) {
     return out;
   }
   if (foeThreat && self.aiReactTimer === 0 && self.aiGuardCd === 0 &&
-      Math.random() < TUNE.aiGuardProb) {
+      Math.random() < TUNE.aiGuardProb * mul.guard) {
     self.aiGuardTimer = TUNE.aiGuardTime;
-    self.aiReactTimer = TUNE.aiReactDelay;
+    self.aiReactTimer = Math.max(0, TUNE.aiReactDelay * mul.react);
     return { left:false, right:false, jump:false, guard:true, attack:false, special:false };
   }
 
@@ -3794,15 +3846,19 @@ function aiInputs(self, foe, dt) {
       case "dash": {
         // don't dash if it would carry us toward our own near edge
         const dashTargetX = self.x + faceDir * TUNE.dashVx * TUNE.dashTime;
-        const safe = dashTargetX > logLeft + TUNE.aiEdgeMargin * 0.5 &&
-                     dashTargetX < logRight - TUNE.aiEdgeMargin * 0.5;
+        const safe = dashTargetX > logLeft + TUNE.aiEdgeMargin * mul.edgeMargin * 0.5 &&
+                     dashTargetX < logRight - TUNE.aiEdgeMargin * mul.edgeMargin * 0.5;
         fire = safe && absd > TUNE.aiCloseRange && absd < TUNE.aiConnectRange * 1.6;
         break;
       }
       case "anchor":  fire = self.balance < TUNE.balanceMax * 0.4; break;
       default:        fire = inRange; break;
     }
-    if (fire) { out.special = true; self.aiReactTimer = TUNE.aiReactDelay; return out; }
+    if (fire) {
+      if (Math.random() < mul.special) {
+        out.special = true; self.aiReactTimer = Math.max(0, TUNE.aiReactDelay * mul.react); return out;
+      }
+    }
   }
 
   // (c) ATTACK: in range, facing the foe, off cooldown, not guarding. Gated by a
@@ -3812,8 +3868,8 @@ function aiInputs(self, foe, dt) {
       self.swingVel < TUNE.hitSpeed && !specialActive(self)) {
     out.attack = true;
     out.left = out.right = false;   // plant for the swing
-    self.aiSwingCd = TUNE.aiSwingCdMin + Math.random() * (TUNE.aiSwingCdMax - TUNE.aiSwingCdMin);
-    self.aiReactTimer = TUNE.aiReactDelay;
+    self.aiSwingCd = (TUNE.aiSwingCdMin + Math.random() * (TUNE.aiSwingCdMax - TUNE.aiSwingCdMin)) * mul.swingCd;
+    self.aiReactTimer = Math.max(0, TUNE.aiReactDelay * mul.react);
   }
 
   return out;
