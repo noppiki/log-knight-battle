@@ -196,6 +196,29 @@
     cursor: pointer; letter-spacing: 2px;
   }
   #stats_reset:hover { background: #6a2c40; border-color: #b04060; }
+  /* ===== ACHIEVEMENTS (inside settings card) ===== */
+  .ach-section { margin-top: 18px; padding-top: 18px; border-top: 2px solid #2a3450; }
+  .ach-section h3 {
+    font: 900 18px "Trebuchet MS", system-ui, sans-serif;
+    letter-spacing: 3px; color: #d8a45a; margin-bottom: 12px; text-align: center;
+    text-shadow: 0 2px 0 #000;
+  }
+  .ach-section h3 #ach_count { font-size: 13px; color: #b0bcd4; margin-left: 8px; letter-spacing: 1px; }
+  .ach-list { max-height: 200px; overflow-y: auto;
+    font: 700 12px "Trebuchet MS", system-ui, sans-serif; letter-spacing: 0.5px; }
+  .ach-list .ach-row { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px;
+    align-items: center; padding: 5px 4px; border-bottom: 1px dashed #1f2740; }
+  .ach-list .ach-row.locked { opacity: 0.45; }
+  .ach-list .ach-row .ach-i { font-size: 16px; text-align: center; }
+  .ach-list .ach-row .ach-n { color: #f6d8a0; font-weight: 900; }
+  .ach-list .ach-row.locked .ach-n { color: #6a7a96; }
+  .ach-list .ach-row .ach-d { color: #b0bcd4; font-size: 11px; font-weight: 600; }
+  .ach-list .ach-row .ach-s { font-size: 10px; color: #6a7a96; }
+  #ach_reset { display: block; margin: 12px auto 0;
+    background: #4a2030; color: #f6d8a0; border: 2px solid #6a3040;
+    font: 800 11px "Trebuchet MS"; padding: 5px 14px; border-radius: 4px;
+    cursor: pointer; letter-spacing: 2px; }
+  #ach_reset:hover { background: #6a2c40; border-color: #b04060; }
   /* Gear button: top-right corner of the stage, offset 56px so it doesn't sit
      on top of the procedural canvas-painted mute speaker icon (which is roughly
      14px from the top-right of the canvas). Visible across all screens. */
@@ -298,6 +321,11 @@
             <div class="stats-wide"><span class="sk">Play Time</span><span class="sv" id="stat_time">0s</span></div>
           </div>
           <button id="stats_reset" type="button">RESET STATS</button>
+        </div>
+        <div class="ach-section">
+          <h3>ACHIEVEMENTS <span id="ach_count">0/14</span></h3>
+          <div class="ach-list" id="ach_list"></div>
+          <button id="ach_reset" type="button">RESET ACHIEVEMENTS</button>
         </div>
         <button id="set_close" type="button">CLOSE (O)</button>
         <p class="set-hint">Press O anytime to toggle this panel.</p>
@@ -1057,6 +1085,121 @@ function resetStats() {
 
 loadStats();
 
+// ===== ACHIEVEMENTS =====
+// Per-id unlock set, persisted as a JSON string array under
+// localStorage["lkb_achievements"]. Tests run against the live `stats` object
+// after every saveStats() hook so unlocks trigger the same moment a stat
+// crosses its threshold. Training + online are skipped (same policy as stats).
+const ACHIEVEMENTS = [
+  { id: "first_blood",  name: "FIRST BLOOD",   desc: "Win your first match.",                  test: () => stats.matchesWon >= 1 },
+  { id: "apprentice",   name: "APPRENTICE",    desc: "Play 5 matches.",                        test: () => stats.matches >= 5 },
+  { id: "veteran",      name: "VETERAN",       desc: "Play 25 matches.",                       test: () => stats.matches >= 25 },
+  { id: "centurion",    name: "CENTURION",     desc: "Play 100 matches.",                      test: () => stats.matches >= 100 },
+  { id: "survivor",     name: "SURVIVOR",      desc: "5-match win streak.",                    test: () => stats.bestStreak >= 5 },
+  { id: "legend",       name: "LEGEND",        desc: "10-match win streak.",                   test: () => stats.bestStreak >= 10 },
+  { id: "pan_smasher",  name: "PAN SMASHER",   desc: "Use MEGA SMASH 20 times.",               test: () => (stats.specials.mega || 0) >= 20 },
+  { id: "mind_game",    name: "MIND GAME",     desc: "Use COUNTER STANCE 20 times.",           test: () => (stats.specials.counter || 0) >= 20 },
+  { id: "tackle_box",   name: "TACKLE BOX",    desc: "Use DASH TACKLE 20 times.",              test: () => (stats.specials.dash || 0) >= 20 },
+  { id: "anchor_soul",  name: "ANCHOR SOUL",   desc: "Use ANCHOR 20 times.",                   test: () => (stats.specials.anchor || 0) >= 20 },
+  { id: "earth_shaker", name: "EARTH SHAKER",  desc: "Use EARTHQUAKE 20 times.",               test: () => (stats.specials.quake || 0) >= 20 },
+  { id: "spinner",      name: "SPINNER",       desc: "Use WHIRLWIND 20 times.",                test: () => (stats.specials.whirl || 0) >= 20 },
+  { id: "multifaceted", name: "MULTIFACETED",  desc: "Use all 6 specials at least once.",      test: () => ["mega","counter","dash","anchor","quake","whirl"].every(id => (stats.specials[id] || 0) >= 1) },
+  { id: "marathon",     name: "MARATHON",      desc: "Play for 60 minutes total.",             test: () => stats.playSeconds >= 3600 },
+];
+
+let unlockedAchievements = new Set();
+function loadAchievements() {
+  try {
+    const raw = localStorage.getItem("lkb_achievements");
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) unlockedAchievements = new Set(arr.filter(x => typeof x === "string"));
+  } catch (e) {}
+}
+let _achSaveTimer = 0;
+function saveAchievements() {
+  if (_achSaveTimer) return;
+  _achSaveTimer = setTimeout(() => {
+    _achSaveTimer = 0;
+    try { localStorage.setItem("lkb_achievements", JSON.stringify([...unlockedAchievements])); } catch (e) {}
+  }, 400);
+}
+function resetAchievements() {
+  unlockedAchievements = new Set();
+  try {
+    if (_achSaveTimer) { clearTimeout(_achSaveTimer); _achSaveTimer = 0; }
+    localStorage.setItem("lkb_achievements", "[]");
+  } catch (e) {}
+}
+loadAchievements();
+
+// Toast queue: each call to checkAchievements() pushes any newly-unlocked
+// achievement onto achTostQueue (intentional typo preserved per spec). The
+// active toast holds the head + elapsed time; advanced from update()'s top
+// (runs even during PAUSE so the toast can dismiss).
+const achTostQueue = [];
+let achToastNow = null;
+const ACH_TOAST_LIFE = 3.2;
+
+function checkAchievements() {
+  if (gameMode === "training" || gameMode === "online") return;
+  for (const a of ACHIEVEMENTS) {
+    if (unlockedAchievements.has(a.id)) continue;
+    let ok = false;
+    try { ok = !!a.test(); } catch (e) { ok = false; }
+    if (ok) {
+      unlockedAchievements.add(a.id);
+      saveAchievements();
+      achTostQueue.push(a);
+      try { if (typeof sfxSpReady === "function") sfxSpReady(); } catch (e) {}
+    }
+  }
+}
+
+function updateAchToast(dt) {
+  if (!achToastNow && achTostQueue.length > 0) {
+    achToastNow = { ach: achTostQueue.shift(), elapsed: 0 };
+  }
+  if (achToastNow) {
+    achToastNow.elapsed += dt;
+    if (achToastNow.elapsed >= ACH_TOAST_LIFE) achToastNow = null;
+  }
+}
+
+function drawAchToast() {
+  if (!achToastNow) return;
+  const ach = achToastNow.ach;
+  const t = achToastNow.elapsed;
+  let off = 0, a = 1;
+  if (t < 0.25) { off = -60 * (1 - t / 0.25); a = t / 0.25; }
+  else if (t > ACH_TOAST_LIFE - 0.4) {
+    const k = (ACH_TOAST_LIFE - t) / 0.4;
+    off = -40 * (1 - k); a = k;
+  }
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, a));
+  const w = 460, h = 76, x = (VW - w) / 2, y = 38 + off;
+  ctx.fillStyle = "rgba(8,12,20,0.88)";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = PAL.skyAmber; ctx.lineWidth = 3;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.font = '900 30px "Trebuchet MS", system-ui, sans-serif';
+  ctx.textAlign = "left";
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText("⭐", x + 14, y + 46);
+  ctx.font = '900 12px "Trebuchet MS", system-ui, sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText("ACHIEVEMENT UNLOCKED", x + 52, y + 22);
+  ctx.font = '900 22px "Trebuchet MS", system-ui, sans-serif';
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText(ach.name, x + 52, y + 46);
+  ctx.font = '600 13px "Trebuchet MS", system-ui, sans-serif';
+  ctx.fillStyle = "#cfd8e8";
+  ctx.fillText(ach.desc, x + 52, y + 66);
+  ctx.restore();
+  ctx.textAlign = "left";
+}
+
 // Shake intensity multiplier — applied at the top of addShake/addBigShake AND
 // at the netplay shake event handler so each peer respects their own setting.
 // "off" zeros the contribution entirely; "reduced" halves to 0.4 (perceptual);
@@ -1144,6 +1287,7 @@ function openSettings() {
   if (!audioInited) { try { initAudio(); } catch (e) {} }
   syncSettingsUI();
   syncStatsUI();
+  syncAchUI();
   settingsEl.classList.add("open");
   settingsEl.setAttribute("aria-hidden", "false");
 }
@@ -1239,6 +1383,41 @@ if (settingsEl) {
       }
     });
   }
+}
+
+// ===== ACHIEVEMENTS PANEL UI =====
+// syncAchUI() rebuilds the row list + counter on every openSettings() so the
+// panel always reflects the current unlock set. Locked rows render dimmed
+// (.locked CSS pulls opacity + grey text). Reset button: confirm() → clear
+// in-memory set + immediate localStorage write, then re-render the panel.
+function syncAchUI() {
+  const list = document.getElementById("ach_list");
+  if (!list) return;
+  const total = ACHIEVEMENTS.length;
+  const got = ACHIEVEMENTS.filter(a => unlockedAchievements.has(a.id)).length;
+  const cntEl = document.getElementById("ach_count");
+  if (cntEl) cntEl.textContent = got + "/" + total;
+  list.innerHTML = "";
+  for (const a of ACHIEVEMENTS) {
+    const have = unlockedAchievements.has(a.id);
+    const row = document.createElement("div");
+    row.className = "ach-row" + (have ? "" : " locked");
+    row.innerHTML =
+      '<span class="ach-i">' + (have ? "⭐" : "🔒") + '</span>' +
+      '<div><div class="ach-n">' + a.name + '</div>' +
+      '<div class="ach-d">' + a.desc + '</div></div>' +
+      '<span class="ach-s">' + (have ? "DONE" : "—") + '</span>';
+    list.appendChild(row);
+  }
+}
+const achResetEl = document.getElementById("ach_reset");
+if (achResetEl) {
+  achResetEl.addEventListener("click", () => {
+    if (confirm("Reset all unlocked achievements? This cannot be undone.")) {
+      resetAchievements();
+      syncAchUI();
+    }
+  });
 }
 
 // ----------------------------- INPUT ---------------------------------
@@ -2430,6 +2609,7 @@ function awardRound(winnerKnight) {
       }
     }
     saveStats();
+    checkAchievements();
   }
 }
 
@@ -2453,6 +2633,7 @@ function resolveTimeUp() {
       stats.draws += 1;
       stats.rounds += 1;
       saveStats();
+      checkAchievements();
     }
   } else {
     awardRound(diff > 0 ? p1 : p2);
@@ -2844,6 +3025,7 @@ function activateSpecial(k) {
     if (k === me && stats.specials[k.chosenSpecial] != null) {
       stats.specials[k.chosenSpecial] += 1;
       saveStats();
+      checkAchievements();
     }
   }
 
@@ -3616,6 +3798,9 @@ function hostSelectFromGuest() {
 }
 
 function update(dt) {
+  // Achievement toast advances regardless of pause / hit-stop / game state so a
+  // tail-end toast can finish dismissing while the world is frozen.
+  updateAchToast(dt);
   // ===== PAUSE: freeze entire simulation when paused. =====
   // render() still runs (called unconditionally from frame()), so the game
   // world stays visible with the PAUSED overlay drawn on top.
@@ -3722,6 +3907,7 @@ function update(dt) {
       // Flush every ~5 real seconds; debounce collapses rapid calls.
       if (Math.floor(stats.playSeconds) % 5 === 0 && Math.floor(stats.playSeconds) > 0) {
         saveStats();
+        checkAchievements();
       }
     }
     // ===== K.O. SLOW-MO: scale physics dt while a KO is unfolding =====
@@ -5295,6 +5481,9 @@ function render() {
   // Pause overlay sits above KO banner, below the mute indicator.
   // Only draws when gameState===GS.PAUSED; no-op otherwise.
   drawPaused();
+  // Achievement toast: shows briefly when a new achievement unlocks.
+  // Sits above all gameplay overlays but below the persistent mute pip.
+  drawAchToast();
   // Mute indicator sits on top of every screen, top-right corner. Always
   // visible so the user knows what state audio is in (and finds the M key).
   drawMuteIndicator();
