@@ -1243,6 +1243,14 @@ const ACHIEVEMENTS = [
   { id: "spinner",      name: "SPINNER",       desc: "Use WHIRLWIND 20 times.",                test: () => (stats.specials.whirl || 0) >= 20 },
   { id: "multifaceted", name: "MULTIFACETED",  desc: "Use all 6 specials at least once.",      test: () => ["mega","counter","dash","anchor","quake","whirl"].every(id => (stats.specials[id] || 0) >= 1) },
   { id: "marathon",     name: "MARATHON",      desc: "Play for 60 minutes total.",             test: () => stats.playSeconds >= 3600 },
+  { id: "winner",       name: "WINNER",        desc: "Win 10 matches.",                        test: () => stats.matchesWon >= 10 },
+  { id: "conqueror",    name: "CONQUEROR",     desc: "Win 50 matches.",                        test: () => stats.matchesWon >= 50 },
+  { id: "hall_of_fame", name: "HALL OF FAME",  desc: "Win 100 matches.",                       test: () => stats.matchesWon >= 100 },
+  { id: "punch_drunk",  name: "PUNCH DRUNK",   desc: "Score 100 K.O.s total.",                 test: () => stats.koScored >= 100 },
+  { id: "bruiser",      name: "BRUISER",       desc: "Play 100 rounds.",                       test: () => stats.rounds >= 100 },
+  { id: "deep_roster",  name: "DEEP ROSTER",   desc: "Use every special at least 5 times.",    test: () => ["mega","counter","dash","anchor","quake","whirl"].every(id => (stats.specials[id] || 0) >= 5) },
+  { id: "exhibitionist",name: "EXHIBITIONIST", desc: "Fire 50 special moves total.",           test: () => (["mega","counter","dash","anchor","quake","whirl"].reduce((a, id) => a + (stats.specials[id] || 0), 0)) >= 50 },
+  { id: "chronomaster", name: "CHRONOMASTER",  desc: "Play for 3 hours total.",                test: () => stats.playSeconds >= 10800 },
 ];
 
 let unlockedAchievements = new Set();
