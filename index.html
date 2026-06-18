@@ -71,11 +71,85 @@
     pointer-events: none;
     user-select: none;
   }
+  /* ===== MOBILE / TOUCH SUPPORT =====
+     All rules below are gated on body.mobile (added by JS only when IS_MOBILE).
+     Desktop is byte-identical: none of these selectors match without that class.
+     Canvas sizing is intentionally left to the existing resize() JS (which uses
+     inline width/height in px → always wins over any stylesheet rule). */
+  body.mobile {
+    /* Prevent accidental page scroll / pinch-zoom / pull-to-refresh during play. */
+    touch-action: none;
+    overscroll-behavior: none;
+    overflow: hidden;
+  }
+  body.mobile #stage { padding: 6px; }
+  body.mobile #hint  { display: none; }
+  #touchpad {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;        /* overlay itself does NOT block clicks; buttons opt-in */
+    z-index: 20;
+    display: none;               /* shown only when body.mobile.show-touch */
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body.mobile.show-touch #touchpad { display: block; }
+  body.mobile:not(.show-touch) #touchpad { display: none; }
+  .tb {
+    position: absolute;
+    pointer-events: auto;
+    display: flex; align-items: center; justify-content: center;
+    font: 900 22px "Trebuchet MS", system-ui, sans-serif;
+    color: #f6d8a0;
+    background: rgba(20, 26, 40, 0.72);
+    border: 2px solid #4a5a7a;
+    border-radius: 12px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.55), inset 0 2px 0 rgba(216,164,90,0.18);
+    text-shadow: 0 2px 0 #000;
+    touch-action: none;
+  }
+  .tb.active {
+    background: rgba(216,164,90,0.32);
+    border-color: #d8a45a;
+    color: #fff;
+  }
+  .tb-l  { left: 14px;  bottom: 92px;  width: 76px;  height: 76px; }
+  .tb-r  { left: 100px; bottom: 92px;  width: 76px;  height: 76px; }
+  .tb-up { left: 14px;  bottom: 178px; width: 162px; height: 60px;  font-size: 18px; }
+  .tb-att{ right: 14px; bottom: 100px; width: 120px; height: 120px; font-size: 28px; }
+  .tb-sp { right: 142px; bottom: 100px; width: 84px;  height: 80px; font-size: 14px; }
+  .tb-gd { right: 142px; bottom: 188px; width: 84px;  height: 60px; font-size: 16px; }
+  /* Portrait orientation hint on touch devices: rotate for full-screen play. */
+  @media screen and (max-aspect-ratio: 1/1) and (pointer: coarse) {
+    body::before {
+      content: "Rotate to LANDSCAPE for full screen";
+      position: fixed; top: 12px; left: 0; right: 0;
+      text-align: center;
+      font: 800 14px "Trebuchet MS", sans-serif;
+      color: #f6d8a0; background: rgba(8,12,20,0.85);
+      padding: 8px 0; z-index: 100;
+      pointer-events: none;
+    }
+  }
 </style>
 </head>
 <body>
   <div id="stage">
     <canvas id="game" width="960" height="540"></canvas>
+    <!-- MOBILE / TOUCH overlay. Hidden by default (display:none); visible only
+         when body has BOTH .mobile and .show-touch classes (set by JS). Six
+         on-screen buttons map to the same input arming system used by the
+         keyboard for P1. The overlay div itself has pointer-events:none so it
+         never blocks canvas clicks; each .tb opts back in. -->
+    <div id="touchpad" aria-hidden="true">
+      <div class="tb tb-l"  data-act="left">◄</div>
+      <div class="tb tb-r"  data-act="right">►</div>
+      <div class="tb tb-up" data-act="jump">▲ HOP</div>
+      <div class="tb tb-gd" data-act="guard">🛡 GUARD</div>
+      <div class="tb tb-sp" data-act="special">✦ SP</div>
+      <div class="tb tb-att" data-act="attack">⚔ HIT</div>
+    </div>
     <!-- JOIN-screen room-code entry. Hidden by default; shown only on the ONLINE
          JOIN screen. Positioned over the canvas via JS. Isolated from the global
          keydown listener (its own handler stopsPropagation). -->
@@ -802,6 +876,96 @@ function consumeSpecial(who) {
   return false;
 }
 
+// ----------------------------- TOUCH UI ------------------------------
+// Mobile/touch UI: map on-screen buttons to the same input arming system
+// used by the keyboard. Each button represents a P1 control:
+//   left/right/jump/guard => held set entries (KeyA/KeyD/KeyW/KeyS)
+//   attack/special        => edge-triggered flags (attackArmed.p1 /
+//                            specialArmed.p1) — re-armed on every fresh tap,
+//                            consumed by update() exactly like keyboard
+//                            keydown.
+// Multi-touch ref-count: each pointer that goes down increments a counter,
+// each pointer up/cancel/leave decrements it. The button only releases
+// (visual + held.delete) when the count reaches 0 — so a thumb that briefly
+// leaves the visible button rect but stays held doesn't release the input.
+(function setupTouchControls() {
+  if (!IS_MOBILE) return;
+  document.body.classList.add("mobile");
+
+  const HOLD_KEY_BY_ACT = {
+    left:  "KeyA",
+    right: "KeyD",
+    jump:  "KeyW",
+    guard: "KeyS",
+  };
+
+  const buttons = document.querySelectorAll("#touchpad .tb");
+  buttons.forEach((btn) => {
+    const act = btn.dataset.act;
+    let activePointers = 0;
+
+    const onDown = (ev) => {
+      ev.preventDefault();
+      activePointers++;
+      btn.classList.add("active");
+      // First-gesture audio gate: browsers require a user gesture to start
+      // AudioContext. Touching any button counts. Safe to call repeatedly —
+      // initAudio() short-circuits if already initialized.
+      if (!audioInited) { try { initAudio(); } catch (e) {} }
+      const hk = HOLD_KEY_BY_ACT[act];
+      if (hk) {
+        held.add(hk);
+      } else if (act === "attack") {
+        attackArmed.p1 = true;     // edge-trigger, consumed by update()
+      } else if (act === "special") {
+        specialArmed.p1 = true;    // edge-trigger, consumed by update()
+      }
+    };
+
+    const onUp = (ev) => {
+      // Don't preventDefault if there's no event (synthetic call) — and
+      // tolerate any cancel/leave/cancel sequence.
+      if (ev && ev.preventDefault) ev.preventDefault();
+      activePointers = Math.max(0, activePointers - 1);
+      if (activePointers === 0) {
+        btn.classList.remove("active");
+        const hk = HOLD_KEY_BY_ACT[act];
+        if (hk) held.delete(hk);
+        // attack/special are edge-trigger only and auto-consume in update().
+      }
+    };
+
+    if (window.PointerEvent) {
+      btn.addEventListener("pointerdown", onDown);
+      btn.addEventListener("pointerup", onUp);
+      btn.addEventListener("pointercancel", onUp);
+      // pointerleave: thumb dragged off the button rect — treat as release so
+      // movement keys don't stay stuck if the player slides off.
+      btn.addEventListener("pointerleave", onUp);
+    } else {
+      btn.addEventListener("touchstart", onDown, { passive: false });
+      btn.addEventListener("touchend", onUp,    { passive: false });
+      btn.addEventListener("touchcancel", onUp, { passive: false });
+    }
+  });
+
+  // Suppress the browser long-press context menu on the entire touchpad so
+  // a held HIT button doesn't pop the OS "copy/paste" menu mid-fight.
+  const pad = document.getElementById("touchpad");
+  if (pad) pad.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // Safety: if the window loses focus mid-touch (incoming call, app switch,
+  // backgrounded tab) every held-via-touch key should be released so the
+  // knight doesn't keep scooting forever when the player returns.
+  window.addEventListener("blur", () => {
+    document.querySelectorAll("#touchpad .tb.active").forEach((b) => {
+      b.classList.remove("active");
+    });
+    // held.clear() already runs in the existing blur handler above; the held
+    // set is shared, so this is belt-and-suspenders for the visual state.
+  });
+})();
+
 // ----------------------------- AUDIO ---------------------------------
 // One AudioContext (`actx`) shared by SFX + BGM. Routing:
 //
@@ -823,6 +987,15 @@ const GLOBAL_LEVEL = 0.85;
 let muted = (function () {
   try { return localStorage.getItem("lkb_muted") === "1"; } catch (e) { return false; }
 })();
+
+// ===== MOBILE / TOUCH DEVICE DETECTION =====
+// Permissive: any of three signals (legacy iOS ontouchstart, modern pointer API,
+// or CSS pointer:coarse media query) marks the device as touch-capable. False
+// positive on hybrid touchscreen laptops is harmless — they still have a real
+// keyboard, and the on-screen buttons only push the same arming system as keys.
+const IS_MOBILE = ('ontouchstart' in window) ||
+                  (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
+                  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 function initAudio() {
   if (audioInited) return;
   audioInited = true;
@@ -4238,8 +4411,21 @@ function drawMatchOver() {
 }
 let matchBtn = null;
 
-// click restart button
+// click restart button (or, on mobile, tap-to-Enter from MENU)
 canvas.addEventListener("click", (e) => {
+  // ===== MOBILE TAP-TO-START on MENU =====
+  // Phones can't press Enter without a keyboard popping up, so a canvas tap
+  // on the title acts as Enter: enter online connect-flow or enter SELECT,
+  // matching the keyboard branch in handleGlobalKey() ("Enter" / "Space").
+  // Audio gate: first tap must also resume AudioContext (the existing keydown
+  // path runs initAudio() but a mobile player may never touch a key).
+  if (IS_MOBILE && gameState === GS.MENU) {
+    if (!audioInited) { try { initAudio(); } catch (err) {} }
+    if (gameMode === "online") enterOnlineMenu();
+    else enterSelect();
+    return;
+  }
+
   if (gameState !== GS.MATCH_OVER || !matchBtn) return;
   // online guest never drives restart locally (host is authoritative); ignore.
   if (gameMode === "online" && net.mode === "guest") return;
@@ -4346,6 +4532,21 @@ function frame(now) {
   // cap dt to avoid spiral-of-death (e.g. tab refocus)
   if (dt > 1 / 20) dt = 1 / 20;
   if (dt < 0) dt = 0;
+
+  // ----- MOBILE: show on-screen buttons only during live gameplay states. -----
+  // PLAYING covers both normal matches and TRAINING (training is a gameMode, not
+  // a gameState — it runs through GS.PLAYING). MENU/SELECT/MATCH_OVER/online
+  // connect screens use the keyboard or canvas tap, so the pad would just block
+  // the title art. Runs on every frame including the online-guest early-return
+  // path so a guest who joins from a phone still gets the buttons.
+  if (IS_MOBILE) {
+    const showButtons = (
+      gameState === GS.PLAYING ||
+      gameState === GS.COUNTDOWN ||
+      gameState === GS.ROUND_OVER
+    );
+    document.body.classList.toggle("show-touch", showButtons);
+  }
 
   if (gameMode === "online" && net.mode === "guest") {
     // ===== GUEST: thin terminal — DO NOT simulate. =====
