@@ -635,7 +635,9 @@ function updateHint() {
     ? "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: CPU (computer-controlled)"
     : (gameMode === "online")
       ? "ONLINE: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  —  you control YOUR knight"
-      : "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /";
+      : (gameMode === "training")
+        ? "TRAINING: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: passive dummy — press R to exit"
+        : "P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F  |  P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /";
 }
 
 // map a special id -> its medallion icon image (SELECT screen cards)
@@ -1331,6 +1333,30 @@ const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
 // specials. This is the single entry point for title-Enter, R (any state),
 // MATCH_OVER-Enter, and the restart button — so players always re-pick.
 function enterSelect() {
+  // ===== TRAINING: skip the SELECT screen entirely =====
+  // Auto-lock both specials, fully reset the knights, and jump straight to the
+  // countdown. P1 gets MEGA (clearly useful for combo practice); P2 (dummy) gets
+  // ANCHOR but it's inert because the dummy receives all-false inputs and never
+  // activates a special anyway.
+  if (gameMode === "training") {
+    fullResetKnight(p1); fullResetKnight(p2);
+    attackArmed.p1 = attackArmed.p2 = false;
+    specialArmed.p1 = specialArmed.p2 = false;
+    held.clear();
+    resetKnightPositions();
+    p1.chosenSpecial = "mega";
+    p2.chosenSpecial = "anchor";
+    p1.rounds = 0; p2.rounds = 0;
+    matchWinner = null; roundWinner = null;
+    drawBanner = false; timeUpBanner = false;
+    // online net path is dormant offline, but reset edges anyway for hygiene
+    net.guestAttackPending = false; net.guestSpecialPending = false;
+    net.guestInput = { l:false, r:false, j:false, g:false, a:false, s:false };
+    net.prevGuestLR = { l:false, r:false, g:false };
+    // startMatch() randomizes the stage and calls startCountdown()
+    startMatch();
+    return;
+  }
   sel.p1.cursor = 0; sel.p1.locked = false;
   sel.p2.cursor = 1; sel.p2.locked = false;
   sel.readyTimer = 0;
@@ -1444,8 +1470,9 @@ function tryKnockout(k) {
   sfxFall();
 }
 
-// 3-way title mode order so ↑↓ cycles through all reachable modes.
-const MODE_ORDER = ["1p", "2p", "online"];
+// 4-way title mode order so ↑↓ cycles through all reachable modes.
+// TRAINING is solo practice with a passive dummy P2 and infinite-life P1.
+const MODE_ORDER = ["1p", "2p", "online", "training"];
 function cycleMode(dir) {
   const i = MODE_ORDER.indexOf(gameMode);
   const n = MODE_ORDER.length;
@@ -1473,7 +1500,29 @@ function handleGlobalKey(code) {
   // R = full restart. From any OFFLINE state it re-enters SELECT. ONLINE-HOST: R
   // re-enters SELECT and re-broadcasts (host stays authoritative); guest handled
   // above. Online host R is allowed; the guest follows via snapshots.
-  if (code === "KeyR") { enterSelect(); return; }
+  // TRAINING: R exits to the TITLE (MENU) instead of re-entering SELECT — training
+  // skips SELECT entirely, so we route the player back to the mode picker so they
+  // can choose a different mode (or press ENTER again to re-enter training).
+  if (code === "KeyR") {
+    if (gameMode === "training") {
+      // teardown active match: stop sim, clear visuals, return to TITLE
+      fullResetKnight(p1); fullResetKnight(p2);
+      resetKnightPositions();
+      attackArmed.p1 = attackArmed.p2 = false;
+      specialArmed.p1 = specialArmed.p2 = false;
+      held.clear();
+      particles.length = 0;
+      floaters.length = 0;
+      shake = 0;
+      matchWinner = null; roundWinner = null;
+      drawBanner = false; timeUpBanner = false;
+      gameState = GS.MENU;
+      sfxSelect();
+      return;
+    }
+    enterSelect();
+    return;
+  }
 
   if (gameState === GS.MENU) {
     // mode toggle: ArrowUp/Down OR W/S cycle all three; 1/2/3 jump directly.
@@ -1487,6 +1536,8 @@ function handleGlobalKey(code) {
       if (gameMode !== "2p") { gameMode = "2p"; updateHint(); sfxSelect(); }
     } else if (code === "Digit3" || code === "Numpad3") {
       if (gameMode !== "online") { gameMode = "online"; updateHint(); sfxSelect(); }
+    } else if (code === "Digit4" || code === "Numpad4") {
+      if (gameMode !== "training") { gameMode = "training"; updateHint(); sfxSelect(); }
     } else if (code === "Enter" || code === "Space") {
       if (gameMode === "online") enterOnlineMenu();
       else enterSelect();
@@ -2117,6 +2168,10 @@ function applyHit(attacker, target, tip) {
 // and resolve the round (with both-off tiebreak).
 function checkRoundResolution() {
   if (gameState !== GS.PLAYING) return;
+  // TRAINING never resolves rounds — life is pinned and fallers are auto-
+  // recentered upstream. Belt-and-suspenders guard so a future code path
+  // can't accidentally award a round (or advance the match) in training.
+  if (gameMode === "training") return;
   const p1Down = p1.state === ST.FALLING && p1.y > VH + 120;
   const p2Down = p2.state === ST.FALLING && p2.y > VH + 120;
 
@@ -2485,10 +2540,12 @@ function update(dt) {
     // human key press can't leak into the CPU's slot in 1p). In 1p the CPU
     // computes P2's inputs via aiInputs() and we discard the keyboard half.
     const [i1, i2kbd] = readInputs();
-    // p2 input source: 1p => AI, online-host => relayed guest input, else => P2 kbd.
+    // p2 input source: 1p => AI, online-host => relayed guest input,
+    // training => passive dummy (all-false inputs, no AI), else => P2 kbd.
     let i2;
     if (gameMode === "1p") i2 = aiInputs(p2, p1, dt);
     else if (gameMode === "online" && net.mode === "host") i2 = hostGuestInputForFrame();
+    else if (gameMode === "training") i2 = { left:false, right:false, jump:false, guard:false, attack:false, special:false };
     else i2 = i2kbd;
     // special activation (edge-triggered) BEFORE physics so a fired MEGA/dash
     // takes effect this frame.
@@ -2503,6 +2560,38 @@ function update(dt) {
     resolveCombat(dt);
     resolveDashTackles(dt);            // body-to-body shoves during a dash
     tryKnockout(p1); tryKnockout(p2);  // lethal hit => FALLING this frame, before timer/resolution
+    // ===== TRAINING PIN: infinite life, fast SP recharge, dummy auto-recenter =====
+    // Runs AFTER tryKnockout so any same-frame FALLING flip is healed before the
+    // round-resolver sees it. The recenter snaps a shoved dummy back to its spawn,
+    // so the player can keep practicing indefinitely. The round timer is pinned
+    // to max so resolveTimeUp never fires; checkRoundResolution() short-circuits
+    // explicitly in training as belt-and-suspenders.
+    if (gameMode === "training") {
+      // P1: infinite life, fast SP recharge (~2s of active play to full)
+      p1.balance = TUNE.balanceMax;
+      p1.special = Math.min(TUNE.spMax, p1.special + 50 * dt);
+      // Heal a same-frame KO-fall on P1 too (if the dummy ever throws a hit
+      // strong enough — defensive: dummy is passive, but this guarantees no
+      // soft-lock if the spec ever changes).
+      if (p1.state === ST.FALLING || p1.x < logLeft + 4 || p1.x > logRight - 4) {
+        p1.state = ST.IDLE; p1.onGround = true; p1.tumble = 0;
+        p1.x = logCenter - TUNE.spawnOffset; p1.y = logTopY;
+        p1.vx = 0; p1.vy = 0; p1.knockTimer = 0; p1.swingAngle = 0; p1.swingVel = 0;
+        p1.fellAtFrame = -1;
+      }
+      // P2 (dummy): pinned full life, zero SP, never falls. If shoved off the
+      // edge or knocked into FALLING, snap back to spawn.
+      p2.balance = TUNE.balanceMax;
+      p2.special = 0;
+      if (p2.state === ST.FALLING || p2.x < logLeft + 4 || p2.x > logRight - 4) {
+        p2.state = ST.IDLE; p2.onGround = true; p2.tumble = 0;
+        p2.x = logCenter + TUNE.spawnOffset; p2.y = logTopY;
+        p2.vx = 0; p2.vy = 0; p2.knockTimer = 0; p2.swingAngle = 0; p2.swingVel = 0;
+        p2.fellAtFrame = -1;
+      }
+      // pause the round timer (pin to max; the tick block below sees no change)
+      roundTimer = TUNE.roundTime;
+    }
     checkRoundResolution();      // a fall (once off-screen) flips state to ROUND_OVER
     // Round clock: ticks ONLY while still PLAYING and NEITHER knight is mid-fall.
     // A knight is flagged FALLING the instant its seat clears the edge but only
@@ -2978,11 +3067,30 @@ function drawHUD() {
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
   const mw = 320;
   const p1Label = (gameMode === "online" && net.mode === "guest") ? "CRIMSON  HOST" : "P1  CRIMSON";
-  const p2Label = (gameMode === "1p") ? "AZURE  CPU"
+  const p2Label = (gameMode === "training") ? "AZURE  DUMMY"
+                : (gameMode === "1p") ? "AZURE  CPU"
                 : (gameMode === "online") ? ((net.mode === "guest") ? "AZURE  YOU" : "AZURE  P2") : "AZURE  P2";
   drawBalanceMeter(p1, 30, 40, mw, p1Label, palR);
   drawBalanceMeter(p2, VW - 30 - mw, 40, mw, p2Label, palB);
-  drawRoundTimer();
+  // TRAINING: replace the round timer with a small "TRAINING — press R to exit"
+  // label in the same screen real estate. Balance meters + win pips stay (pips
+  // will all show empty because rounds=0 in training).
+  if (gameMode === "training") {
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.font = '900 22px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 6; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText("TRAINING", VW / 2, 56);
+    ctx.fillStyle = PAL.skyAmber;
+    ctx.fillText("TRAINING", VW / 2, 56);
+    ctx.font = '700 12px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.bone;
+    ctx.fillText("press R to exit", VW / 2, 76);
+    ctx.restore();
+    ctx.textAlign = "left";
+  } else {
+    drawRoundTimer();
+  }
 }
 
 // Chunky pixel-HUD round clock, top-center between the two balance gauges.
@@ -3526,11 +3634,13 @@ function drawTitle() {
   ctx.fillStyle = PAL.bone;
   ctx.fillText("A bare-knuckle frying-pan duel — astride a log, last seat wins.", VW / 2, 306);
 
-  // ----- MODE SELECTOR: "1P vs CPU" | "2P LOCAL" | "ONLINE" (highlight current) -----
+  // ----- MODE SELECTOR: "1P vs CPU" | "2P LOCAL" | "ONLINE" | "TRAINING" (highlight current) -----
+  // 4 slabs at 184px wide + 3×16 gaps = 784px → comfortably inside VW=960 (mX0=88).
   const modes = [
-    { id: "1p",     label: "1P  vs CPU" },
-    { id: "2p",     label: "2P  LOCAL" },
-    { id: "online", label: "ONLINE" },
+    { id: "1p",       label: "1P  vs CPU" },
+    { id: "2p",       label: "2P  LOCAL"  },
+    { id: "online",   label: "ONLINE"     },
+    { id: "training", label: "TRAINING"   },
   ];
   const mY = 384;
   const bw = 184, bh = 34, mGap = 16;
@@ -3578,7 +3688,7 @@ function drawTitle() {
   }
   ctx.font = '600 13px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bone;
-  ctx.fillText("↑↓ / 1 2 3  select mode", VW / 2, mY + 26);
+  ctx.fillText("↑↓ / W S / 1 2 3 4  select mode  ·  ENTER  choose specials", VW / 2, mY + 26);
   ctx.textAlign = "left";
 
   // disconnect notice (shown once after an online session ends abnormally)
