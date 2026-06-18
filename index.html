@@ -1038,6 +1038,9 @@ const ASSET_SRCS = {
   cloudsLayer:        "assets/clouds_layer.png",
   auroraRibbon:       "assets/aurora_ribbon.png",
   sunRays:            "assets/sun_rays.png",
+  portraitRed:        "assets/portrait_red.png",
+  portraitBlue:       "assets/portrait_blue.png",
+  vsEmblem:           "assets/vs_emblem.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2459,6 +2462,18 @@ function sfxAnchor()  { _sfxAnchor();  netRecordSfx("anchor"); }
 function sfxSelect()  { _sfxSelect();  netRecordSfx("select"); }
 function sfxLock()    { _sfxLock();    netRecordSfx("lock"); }
 
+// Nordic battle horn blast — plays once at VS_SPLASH entry.
+function sfxHorn() {
+  if (!actx) return;
+  if (actx.state === "suspended") actx.resume();
+  // Low fundamental ~196Hz (G3) + 2nd + 3rd harmonics for brassy timbre
+  tone({ freq: 196, freq2: 185, dur: 0.50, type: "sawtooth", vol: 0.10, attack: 0.015, release: 0.48 });
+  tone({ freq: 392, freq2: 370, dur: 0.42, type: "sawtooth", vol: 0.06, attack: 0.012, release: 0.40 });
+  tone({ freq: 588, freq2: 555, dur: 0.35, type: "triangle", vol: 0.03, attack: 0.010, release: 0.33 });
+  // Transient thwack at the front end
+  noise({ dur: 0.08, vol: 0.04, type: "bandpass", freqStart: 800, freqEnd: 300, q: 1.5 });
+}
+
 // ----------------------------- LOG GEOMETRY --------------------------
 const logW = VW * TUNE.logWidthFrac;
 const logLeft  = (VW - logW) / 2;
@@ -2664,7 +2679,7 @@ function updateEffects(dt) {
 
 // ----------------------------- GAME STATE ----------------------------
 const GS = {
-  MENU: "menu", SELECT: "select", COUNTDOWN: "countdown", PLAYING: "playing",
+  MENU: "menu", SELECT: "select", VS_SPLASH: "vs_splash", COUNTDOWN: "countdown", PLAYING: "playing",
   ROUND_OVER: "roundover", MATCH_OVER: "matchover",
   // ----- ONLINE connect flow (only reachable when gameMode==="online") -----
   ONLINE_MENU: "onlinemenu",   // choose HOST GAME / JOIN GAME
@@ -2701,6 +2716,8 @@ const sel = {
 
 let countdownTimer = 0;
 let countdownIndex = 0;         // 0..3 -> "3","2","1","FIGHT!"
+let vsSplashTimer = 0;          // counts DOWN from VS_SPLASH_DURATION; 0 = exit splash
+const VS_SPLASH_DURATION = 1.6;
 let roundOverTimer = 0;
 let roundWinner = null;         // p1 | p2
 let matchWinner = null;
@@ -2867,7 +2884,20 @@ function startMatch() {
   p1.rounds = 0; p2.rounds = 0;
   matchWinner = null;
   pauseResumeState = null;   // clear any stale pause state
-  startCountdown();
+  // VS_SPLASH plays once at MATCH start (NOT between rounds — round 2/3 go
+  // straight to startCountdown() via the ROUND_OVER → next-round path).
+  enterVsSplash();
+}
+function enterVsSplash() {
+  resetKnightPositions();
+  particles.length = 0;
+  floaters.length = 0;
+  shake = 0;
+  hitStopTimer = 0;
+  clearKoSlowmo();
+  vsSplashTimer = VS_SPLASH_DURATION;
+  gameState = GS.VS_SPLASH;
+  sfxHorn();
 }
 function startCountdown() {
   resetKnightPositions();
@@ -2967,7 +2997,8 @@ function enterAttractMode() {
   drawBanner = false; timeUpBanner = false;
   // Pick a random stage for visual variety
   currentStageIndex = Math.floor(Math.random() * STAGES.length);
-  startCountdown();
+  // Show VS splash so attract demos get the same theatrical intro
+  enterVsSplash();
 }
 
 function exitAttractMode() {
@@ -4093,7 +4124,7 @@ function buildSnapshot() {
     p1: snapKnight(p1),
     p2: snapKnight(p2),
     roundTimer,
-    countdownIndex, countdownTimer,
+    countdownIndex, countdownTimer, vsSplashTimer,
     timeUpBanner, drawBanner,
     roundWinner: roundWinner ? roundWinner.side : null,
     matchWinner: matchWinner ? matchWinner.side : null,
@@ -4122,6 +4153,7 @@ function applySnapshot(s) {
   applyKnight(p2, s.p2);
   roundTimer = s.roundTimer;
   countdownIndex = s.countdownIndex; countdownTimer = s.countdownTimer;
+  vsSplashTimer = s.vsSplashTimer || 0;
   timeUpBanner = s.timeUpBanner; drawBanner = s.drawBanner;
   roundWinner = s.roundWinner === "p1" ? p1 : (s.roundWinner === "p2" ? p2 : null);
   matchWinner = s.matchWinner === "p1" ? p1 : (s.matchWinner === "p2" ? p2 : null);
@@ -4266,6 +4298,15 @@ function update(dt) {
       if (sel.readyTimer <= 0) { sel.readyTimer = 0; startMatch(); }
     }
     return;
+  }
+
+  if (gameState === GS.VS_SPLASH) {
+    vsSplashTimer -= dt;
+    if (vsSplashTimer <= 0) {
+      vsSplashTimer = 0;
+      startCountdown();
+    }
+    return;   // no physics / AI / input during splash
   }
 
   if (gameState === GS.COUNTDOWN) {
@@ -5380,6 +5421,81 @@ function drawCountdown() {
   ctx.textAlign = "left";
 }
 
+// ===== VS SPLASH =====
+function drawVsSplash() {
+  drawBackground();
+  drawLog();
+
+  // Dim the world behind the splash so portraits pop
+  ctx.fillStyle = "rgba(17, 21, 31, 0.55)";
+  ctx.fillRect(0, 0, VW, VH);
+
+  const elapsed  = VS_SPLASH_DURATION - vsSplashTimer;
+  const slideT   = Math.min(1, elapsed / 0.35);
+  const easeOut  = 1 - Math.pow(1 - slideT, 3);
+  const fadeOut  = Math.min(1, vsSplashTimer / 0.25);
+  const alpha    = Math.min(1, slideT * 1.5) * fadeOut;
+
+  const portraitW = 320, portraitH = 380;
+  const leftStartX  = -300, leftEndX  = 40;
+  const rightStartX = VW + 300, rightEndX = VW - portraitW - 40;
+  const leftX  = leftStartX  + (leftEndX  - leftStartX)  * easeOut;
+  const rightX = rightStartX + (rightEndX - rightStartX) * easeOut;
+  const portraitY = 80;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  if (imgReady(IMG.portraitRed)) {
+    ctx.drawImage(IMG.portraitRed, leftX, portraitY, portraitW, portraitH);
+  } else {
+    ctx.fillStyle = "#8a2a2e";
+    ctx.fillRect(leftX, portraitY, portraitW, portraitH);
+  }
+  if (imgReady(IMG.portraitBlue)) {
+    ctx.drawImage(IMG.portraitBlue, rightX, portraitY, portraitW, portraitH);
+  } else {
+    ctx.fillStyle = "#2a4a8a";
+    ctx.fillRect(rightX, portraitY, portraitW, portraitH);
+  }
+
+  // VS sigil: pop in scale 0.4 → 1.0 starting at elapsed=0.15
+  const popT     = Math.max(0, Math.min(1, (elapsed - 0.15) / 0.25));
+  const popScale = 0.4 + 0.6 * (1 - Math.pow(1 - popT, 2));
+  const popAlpha = popT * fadeOut;
+  if (imgReady(IMG.vsEmblem)) {
+    const ew = 280 * popScale, eh = 220 * popScale;
+    ctx.globalAlpha = popAlpha;
+    ctx.drawImage(IMG.vsEmblem, (VW - ew) / 2, (VH - eh) / 2 - 30, ew, eh);
+  } else {
+    ctx.globalAlpha = popAlpha;
+    const sz = Math.round(140 * popScale);
+    ctx.font = `900 ${sz}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "#11151f";
+    ctx.lineWidth = 8;
+    ctx.fillStyle = "#d8a45a";
+    ctx.strokeText("VS", VW / 2, VH / 2 - 30);
+    ctx.fillText  ("VS", VW / 2, VH / 2 - 30);
+  }
+
+  // Knight name labels
+  ctx.globalAlpha = alpha;
+  ctx.font = "900 28px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = "#11151f";
+  ctx.fillStyle = "#f0d9a8";
+  ctx.strokeText("CRIMSON KNIGHT", leftX  + portraitW / 2, portraitY + portraitH + 28);
+  ctx.fillText  ("CRIMSON KNIGHT", leftX  + portraitW / 2, portraitY + portraitH + 28);
+  ctx.strokeText("AZURE KNIGHT",   rightX + portraitW / 2, portraitY + portraitH + 28);
+  ctx.fillText  ("AZURE KNIGHT",   rightX + portraitW / 2, portraitY + portraitH + 28);
+
+  ctx.restore();
+}
+
 // ===== PAUSE OVERLAY =====
 // Drawn on top of all other overlays (except the mute indicator).
 // A dimmed veil over the frozen game world + amber "PAUSED" headline +
@@ -5960,12 +6076,14 @@ function render() {
   // The HUD (life/SP/timer) only shows in the live match states. MENU, SELECT and
   // the ONLINE connect screens suppress it.
   const noHud = (gameState === GS.MENU || gameState === GS.SELECT ||
+                 gameState === GS.VS_SPLASH ||
                  gameState === GS.ONLINE_MENU || gameState === GS.ONLINE_HOST ||
                  gameState === GS.ONLINE_JOIN || gameState === GS.ONLINE_WAIT);
   if (!noHud) drawHUD();
 
   if (gameState === GS.MENU) drawTitle();
   else if (gameState === GS.SELECT) drawSelect();
+  else if (gameState === GS.VS_SPLASH) drawVsSplash();
   else if (gameState === GS.COUNTDOWN) drawCountdown();
   else if (gameState === GS.ROUND_OVER) drawRoundOver();
   else if (gameState === GS.MATCH_OVER) drawMatchOver();
