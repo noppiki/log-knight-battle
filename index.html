@@ -1042,6 +1042,7 @@ const ASSET_SRCS = {
   portraitBlue:       "assets/portrait_blue.png",
   vsEmblem:           "assets/vs_emblem.png",
   fightEmblem:        "assets/fight_emblem.png",
+  koEmblem:           "assets/ko_emblem.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2766,6 +2767,7 @@ function triggerHitStop(sec) {
 let koSlowmoTimer = 0;
 let koSlowmoElapsed = 0;
 let koFaller = null;
+let koFlashTimer = 0;
 
 // SINGLE entry point for the slow-mo. Called from every FALLING-entry site so
 // the trigger logic stays DRY. Self-guards against re-entry (only one slow-mo
@@ -2790,6 +2792,11 @@ function startKoSlowmo(k) {
   bgm.duck(0.012, 0.10);
   addBigShake(16);   // dramatic punctuation; netRecord'd → guest sees the same kick
   tryVibrate([60, 30, 80]);   // heavy thump → short pause → heavier thump on KO
+  // Iter 35: extra impact — spark burst from the faller's position + brief screen flash
+  if (typeof spawnSparks === "function" && k) {
+    spawnSparks(k.x, k.y - 40, 28, PAL.skyAmber || "#d8a45a");
+  }
+  koFlashTimer = 0.18;
 }
 
 // SINGLE exit point for the slow-mo. Called from EVERY interruption path so
@@ -2797,10 +2804,11 @@ function startKoSlowmo(k) {
 // round ends, (3) a stale faller pointer doesn't leak into the next round.
 // Idempotent (safe to call when no slow-mo is active).
 function clearKoSlowmo() {
-  if (koSlowmoTimer === 0 && koFaller === null) return;
+  if (koSlowmoTimer === 0 && koFaller === null && koFlashTimer === 0) return;
   koSlowmoTimer = 0;
   koSlowmoElapsed = 0;
   koFaller = null;
+  koFlashTimer = 0;
   bgm.restore(0.4);
 }
 
@@ -4252,6 +4260,9 @@ function update(dt) {
   cloudScrollX  = (cloudScrollX  + CLOUD_SCROLL_PX_PER_SEC  * dt) % VW;
   auroraScrollX = (auroraScrollX + AURORA_SCROLL_PX_PER_SEC * dt) % VW;
   sunRayScrollX = (sunRayScrollX + SUN_RAY_SCROLL_PX_PER_SEC * dt) % VW;
+  // koFlashTimer fades regardless of game state so a mid-flash state change
+  // (pause, round-over, etc.) never leaves the screen stuck flashed.
+  if (koFlashTimer > 0) koFlashTimer = Math.max(0, koFlashTimer - dt);
   // ===== PAUSE: freeze entire simulation when paused. =====
   // render() still runs (called unconditionally from frame()), so the game
   // world stays visible with the PAUSED overlay drawn on top.
@@ -5361,6 +5372,15 @@ function wrapText(text, cx, y, maxW, lineH) {
 // the moment ROUND_OVER/SELECT/restart fires (no stall onto the round-over
 // banner). No-op when no slow-mo is active.
 function drawKoBanner() {
+  if (koSlowmoTimer === 0 && koFlashTimer === 0) return;
+  // Brief screen flash overlay — rendered first, under the banner, over the world.
+  if (koFlashTimer > 0) {
+    const fa = koFlashTimer / 0.18;
+    ctx.save();
+    ctx.fillStyle = `rgba(255, 245, 216, ${0.55 * fa})`;
+    ctx.fillRect(0, 0, VW, VH);
+    ctx.restore();
+  }
   if (koSlowmoTimer === 0) return;
   // Pop-in: 0..1 over koBannerInDur. Half-1 grows 0.4 → 1.2, half-2 settles
   // 1.2 → 1.0 (slight overshoot for "snap" feel). After 1.0, stays at 1.0.
@@ -5384,14 +5404,23 @@ function drawKoBanner() {
   ctx.fillRect(-220, -64, 440, 128);
   ctx.globalAlpha = 0.35 * outAlpha;
   ctx.fillRect(-180, -50, 360, 100);
-  // Big stroked "K.O.!" headline.
+  // K.O.! emblem or procedural fallback.
   ctx.globalAlpha = 1.0 * outAlpha;
-  ctx.font = `900 ${Math.round(150)}px "Trebuchet MS", sans-serif`;
-  ctx.lineWidth = 14;
-  ctx.strokeStyle = PAL.ink;
-  ctx.strokeText("K.O.!", 0, 30);
-  ctx.fillStyle = "#fff5d8";
-  ctx.fillText("K.O.!", 0, 30);
+  if (imgReady(IMG.koEmblem)) {
+    const ew = 480, eh = 252;
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.koEmblem, -ew / 2, -eh / 2 + 30, ew, eh);
+    ctx.imageSmoothingEnabled = false;
+    ctx.restore();
+  } else {
+    ctx.font = `900 ${Math.round(150)}px "Trebuchet MS", sans-serif`;
+    ctx.lineWidth = 14;
+    ctx.strokeStyle = PAL.ink;
+    ctx.strokeText("K.O.!", 0, 30);
+    ctx.fillStyle = "#fff5d8";
+    ctx.fillText("K.O.!", 0, 30);
+  }
   // Subtitle: name the winner (the faller's foe) in the WINNER's color.
   if (koFaller && (koFaller.side === "p1" || koFaller.side === "p2")) {
     const fallerIsP1 = koFaller.side === "p1";
