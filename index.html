@@ -120,6 +120,72 @@
   .tb-att{ right: 14px; bottom: 100px; width: 120px; height: 120px; font-size: 28px; }
   .tb-sp { right: 142px; bottom: 100px; width: 84px;  height: 80px; font-size: 14px; }
   .tb-gd { right: 142px; bottom: 188px; width: 84px;  height: 60px; font-size: 16px; }
+  /* ===== SETTINGS PANEL =====
+     Hidden by default (display:none); .open shows it. Sits above everything except
+     the portrait-orientation toast (z-index 100). Backdrop is a translucent ink
+     so the game stays visible behind. Card uses the same Nordic palette as the
+     rest of the UI (#11151f panel, #d8a45a amber border, bone text). */
+  #settings {
+    position: absolute;
+    inset: 0;
+    background: rgba(8, 12, 20, 0.78);
+    display: none;
+    z-index: 30;
+    align-items: center; justify-content: center;
+  }
+  #settings.open { display: flex; }
+  .settings-card {
+    background: #11151f;
+    border: 3px solid #d8a45a;
+    border-radius: 10px;
+    padding: 28px 32px;
+    width: 420px; max-width: 92vw;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+    color: #e8dcc0;
+    font-family: "Trebuchet MS", system-ui, sans-serif;
+  }
+  .settings-card h2 {
+    font: 900 30px "Trebuchet MS", system-ui, sans-serif;
+    letter-spacing: 4px; color: #d8a45a; margin-bottom: 20px;
+    text-shadow: 0 2px 0 #000; text-align: center;
+  }
+  .setting-row {
+    display: grid; grid-template-columns: 1fr 1.4fr auto;
+    align-items: center; gap: 12px; margin-bottom: 16px;
+    font: 800 14px "Trebuchet MS", system-ui, sans-serif;
+    letter-spacing: 1px;
+  }
+  .setting-row label { color: #cfd8e8; }
+  .setting-row .set-val { color: #d8a45a; font-weight: 900; min-width: 36px; text-align: right; }
+  .setting-row input[type=range] { width: 100%; accent-color: #d8a45a; }
+  .setting-row select {
+    background: #1a2234; color: #e8dcc0; border: 2px solid #4a5a7a;
+    font: 800 13px "Trebuchet MS", system-ui, sans-serif; padding: 6px 10px; border-radius: 4px;
+  }
+  #set_close {
+    display: block; margin: 18px auto 6px;
+    background: #d8a45a; color: #11151f; border: 0; border-radius: 6px;
+    font: 900 18px "Trebuchet MS", system-ui, sans-serif; padding: 10px 28px; cursor: pointer;
+    letter-spacing: 2px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  }
+  #set_close:hover { background: #f0b966; }
+  .set-hint { font-size: 11px; color: #5a6a8a; text-align: center; margin-top: 8px; }
+  /* Gear button: top-right corner of the stage, offset 56px so it doesn't sit
+     on top of the procedural canvas-painted mute speaker icon (which is roughly
+     14px from the top-right of the canvas). Visible across all screens. */
+  #settings_btn {
+    position: absolute;
+    top: 8px; right: 56px;
+    z-index: 25;
+    font-size: 22px;
+    background: rgba(20, 26, 40, 0.72);
+    color: #d8a45a; border: 2px solid #4a5a7a;
+    border-radius: 8px; padding: 4px 10px;
+    cursor: pointer;
+    font-family: "Trebuchet MS", system-ui, sans-serif;
+    line-height: 1;
+  }
+  #settings_btn:hover { background: rgba(216,164,90,0.32); border-color: #d8a45a; color: #fff; }
   /* Portrait orientation hint on touch devices: rotate for full-screen play. */
   @media screen and (max-aspect-ratio: 1/1) and (pointer: coarse) {
     body::before {
@@ -156,6 +222,43 @@
     <input id="joinInput" type="text" maxlength="8" autocomplete="off"
            autocapitalize="characters" spellcheck="false"
            placeholder="ROOM CODE" style="display:none;" />
+    <!-- SETTINGS gear button (top-right corner). Always visible; opens the
+         #settings overlay. Positioned in DOM (z-index:25) NOT on the canvas. -->
+    <button id="settings_btn" type="button" title="Settings (O)" aria-label="Settings">&#9881;</button>
+    <!-- SETTINGS overlay. Hidden by default; .open shows it. Tabs above gameplay
+         (z-index:30). Sliders + selects persist to localStorage["lkb_settings"]. -->
+    <div id="settings" aria-hidden="true">
+      <div class="settings-card">
+        <h2>SETTINGS</h2>
+        <div class="setting-row">
+          <label for="set_bgm">BGM VOLUME</label>
+          <input id="set_bgm" type="range" min="0" max="100" step="5" />
+          <span class="set-val" id="set_bgm_val">100</span>
+        </div>
+        <div class="setting-row">
+          <label for="set_sfx">SFX VOLUME</label>
+          <input id="set_sfx" type="range" min="0" max="100" step="5" />
+          <span class="set-val" id="set_sfx_val">100</span>
+        </div>
+        <div class="setting-row">
+          <label for="set_shake">SCREEN SHAKE</label>
+          <select id="set_shake">
+            <option value="off">OFF</option>
+            <option value="reduced">REDUCED</option>
+            <option value="normal">NORMAL</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label for="set_koslow">K.O. SLOW-MO</label>
+          <select id="set_koslow">
+            <option value="0">OFF</option>
+            <option value="1">ON</option>
+          </select>
+        </div>
+        <button id="set_close" type="button">CLOSE (O)</button>
+        <p class="set-hint">Press O anytime to toggle this panel.</p>
+      </div>
+    </div>
   </div>
   <div id="hint">P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /</div>
 
@@ -669,7 +772,7 @@ function playEvent(ev) {
     case "spark":  _spawnSparks(ev.x, ev.y, ev.n, ev.color); break;
     case "dust":   _spawnDust(ev.x, ev.y); break;
     case "float":  _spawnFloater(ev.x, ev.y, ev.text, ev.color, ev.scale); break;
-    case "shake":  if (ev.big) _addBigShake(ev.amt); else _addShake(ev.amt); break;
+    case "shake":  { const a = ev.amt * shakeMul(); if (ev.big) _addBigShake(a); else _addShake(a); break; }
     case "sfx":    { const fn = SFX_MAP[ev.id]; if (fn) fn(); break; }
   }
 }
@@ -803,6 +906,132 @@ if (joinInputEl) {
 }
 window.addEventListener("resize", positionJoinInput);
 
+// ===== SETTINGS STATE (persisted to localStorage; defaults match prior behavior) =====
+// Declared HERE — before the DOM wiring block below — because syncSettingsUI()
+// runs once at the bottom of that block during script evaluation, and `let`
+// variables are TDZ-locked until their declaration line executes. Moving the
+// state above the wiring guarantees no ReferenceError at boot.
+//
+// Settings live OUTSIDE the muted flag: `muted` is the master gate (globalGain);
+// these scale the sub-buses underneath it (sfxGain + bgmGain via bgm.setVolume)
+// and modulate gameplay-side knobs (screen shake, KO slow-mo).
+let bgmVolume      = 100;       // 0..100
+let sfxVolume      = 100;       // 0..100
+let shakeIntensity = "normal";  // "off" | "reduced" | "normal"
+let koSlowmoEnabled = true;     // false = skip slow-mo, ROUND_OVER as before
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem("lkb_settings");
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (typeof s.bgmVolume === "number") bgmVolume = Math.max(0, Math.min(100, s.bgmVolume));
+    if (typeof s.sfxVolume === "number") sfxVolume = Math.max(0, Math.min(100, s.sfxVolume));
+    if (s.shakeIntensity === "off" || s.shakeIntensity === "reduced" || s.shakeIntensity === "normal") shakeIntensity = s.shakeIntensity;
+    if (typeof s.koSlowmoEnabled === "boolean") koSlowmoEnabled = s.koSlowmoEnabled;
+  } catch (e) {}
+}
+function saveSettings() {
+  try {
+    localStorage.setItem("lkb_settings", JSON.stringify({
+      bgmVolume, sfxVolume, shakeIntensity, koSlowmoEnabled
+    }));
+  } catch (e) {}
+}
+loadSettings();   // restore BEFORE the DOM wiring's syncSettingsUI() runs
+
+// Shake intensity multiplier — applied at the top of addShake/addBigShake AND
+// at the netplay shake event handler so each peer respects their own setting.
+// "off" zeros the contribution entirely; "reduced" halves to 0.4 (perceptual);
+// "normal" is 1.0 (= current behavior).
+function shakeMul() {
+  return shakeIntensity === "off" ? 0 : (shakeIntensity === "reduced" ? 0.4 : 1.0);
+}
+
+// applyAudioSettings — push current slider values into live WebAudio nodes.
+// Safe to call before initAudio() runs (both gains are null then; each branch
+// no-ops). Called from inside initAudio() after node creation AND on every
+// slider change. The `bgm` IIFE is declared later in the file (TDZ-locked
+// const); this function only executes after first user gesture (initAudio) so
+// by then `bgm` is fully constructed.
+function applyAudioSettings() {
+  if (sfxGain) sfxGain.gain.value = sfxVolume / 100;
+  if (typeof bgm !== "undefined" && bgm && bgm.setVolume) bgm.setVolume(bgmVolume / 100);
+}
+
+// ===== SETTINGS PANEL DOM WIRING =====
+// The HTML overlay (+ gear button) is in the DOM; this block hooks the controls
+// to live state. syncSettingsUI() mirrors the persisted state into the inputs
+// before opening so a reload-then-open shows the saved values, not the markup
+// defaults. Each input change calls saveSettings() so a tab close immediately
+// after a slider tweak still persists.
+const settingsEl = document.getElementById("settings");
+const settingsBtn = document.getElementById("settings_btn");
+const setBgm     = document.getElementById("set_bgm");
+const setSfx     = document.getElementById("set_sfx");
+const setBgmVal  = document.getElementById("set_bgm_val");
+const setSfxVal  = document.getElementById("set_sfx_val");
+const setShake   = document.getElementById("set_shake");
+const setKoslow  = document.getElementById("set_koslow");
+const setClose   = document.getElementById("set_close");
+
+function syncSettingsUI() {
+  if (!settingsEl) return;
+  setBgm.value = String(bgmVolume);
+  setSfx.value = String(sfxVolume);
+  setBgmVal.textContent = String(bgmVolume);
+  setSfxVal.textContent = String(sfxVolume);
+  setShake.value = shakeIntensity;
+  setKoslow.value = koSlowmoEnabled ? "1" : "0";
+}
+syncSettingsUI();   // mirror saved settings into the markup before first open
+
+function isSettingsOpen() { return !!(settingsEl && settingsEl.classList.contains("open")); }
+function openSettings() {
+  if (!settingsEl) return;
+  // Opening the panel also doubles as a "first user gesture" for autoplay-gated
+  // audio. initAudio() short-circuits if already done; safe to call repeatedly.
+  if (!audioInited) { try { initAudio(); } catch (e) {} }
+  syncSettingsUI();
+  settingsEl.classList.add("open");
+  settingsEl.setAttribute("aria-hidden", "false");
+}
+function closeSettings() {
+  if (!settingsEl) return;
+  settingsEl.classList.remove("open");
+  settingsEl.setAttribute("aria-hidden", "true");
+}
+
+if (settingsEl) {
+  setBgm.addEventListener("input", () => {
+    bgmVolume = parseInt(setBgm.value, 10) || 0;
+    setBgmVal.textContent = String(bgmVolume);
+    applyAudioSettings();
+    saveSettings();
+  });
+  setSfx.addEventListener("input", () => {
+    sfxVolume = parseInt(setSfx.value, 10) || 0;
+    setSfxVal.textContent = String(sfxVolume);
+    applyAudioSettings();
+    saveSettings();
+  });
+  setShake.addEventListener("change", () => {
+    const v = setShake.value;
+    if (v === "off" || v === "reduced" || v === "normal") shakeIntensity = v;
+    saveSettings();
+  });
+  setKoslow.addEventListener("change", () => {
+    koSlowmoEnabled = setKoslow.value === "1";
+    saveSettings();
+  });
+  setClose.addEventListener("click", () => closeSettings());
+  // Keep keys typed into the settings form (arrows on slider, etc.) from leaking
+  // to the game. stopPropagation here mirrors joinInput's defensive pattern.
+  settingsEl.addEventListener("keydown", (e) => { e.stopPropagation(); });
+}
+if (settingsBtn) {
+  settingsBtn.addEventListener("click", () => openSettings());
+}
+
 // ----------------------------- INPUT ---------------------------------
 // Held-keys set for continuous reads (move/guard).
 // Edge-triggered attack via a per-action "pressed this frame" flag that
@@ -825,6 +1054,32 @@ let audioInited = false;
 
 window.addEventListener("keydown", (e) => {
   const code = e.code;
+
+  // ----- O = settings toggle (global). Open/close the overlay from any state. -----
+  // Handled FIRST so it still works when focus is on a slider/select/button
+  // inside the panel (hint text says "Press O anytime to toggle"). Skip the
+  // JOIN room-code input (player is typing alphanumeric chars including "O").
+  // Also skip key-repeat (one tap = one toggle).
+  if (code === "KeyO" && !e.repeat && e.target !== joinInputEl) {
+    e.preventDefault();
+    if (isSettingsOpen()) closeSettings(); else openSettings();
+    return;
+  }
+  // Escape closes settings when open (in addition to its existing role).
+  if (code === "Escape" && isSettingsOpen()) {
+    e.preventDefault();
+    closeSettings();
+    return;
+  }
+
+  // ----- SETTINGS PANEL: input bubble guard -----
+  // When the panel is open and the focused element is one of its form controls,
+  // let the control handle its own keys (arrow keys on slider, etc.) without
+  // bubbling to the game. The settingsEl-level stopPropagation also handles
+  // this, but the listener runs at window level so we add a safety net here.
+  if (isSettingsOpen() && e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "BUTTON")) {
+    return;
+  }
 
   // ----- M = mute toggle (global). Gated to skip when the JOIN room-code -----
   // input is focused so typing M there doesn't both type AND toggle. The JOIN
@@ -1028,6 +1283,9 @@ function initAudio() {
     arenaFb.connect(arenaDelay);
     // Kick off ambient BGM lazily on this same first-gesture entry point.
     try { bgm.init(); bgm.start(); } catch (e) {}
+    // Push current slider values into the freshly-built nodes (sfxGain + bgmGain).
+    // Must run AFTER bgm.init() so bgmGain exists for bgm.setVolume().
+    try { applyAudioSettings(); } catch (e) {}
   } catch (err) { actx = null; }
 }
 function blip(freq, dur, type, vol) {
@@ -1063,6 +1321,11 @@ function blip(freq, dur, type, vol) {
 // bgm.setMuted is kept for symmetry but the global gate is the source of truth.
 const bgm = (function () {
   const BGM_LEVEL = 0.07;           // overall BGM master (under-mix target)
+  // userBgmScale: 0..1 multiplier from the SETTINGS panel slider. Applied to
+  // BGM_LEVEL at every ramp target (start fade-in, visibility restore, post-duck
+  // restore, runtime setVolume) so the slider takes effect without re-engineering
+  // each call site's target value. Defaults to 1.0 (= current behavior).
+  let userBgmScale = 1.0;
   const BPM = 75;
   const STEP_SEC = 60 / BPM / 2;    // eighth-note grid
   const SCALE = [110.00, 130.81, 146.83, 164.81, 196.00]; // A2 C3 D3 E3 G3
@@ -1199,7 +1462,10 @@ const bgm = (function () {
     const t = actx.currentTime;
     bgmGain.gain.cancelScheduledValues(t);
     bgmGain.gain.setValueAtTime(0.0001, t);
-    bgmGain.gain.exponentialRampToValueAtTime(BGM_LEVEL, t + 2.0);
+    // exponentialRamp requires a strictly-positive target; if user slid BGM to 0
+    // we'd silently fail. Floor at 0.0001 so the ramp completes deterministically
+    // (the audible delta vs 0 is inaudible; mute-equivalent).
+    bgmGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, BGM_LEVEL * userBgmScale), t + 2.0);
     if (stepTimer) clearInterval(stepTimer);
     stepTimer = setInterval(tick, STEP_SEC * 1000);
     scheduleAccent();
@@ -1229,7 +1495,7 @@ const bgm = (function () {
           if (!started) return;
           const tnow = actx.currentTime;
           bgmGain.gain.cancelScheduledValues(tnow);
-          bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL, tnow + 0.4);
+          bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, tnow + 0.4);
           if (!stepTimer) stepTimer = setInterval(tick, STEP_SEC * 1000);
           scheduleAccent();   // self-clears any prior pending timer
         }
@@ -1262,14 +1528,31 @@ const bgm = (function () {
   // Ramp the BGM bus back to its normal under-mix level. Mirrors the visibility
   // handler's restore. Used as the SINGLE exit path from the duck — every
   // slow-mo termination route funnels through clearKoSlowmo() which calls this.
+  // Target now factors userBgmScale so a slider change made during a duck still
+  // restores to the player's chosen level.
   function restore(ramp) {
     if (!actx || !bgmGain) return;
     const t = actx.currentTime;
     bgmGain.gain.cancelScheduledValues(t);
-    bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL, t + (ramp || 0.4));
+    bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, t + (ramp || 0.4));
   }
 
-  return { init, start, stop, setMuted, duck, restore };
+  // setVolume(v) — public slider hook (v = 0..1). Records the scale AND
+  // immediately ramps the live bus to the new target. Uses linearRamp so a
+  // 0-valued slider still reaches dead silence (exponentialRamp can't). The
+  // cancel-then-set-then-ramp sequence matches duck()/restore() so a slider
+  // wiggle during the slow-mo duck won't fight scheduled values catastrophically
+  // (the ramp wins; duck/restore overwrite again on their next call as before).
+  function setVolume(v) {
+    userBgmScale = Math.max(0, Math.min(1, v));
+    if (!actx || !bgmGain) return;
+    const t = actx.currentTime;
+    bgmGain.gain.cancelScheduledValues(t);
+    bgmGain.gain.setValueAtTime(bgmGain.gain.value, t);
+    bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, t + 0.15);
+  }
+
+  return { init, start, stop, setMuted, duck, restore, setVolume };
 })();
 
 // ===== GLOBAL MUTE TOGGLE ==============================================
@@ -1643,11 +1926,18 @@ function spawnFloater(x, y, text, color, scale) {
   netRecord({ k: "float", x, y, text, color: color || PAL.bone, scale: scale || 1 });
 }
 function addShake(amount) {
-  _addShake(amount);
+  // Settings: scale by user's shake intensity preference (off=0, reduced=0.4, normal=1.0).
+  // The netRecord still carries the ORIGINAL amount so the online guest applies their
+  // own preference independently (host's shakeIntensity setting doesn't override theirs).
+  const scaled = amount * shakeMul();
+  _addShake(scaled);
   netRecord({ k: "shake", amt: amount, big: false });
 }
 function addBigShake(amount) {
-  _addBigShake(amount);
+  // Same as addShake: scale locally for display, send the raw amt so each peer's
+  // local shakeIntensity setting applies to their own screen.
+  const scaled = amount * shakeMul();
+  _addBigShake(scaled);
   netRecord({ k: "shake", amt: amount, big: true });
 }
 
@@ -1741,6 +2031,10 @@ let koFaller = null;
 // means a "fall" is transient and not dramatically meaningful) and outside of
 // PLAYING (no slow-mo during ROUND_OVER/SELECT/etc.).
 function startKoSlowmo(k) {
+  // SETTINGS: when user disables KO slow-mo, skip entirely. The ROUND_OVER flow
+  // still runs (caller checks resolution via the normal FALLING → off-screen
+  // pipeline); we just don't slow the clock, dim the scene, or draw the banner.
+  if (!koSlowmoEnabled) return;
   if (gameMode === "training") return;
   if (gameState !== GS.PLAYING) return;
   if (koSlowmoTimer > 0) return;
