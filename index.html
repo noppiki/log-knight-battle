@@ -990,7 +990,10 @@ function isSettingsOpen() { return !!(settingsEl && settingsEl.classList.contain
 // ===== PAUSE HELPERS =====
 function canPauseHere() {
   // Pause only makes sense during active offline gameplay.
-  // Disabled in online (fairness), during KO slow-mo, and outside PLAYING/COUNTDOWN.
+  // Disabled when SETTINGS overlay is open (Esc/P close settings, not pause
+  // behind it), in online (fairness), during KO slow-mo, and outside
+  // PLAYING/COUNTDOWN.
+  if (isSettingsOpen()) return false;
   if (gameMode === "online") return false;
   if (gameState !== GS.PLAYING && gameState !== GS.COUNTDOWN) return false;
   if (koSlowmoTimer > 0) return false;
