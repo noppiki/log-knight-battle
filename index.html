@@ -170,6 +170,32 @@
   }
   #set_close:hover { background: #f0b966; }
   .set-hint { font-size: 11px; color: #5a6a8a; text-align: center; margin-top: 8px; }
+  /* ===== PLAYER STATS (inside settings card) ===== */
+  .stats-section { margin-top: 22px; padding-top: 18px; border-top: 2px solid #2a3450; }
+  .stats-section h3 {
+    font: 900 18px "Trebuchet MS", system-ui, sans-serif;
+    letter-spacing: 3px; color: #d8a45a; margin-bottom: 12px; text-align: center;
+    text-shadow: 0 2px 0 #000;
+  }
+  .stats-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px;
+    font: 700 13px "Trebuchet MS", system-ui, sans-serif;
+    letter-spacing: 1px;
+  }
+  .stats-grid > div {
+    display: flex; justify-content: space-between;
+    padding: 4px 0; border-bottom: 1px dashed #1f2740;
+  }
+  .stats-grid .stats-wide { grid-column: 1 / -1; }
+  .stats-grid .sk { color: #b0bcd4; }
+  .stats-grid .sv { color: #f6d8a0; font-weight: 900; }
+  #stats_reset {
+    display: block; margin: 14px auto 0;
+    background: #4a2030; color: #f6d8a0; border: 2px solid #6a3040;
+    font: 800 12px "Trebuchet MS"; padding: 6px 18px; border-radius: 4px;
+    cursor: pointer; letter-spacing: 2px;
+  }
+  #stats_reset:hover { background: #6a2c40; border-color: #b04060; }
   /* Gear button: top-right corner of the stage, offset 56px so it doesn't sit
      on top of the procedural canvas-painted mute speaker icon (which is roughly
      14px from the top-right of the canvas). Visible across all screens. */
@@ -254,6 +280,24 @@
             <option value="0">OFF</option>
             <option value="1">ON</option>
           </select>
+        </div>
+        <div class="stats-section">
+          <h3>YOUR STATS</h3>
+          <div class="stats-grid">
+            <div><span class="sk">Matches</span><span class="sv" id="stat_matches">0</span></div>
+            <div><span class="sk">Won</span><span class="sv" id="stat_won">0</span></div>
+            <div><span class="sk">Lost</span><span class="sv" id="stat_lost">0</span></div>
+            <div><span class="sk">Win Rate</span><span class="sv" id="stat_winrate">—</span></div>
+            <div><span class="sk">Rounds</span><span class="sv" id="stat_rounds">0</span></div>
+            <div><span class="sk">Draws</span><span class="sv" id="stat_draws">0</span></div>
+            <div><span class="sk">KO Scored</span><span class="sv" id="stat_kos">0</span></div>
+            <div><span class="sk">KO Suffered</span><span class="sv" id="stat_kod">0</span></div>
+            <div><span class="sk">Streak</span><span class="sv" id="stat_streak">0</span></div>
+            <div><span class="sk">Best Streak</span><span class="sv" id="stat_best">0</span></div>
+            <div class="stats-wide"><span class="sk">Favorite Special</span><span class="sv" id="stat_fav">—</span></div>
+            <div class="stats-wide"><span class="sk">Play Time</span><span class="sv" id="stat_time">0s</span></div>
+          </div>
+          <button id="stats_reset" type="button">RESET STATS</button>
         </div>
         <button id="set_close" type="button">CLOSE (O)</button>
         <p class="set-hint">Press O anytime to toggle this panel.</p>
@@ -956,6 +1000,63 @@ function saveSettings() {
 }
 loadSettings();   // restore BEFORE the DOM wiring's syncSettingsUI() runs
 
+// ===== PLAYER STATISTICS =====
+// Persisted to localStorage["lkb_stats"] as JSON. Follows the same pattern as
+// lkb_settings. Training + online modes are excluded (stage-1 simplification).
+const STATS_DEFAULTS = {
+  matches: 0, matchesWon: 0, matchesLost: 0,
+  rounds: 0, roundsWon: 0, roundsLost: 0, draws: 0,
+  koScored: 0, koSuffered: 0,
+  currentStreak: 0, bestStreak: 0,
+  specials: { mega: 0, counter: 0, dash: 0, anchor: 0, quake: 0, whirl: 0 },
+  playSeconds: 0,
+  firstPlayed: 0, lastUpdated: 0
+};
+let stats = JSON.parse(JSON.stringify(STATS_DEFAULTS));
+
+function loadStats() {
+  try {
+    const raw = localStorage.getItem("lkb_stats");
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    // Merge over defaults so adding new fields later doesn't crash on old saves.
+    for (const k in STATS_DEFAULTS) {
+      if (s[k] != null) {
+        if (typeof STATS_DEFAULTS[k] === "object" && !Array.isArray(STATS_DEFAULTS[k])) {
+          stats[k] = Object.assign({}, STATS_DEFAULTS[k], s[k] || {});
+        } else {
+          stats[k] = s[k];
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+let _statsSaveTimer = 0;
+function saveStats() {
+  // Debounce: collapse rapid calls into a single write ~600ms later.
+  if (_statsSaveTimer) return;
+  _statsSaveTimer = setTimeout(() => {
+    _statsSaveTimer = 0;
+    try {
+      stats.lastUpdated = Date.now();
+      if (!stats.firstPlayed) stats.firstPlayed = stats.lastUpdated;
+      localStorage.setItem("lkb_stats", JSON.stringify(stats));
+    } catch (e) {}
+  }, 600);
+}
+
+function resetStats() {
+  stats = JSON.parse(JSON.stringify(STATS_DEFAULTS));
+  // Force immediate write so the UI shows zeros right away (skip debounce).
+  if (_statsSaveTimer) { clearTimeout(_statsSaveTimer); _statsSaveTimer = 0; }
+  try {
+    localStorage.setItem("lkb_stats", JSON.stringify(stats));
+  } catch (e) {}
+}
+
+loadStats();
+
 // Shake intensity multiplier — applied at the top of addShake/addBigShake AND
 // at the netplay shake event handler so each peer respects their own setting.
 // "off" zeros the contribution entirely; "reduced" halves to 0.4 (perceptual);
@@ -1042,6 +1143,7 @@ function openSettings() {
   // audio. initAudio() short-circuits if already done; safe to call repeatedly.
   if (!audioInited) { try { initAudio(); } catch (e) {} }
   syncSettingsUI();
+  syncStatsUI();
   settingsEl.classList.add("open");
   settingsEl.setAttribute("aria-hidden", "false");
 }
@@ -1080,6 +1182,63 @@ if (settingsEl) {
 }
 if (settingsBtn) {
   settingsBtn.addEventListener("click", () => openSettings());
+}
+
+// ===== STATS HELPERS =====
+// Returns the knight representing the local human player (P1 for 1p/2p,
+// P2 when acting as online guest). Returns p1 by convention when both are local.
+function localHumanKnight() {
+  if (gameMode === "online" && net && net.mode === "guest") return p2;
+  return p1;
+}
+
+function fmtPlayTime(s) {
+  s = Math.max(0, Math.floor(s));
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return h + "h " + (m % 60) + "m";
+  if (m > 0) return m + "m " + (s % 60) + "s";
+  return s + "s";
+}
+
+function favoriteSpecial() {
+  let best = null, bestN = 0;
+  for (const id in stats.specials) {
+    if (stats.specials[id] > bestN) { bestN = stats.specials[id]; best = id; }
+  }
+  if (!best) return "—";
+  const info = SPECIALS.find(sp => sp.id === best);
+  return (info ? info.en : best) + " (" + bestN + ")";
+}
+
+function syncStatsUI() {
+  const el = (id) => document.getElementById(id);
+  if (!el("stat_matches")) return;  // settings panel may not exist yet
+  el("stat_matches").textContent = stats.matches;
+  el("stat_won").textContent = stats.matchesWon;
+  el("stat_lost").textContent = stats.matchesLost;
+  el("stat_winrate").textContent = stats.matches > 0 ? Math.round(100 * stats.matchesWon / stats.matches) + "%" : "—";
+  el("stat_rounds").textContent = stats.rounds;
+  el("stat_draws").textContent = stats.draws;
+  el("stat_kos").textContent = stats.koScored;
+  el("stat_kod").textContent = stats.koSuffered;
+  el("stat_streak").textContent = stats.currentStreak;
+  el("stat_best").textContent = stats.bestStreak;
+  el("stat_fav").textContent = favoriteSpecial();
+  el("stat_time").textContent = fmtPlayTime(stats.playSeconds);
+}
+
+// Wire up the reset button (settingsEl block already open above).
+if (settingsEl) {
+  const statsResetEl = document.getElementById("stats_reset");
+  if (statsResetEl) {
+    statsResetEl.addEventListener("click", () => {
+      if (confirm("Reset all your statistics? This cannot be undone.")) {
+        resetStats();
+        syncStatsUI();
+      }
+    });
+  }
 }
 
 // ----------------------------- INPUT ---------------------------------
@@ -2245,6 +2404,33 @@ function awardRound(winnerKnight) {
   if (winnerKnight.rounds >= TUNE.roundsToWin) {
     matchWinner = winnerKnight;
   }
+  // === STATS: record round + match outcome (offline modes only) ===
+  if (gameMode !== "training" && gameMode !== "online") {
+    stats.rounds += 1;
+    const me = localHumanKnight();
+    const iWon = (winnerKnight === me);
+    if (iWon) {
+      stats.roundsWon += 1;
+      // Credit a KO scored if the foe is still in FALLING state (balance-zero ring-out).
+      const foe = (me === p1) ? p2 : p1;
+      if (foe && foe.state === ST.FALLING) stats.koScored += 1;
+    } else {
+      stats.roundsLost += 1;
+      if (me && me.state === ST.FALLING) stats.koSuffered += 1;
+    }
+    if (matchWinner) {
+      stats.matches += 1;
+      if (matchWinner === me) {
+        stats.matchesWon += 1;
+        stats.currentStreak += 1;
+        if (stats.currentStreak > stats.bestStreak) stats.bestStreak = stats.currentStreak;
+      } else {
+        stats.matchesLost += 1;
+        stats.currentStreak = 0;
+      }
+    }
+    saveStats();
+  }
 }
 
 // TIME UP with no faller: decide by higher balance, or DRAW (replay) if tied.
@@ -2262,6 +2448,12 @@ function resolveTimeUp() {
     sfxFall();
     addShake(6);
     clearKoSlowmo();   // defensive: time-up draw never triggers slow-mo, but be belt-and-suspenders
+    // === STATS: record draw round (offline modes only) ===
+    if (gameMode !== "training" && gameMode !== "online") {
+      stats.draws += 1;
+      stats.rounds += 1;
+      saveStats();
+    }
   } else {
     awardRound(diff > 0 ? p1 : p2);
   }
@@ -2645,6 +2837,15 @@ function activateSpecial(k) {
   if (!k.chosenSpecial) return;
   if (specialActive(k)) return;            // one charge at a time
   if (k.special < TUNE.spMax) { sfxSpFail(); return; }   // not ready
+
+  // === STATS: count special activation by the local human (offline modes only) ===
+  if (gameMode !== "training" && gameMode !== "online") {
+    const me = localHumanKnight();
+    if (k === me && stats.specials[k.chosenSpecial] != null) {
+      stats.specials[k.chosenSpecial] += 1;
+      saveStats();
+    }
+  }
 
   k.special = 0;   // spend the full meter
   switch (k.chosenSpecial) {
@@ -3515,6 +3716,14 @@ function update(dt) {
   }
 
   if (gameState === GS.PLAYING) {
+    // === STATS: accumulate wall-clock playtime using raw dt (before slow-mo scale) ===
+    if (gameMode !== "training" && gameMode !== "online") {
+      stats.playSeconds += dt;
+      // Flush every ~5 real seconds; debounce collapses rapid calls.
+      if (Math.floor(stats.playSeconds) % 5 === 0 && Math.floor(stats.playSeconds) > 0) {
+        saveStats();
+      }
+    }
     // ===== K.O. SLOW-MO: scale physics dt while a KO is unfolding =====
     // The slow-mo timer counts in WALL-CLOCK dt (so the dramatic window is a
     // predictable ~koSlowmoDuration seconds of real time). The PHYSICS dt is
