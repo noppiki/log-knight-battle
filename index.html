@@ -1036,6 +1036,8 @@ const ASSET_SRCS = {
   countdownMedallion: "assets/countdown_medallion.webp",
   snowLayer:          "assets/snow_layer.png",
   cloudsLayer:        "assets/clouds_layer.png",
+  auroraRibbon:       "assets/aurora_ribbon.png",
+  sunRays:            "assets/sun_rays.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2709,8 +2711,12 @@ let frameCount = 0;
 // memory bounded. Advances even while paused so bg stays alive.
 let snowScrollY  = 0;
 let cloudScrollX = 0;
-const SNOW_SCROLL_PX_PER_SEC  = 25;
-const CLOUD_SCROLL_PX_PER_SEC = 15;
+let auroraScrollX = 0;
+let sunRayScrollX = 0;
+const SNOW_SCROLL_PX_PER_SEC    = 25;
+const CLOUD_SCROLL_PX_PER_SEC   = 15;
+const AURORA_SCROLL_PX_PER_SEC  = 12;
+const SUN_RAY_SCROLL_PX_PER_SEC = 8;
 
 // ===== ATTRACT MODE: after ATTRACT_IDLE_SEC of MENU idle, start an AI-vs-AI demo.
 // gameMode="attract" is INTERNAL only — never exposed on the title's mode-cycle UI.
@@ -4183,8 +4189,10 @@ function update(dt) {
   // Atmospheric parallax offsets advance every frame — including PAUSE — so
   // the background stays alive behind the pause overlay (purely visual, never
   // serialized to online snapshots).
-  snowScrollY  = (snowScrollY  + SNOW_SCROLL_PX_PER_SEC  * dt) % VH;
-  cloudScrollX = (cloudScrollX + CLOUD_SCROLL_PX_PER_SEC * dt) % VW;
+  snowScrollY   = (snowScrollY   + SNOW_SCROLL_PX_PER_SEC   * dt) % VH;
+  cloudScrollX  = (cloudScrollX  + CLOUD_SCROLL_PX_PER_SEC  * dt) % VW;
+  auroraScrollX = (auroraScrollX + AURORA_SCROLL_PX_PER_SEC * dt) % VW;
+  sunRayScrollX = (sunRayScrollX + SUN_RAY_SCROLL_PX_PER_SEC * dt) % VW;
   // ===== PAUSE: freeze entire simulation when paused. =====
   // render() still runs (called unconditionally from frame()), so the game
   // world stays visible with the PAUSED overlay drawn on top.
@@ -4497,6 +4505,18 @@ function drawBackground() {
     // Two copies side-by-side for seamless rightward scroll
     ctx.drawImage(IMG.cloudsLayer, cloudScrollX - VW, 0, VW, VH);
     ctx.drawImage(IMG.cloudsLayer, cloudScrollX,      0, VW, VH);
+  } else if (stageId === "aurora" && imgReady(IMG.auroraRibbon)) {
+    // Gentle alpha pulse to suggest aurora shimmer
+    const sh = 0.85 + 0.15 * Math.sin(performance.now() / 1400);
+    ctx.save();
+    ctx.globalAlpha = sh;
+    ctx.drawImage(IMG.auroraRibbon, auroraScrollX - VW, 0, VW, VH);
+    ctx.drawImage(IMG.auroraRibbon, auroraScrollX,      0, VW, VH);
+    ctx.restore();
+  } else if (stageId === "goldenhour" && imgReady(IMG.sunRays)) {
+    // Two copies side-by-side for seamless rightward drift
+    ctx.drawImage(IMG.sunRays, sunRayScrollX - VW, 0, VW, VH);
+    ctx.drawImage(IMG.sunRays, sunRayScrollX,      0, VW, VH);
   }
 }
 
@@ -6008,6 +6028,11 @@ function frame(now) {
     // (2) the latest snapshot+events were already applied by netOnMessage,
     // (3) animate/expire FX locally, (4) render. Connect screens still render.
     frameCount++;          // keep render-only animations (auras, blinks, dots) alive
+    // Advance parallax locally — purely visual, never serialized, must tick on guest too.
+    snowScrollY   = (snowScrollY   + SNOW_SCROLL_PX_PER_SEC   * dt) % VH;
+    cloudScrollX  = (cloudScrollX  + CLOUD_SCROLL_PX_PER_SEC  * dt) % VW;
+    auroraScrollX = (auroraScrollX + AURORA_SCROLL_PX_PER_SEC * dt) % VW;
+    sunRayScrollX = (sunRayScrollX + SUN_RAY_SCROLL_PX_PER_SEC * dt) % VW;
     guestSendInput();
     updateEffects(dt);
     render();
