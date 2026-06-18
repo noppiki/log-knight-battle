@@ -235,6 +235,49 @@
     line-height: 1;
   }
   #settings_btn:hover { background: rgba(216,164,90,0.32); border-color: #d8a45a; color: #fff; }
+  /* ===== HELP OVERLAY ===== */
+  #help { position: absolute; inset: 0; background: rgba(8,12,20,0.78);
+          display: none; z-index: 30; align-items: flex-start; justify-content: center;
+          padding: 28px 16px; overflow-y: auto; }
+  #help.open { display: flex; }
+  .help-card { background: #11151f; border: 3px solid #d8a45a; border-radius: 10px;
+               padding: 28px 32px 34px; width: 640px; max-width: 96vw;
+               box-shadow: 0 20px 60px rgba(0,0,0,0.7); color: #e8dcc0;
+               font-family: "Trebuchet MS", system-ui, sans-serif; }
+  .help-card h2 { font: 900 32px "Trebuchet MS", system-ui, sans-serif;
+                  letter-spacing: 4px; color: #d8a45a; margin-bottom: 12px;
+                  text-shadow: 0 2px 0 #000; text-align: center; }
+  .help-card section { margin-top: 18px; padding-top: 16px; border-top: 2px solid #2a3450; }
+  .help-card section:first-of-type { border-top: 0; padding-top: 0; }
+  .help-card h3 { font: 900 17px "Trebuchet MS", system-ui, sans-serif;
+                  letter-spacing: 2px; color: #d8a45a; margin-bottom: 8px; }
+  .help-card h4 { font: 900 13px "Trebuchet MS", system-ui, sans-serif;
+                  letter-spacing: 2px; margin-bottom: 6px; }
+  .help-card h4.hp1 { color: #ff7a7a; }
+  .help-card h4.hp2 { color: #7a9aff; }
+  .help-card p { font: 600 14px "Trebuchet MS", system-ui, sans-serif;
+                 color: #cfd8e8; line-height: 1.5; }
+  .help-card p.help-note { font-size: 12px; color: #7a8aa6; margin-top: 8px; font-style: italic; }
+  .help-card ul { padding-left: 22px; line-height: 1.7; color: #cfd8e8; font-size: 13px; }
+  .help-card ul li b { color: #f6d8a0; font-weight: 900; letter-spacing: 1px; }
+  .help-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .help-specials { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px;
+                   margin-top: 10px; font: 700 12px "Trebuchet MS", system-ui, sans-serif; }
+  .help-specials .sp-row { padding: 4px 0; border-bottom: 1px dashed #1f2740; }
+  .help-specials .sp-name { color: #f6d8a0; font-weight: 900; letter-spacing: 1px; display: block; }
+  .help-specials .sp-desc { color: #b0bcd4; font-size: 11px; font-weight: 600; display: block; margin-top: 2px; }
+  .modes-list b { color: #f6d8a0; }
+  #help_close { display: block; margin: 22px auto 0; background: #d8a45a; color: #11151f;
+                border: 0; border-radius: 6px; font: 900 18px "Trebuchet MS";
+                padding: 10px 28px; cursor: pointer; letter-spacing: 2px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+  #help_close:hover { background: #f0b966; }
+  #help_btn { position: absolute; top: 8px; right: 104px; z-index: 25;
+              font-size: 22px; background: rgba(20,26,40,0.72);
+              color: #d8a45a; border: 2px solid #4a5a7a;
+              border-radius: 8px; padding: 4px 12px; cursor: pointer;
+              font-family: "Trebuchet MS", system-ui, sans-serif; }
+  #help_btn:hover { background: rgba(216,164,90,0.32); border-color: #d8a45a; color: #fff; }
   /* Portrait orientation hint on touch devices: rotate for full-screen play. */
   @media screen and (max-aspect-ratio: 1/1) and (pointer: coarse) {
     body::before {
@@ -274,6 +317,7 @@
     <!-- SETTINGS gear button (top-right corner). Always visible; opens the
          #settings overlay. Positioned in DOM (z-index:25) NOT on the canvas. -->
     <button id="settings_btn" type="button" title="Settings (O)" aria-label="Settings">&#9881;</button>
+    <button id="help_btn" type="button" title="How to play (H)" aria-label="Help">?</button>
     <!-- SETTINGS overlay. Hidden by default; .open shows it. Tabs above gameplay
          (z-index:30). Sliders + selects persist to localStorage["lkb_settings"]. -->
     <div id="settings" aria-hidden="true">
@@ -329,6 +373,70 @@
         </div>
         <button id="set_close" type="button">CLOSE (O)</button>
         <p class="set-hint">Press O anytime to toggle this panel.</p>
+      </div>
+    </div>
+    <div id="help" aria-hidden="true">
+      <div class="help-card">
+        <h2>HOW TO PLAY</h2>
+        <section>
+          <h3>GOAL</h3>
+          <p>Knock your opponent off the log first. Best of 3 rounds wins the match.</p>
+        </section>
+        <section>
+          <h3>CONTROLS</h3>
+          <div class="help-grid2">
+            <div>
+              <h4 class="hp1">PLAYER 1 (CRIMSON)</h4>
+              <ul>
+                <li><b>A / D</b> &nbsp; scoot left / right</li>
+                <li><b>W</b> &nbsp; hop forward</li>
+                <li><b>S</b> &nbsp; guard (raise pan)</li>
+                <li><b>SPACE</b> &nbsp; swing pan (tap rapidly)</li>
+                <li><b>F</b> &nbsp; special move</li>
+              </ul>
+            </div>
+            <div>
+              <h4 class="hp2">PLAYER 2 (AZURE)</h4>
+              <ul>
+                <li><b>&#9668; &#9658;</b> &nbsp; scoot left / right</li>
+                <li><b>&#9650;</b> &nbsp; hop forward</li>
+                <li><b>&#9660;</b> &nbsp; guard</li>
+                <li><b>ENTER</b> &nbsp; swing pan</li>
+                <li><b>/</b> &nbsp; special move</li>
+              </ul>
+            </div>
+          </div>
+          <p class="help-note">Mobile: on-screen buttons appear during play.</p>
+        </section>
+        <section>
+          <h3>BALANCE = LIFE</h3>
+          <p>The top bar is your life. Take hits to lose balance — at 0 (or shoved past the log edge), you tumble off and lose the round.</p>
+        </section>
+        <section>
+          <h3>SP GAUGE &amp; SPECIALS</h3>
+          <p>The thin gauge below your life bar fills via combat. When full, press your SPECIAL key (F or "/") to unleash the move you picked at the start of the match.</p>
+          <div class="help-specials"></div>
+        </section>
+        <section>
+          <h3>MODES</h3>
+          <ul class="modes-list">
+            <li><b>1P vs CPU</b> — solo against AI of medium difficulty.</li>
+            <li><b>2P LOCAL</b> — two players on the same keyboard.</li>
+            <li><b>ONLINE</b> — host or join a room over the relay.</li>
+            <li><b>TRAINING</b> — infinite life + passive dummy; practice freely.</li>
+          </ul>
+        </section>
+        <section>
+          <h3>TIPS</h3>
+          <ul>
+            <li>The pendulum has momentum — rapid taps build a bigger swing.</li>
+            <li>Guarding halves incoming knockback but you can't swing during it.</li>
+            <li>Near the edge you get pushed harder. The center is safer.</li>
+            <li>Press <b>P</b> or <b>Esc</b> to pause anytime (offline only).</li>
+            <li>Press <b>O</b> for SETTINGS (volume, shake, KO slow-mo).</li>
+          </ul>
+        </section>
+        <button id="help_close" type="button">CLOSE (H)</button>
       </div>
     </div>
   </div>
@@ -1251,9 +1359,10 @@ function isSettingsOpen() { return !!(settingsEl && settingsEl.classList.contain
 // ===== PAUSE HELPERS =====
 function canPauseHere() {
   // Pause only makes sense during active offline gameplay.
-  // Disabled when SETTINGS overlay is open (Esc/P close settings, not pause
-  // behind it), in online (fairness), during KO slow-mo, and outside
+  // Disabled when SETTINGS or HELP overlay is open (Esc/P close them, not pause
+  // behind), in online (fairness), during KO slow-mo, and outside
   // PLAYING/COUNTDOWN.
+  if (typeof isHelpOpen === "function" && isHelpOpen()) return false;
   if (isSettingsOpen()) return false;
   if (gameMode === "online") return false;
   if (gameState !== GS.PLAYING && gameState !== GS.COUNTDOWN) return false;
@@ -1282,6 +1391,7 @@ function togglePause() {
 }
 function openSettings() {
   if (!settingsEl) return;
+  if (typeof isHelpOpen === "function" && isHelpOpen()) closeHelp();
   // Opening the panel also doubles as a "first user gesture" for autoplay-gated
   // audio. initAudio() short-circuits if already done; safe to call repeatedly.
   if (!audioInited) { try { initAudio(); } catch (e) {} }
@@ -1327,6 +1437,38 @@ if (settingsEl) {
 if (settingsBtn) {
   settingsBtn.addEventListener("click", () => openSettings());
 }
+
+// ===== HELP OVERLAY =====
+const helpEl = document.getElementById("help");
+const helpCloseEl = document.getElementById("help_close");
+const helpBtnEl = document.getElementById("help_btn");
+
+function isHelpOpen() { return !!(helpEl && helpEl.classList.contains("open")); }
+function openHelp() {
+  if (typeof closeSettings === "function" && isSettingsOpen()) closeSettings();
+  populateHelpSpecials();
+  helpEl.classList.add("open");
+  helpEl.setAttribute("aria-hidden", "false");
+}
+function closeHelp() {
+  helpEl.classList.remove("open");
+  helpEl.setAttribute("aria-hidden", "true");
+}
+function populateHelpSpecials() {
+  const wrap = helpEl ? helpEl.querySelector(".help-specials") : null;
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  for (const sp of SPECIALS) {
+    const row = document.createElement("div");
+    row.className = "sp-row";
+    row.innerHTML =
+      '<span class="sp-name">' + sp.en + '</span>' +
+      '<span class="sp-desc">' + sp.fx + '</span>';
+    wrap.appendChild(row);
+  }
+}
+if (helpCloseEl) helpCloseEl.addEventListener("click", () => closeHelp());
+if (helpBtnEl) helpBtnEl.addEventListener("click", () => openHelp());
 
 // ===== STATS HELPERS =====
 // Returns the knight representing the local human player (P1 for 1p/2p,
@@ -1443,6 +1585,19 @@ let audioInited = false;
 window.addEventListener("keydown", (e) => {
   const code = e.code;
 
+  // ----- H = help toggle (global). Open/close the HOW TO PLAY overlay. -----
+  if (code === "KeyH" && !e.repeat && e.target !== joinInputEl) {
+    e.preventDefault();
+    if (isHelpOpen()) closeHelp(); else openHelp();
+    return;
+  }
+  // Escape closes help when open (before other Escape handlers).
+  if (code === "Escape" && isHelpOpen()) {
+    e.preventDefault();
+    closeHelp();
+    return;
+  }
+
   // ----- O = settings toggle (global). Open/close the overlay from any state. -----
   // Handled FIRST so it still works when focus is on a slider/select/button
   // inside the panel (hint text says "Press O anytime to toggle"). Skip the
@@ -1465,7 +1620,7 @@ window.addEventListener("keydown", (e) => {
   // let the control handle its own keys (arrow keys on slider, etc.) without
   // bubbling to the game. The settingsEl-level stopPropagation also handles
   // this, but the listener runs at window level so we add a safety net here.
-  if (isSettingsOpen() && e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "BUTTON")) {
+  if ((isSettingsOpen() || (typeof isHelpOpen === "function" && isHelpOpen())) && e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "BUTTON")) {
     return;
   }
 
