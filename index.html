@@ -1297,7 +1297,7 @@ let achToastNow = null;
 const ACH_TOAST_LIFE = 3.2;
 
 function checkAchievements() {
-  if (gameMode === "training" || gameMode === "online") return;
+  if (gameMode === "training" || gameMode === "online" || gameMode === "attract") return;
   for (const a of ACHIEVEMENTS) {
     if (unlockedAchievements.has(a.id)) continue;
     let ok = false;
@@ -1456,11 +1456,12 @@ function isSettingsOpen() { return !!(settingsEl && settingsEl.classList.contain
 function canPauseHere() {
   // Pause only makes sense during active offline gameplay.
   // Disabled when SETTINGS or HELP overlay is open (Esc/P close them, not pause
-  // behind), in online (fairness), during KO slow-mo, and outside
-  // PLAYING/COUNTDOWN.
+  // behind), in online (fairness), during KO slow-mo, outside
+  // PLAYING/COUNTDOWN, and during attract demo (no need to pause a demo).
   if (typeof isHelpOpen === "function" && isHelpOpen()) return false;
   if (isSettingsOpen()) return false;
   if (gameMode === "online") return false;
+  if (gameMode === "attract") return false;
   if (gameState !== GS.PLAYING && gameState !== GS.COUNTDOWN) return false;
   if (koSlowmoTimer > 0) return false;
   return true;
@@ -1755,6 +1756,10 @@ window.addEventListener("keydown", (e) => {
 
   if (!audioInited) initAudio();
 
+  // ATTRACT MODE: any key (that isn't opening settings/help) exits the demo.
+  resetAttractIdle();
+  if (attractActive) { exitAttractMode(); return; }
+
   // Ignore OS key-repeat entirely for state transitions.
   if (e.repeat) return;
 
@@ -1855,6 +1860,9 @@ const IS_MOBILE = ('ontouchstart' in window) ||
       // AudioContext. Touching any button counts. Safe to call repeatedly —
       // initAudio() short-circuits if already initialized.
       if (!audioInited) { try { initAudio(); } catch (e) {} }
+      // ATTRACT MODE: any touch button exits the demo.
+      resetAttractIdle();
+      if (attractActive) { exitAttractMode(); return; }
       const hk = HOLD_KEY_BY_ACT[act];
       if (hk) {
         held.add(hk);
@@ -2694,6 +2702,14 @@ let roundWinner = null;         // p1 | p2
 let matchWinner = null;
 let frameCount = 0;
 
+// ===== ATTRACT MODE: after ATTRACT_IDLE_SEC of MENU idle, start an AI-vs-AI demo.
+// gameMode="attract" is INTERNAL only — never exposed on the title's mode-cycle UI.
+const ATTRACT_IDLE_SEC = 30;
+let attractIdleTimer = 0;          // seconds elapsed on title without input
+let attractActive = false;         // true while running a demo
+let attractTimeoutTimer = 0;       // wall-clock seconds the current demo has run
+let prevModeBeforeAttract = "1p";  // restore the user's selected mode when they exit
+
 // round timer + hit-stop
 let roundTimer = TUNE.roundTime;   // seconds remaining (counts down only in PLAYING)
 let hitStopTimer = 0;              // >0 freezes the sim (and the round clock)
@@ -2870,7 +2886,7 @@ function awardRound(winnerKnight) {
     matchWinner = winnerKnight;
   }
   // === STATS: record round + match outcome (offline modes only) ===
-  if (gameMode !== "training" && gameMode !== "online") {
+  if (gameMode !== "training" && gameMode !== "online" && gameMode !== "attract") {
     stats.rounds += 1;
     const me = localHumanKnight();
     const iWon = (winnerKnight === me);
@@ -2897,6 +2913,64 @@ function awardRound(winnerKnight) {
     saveStats();
     checkAchievements();
   }
+  // === ATTRACT: chain a new demo after a match ends (brief grace to show banner)
+  if (gameMode === "attract" && matchWinner) {
+    setTimeout(() => {
+      if (attractActive) {
+        exitAttractMode();
+        enterAttractMode();
+      }
+    }, 1500);
+  }
+}
+
+// ===== ATTRACT MODE HELPERS =====
+function resetAttractIdle() {
+  attractIdleTimer = 0;
+}
+
+function enterAttractMode() {
+  if (attractActive) return;
+  prevModeBeforeAttract = gameMode;
+  attractActive = true;
+  attractTimeoutTimer = 0;
+  attractIdleTimer = 0;
+  gameMode = "attract";
+  // Randomize specials for visual variety
+  if (typeof SPECIALS !== "undefined" && SPECIALS.length > 0) {
+    p1.chosenSpecial = SPECIALS[Math.floor(Math.random() * SPECIALS.length)].id;
+    p2.chosenSpecial = SPECIALS[Math.floor(Math.random() * SPECIALS.length)].id;
+  }
+  // Reset knight state and start a match directly (skip SELECT)
+  fullResetKnight(p1); fullResetKnight(p2);
+  resetKnightPositions();
+  p1.rounds = 0; p2.rounds = 0;
+  matchWinner = null; roundWinner = null;
+  drawBanner = false; timeUpBanner = false;
+  // Pick a random stage for visual variety
+  currentStageIndex = Math.floor(Math.random() * STAGES.length);
+  startCountdown();
+}
+
+function exitAttractMode() {
+  if (!attractActive) return;
+  attractActive = false;
+  attractIdleTimer = 0;
+  attractTimeoutTimer = 0;
+  gameMode = prevModeBeforeAttract || "1p";
+  // Tear down the current match cleanly
+  fullResetKnight(p1); fullResetKnight(p2);
+  resetKnightPositions();
+  if (typeof clearKoSlowmo === "function") clearKoSlowmo();
+  // Clear held input so no keys leak into MENU
+  held.clear();
+  attackArmed.p1 = attackArmed.p2 = false;
+  specialArmed.p1 = specialArmed.p2 = false;
+  p1.rounds = 0; p2.rounds = 0;
+  matchWinner = null; roundWinner = null;
+  drawBanner = false; timeUpBanner = false;
+  pauseResumeState = null;
+  gameState = GS.MENU;
 }
 
 // TIME UP with no faller: decide by higher balance, or DRAW (replay) if tied.
@@ -2915,7 +2989,7 @@ function resolveTimeUp() {
     addShake(6);
     clearKoSlowmo();   // defensive: time-up draw never triggers slow-mo, but be belt-and-suspenders
     // === STATS: record draw round (offline modes only) ===
-    if (gameMode !== "training" && gameMode !== "online") {
+    if (gameMode !== "training" && gameMode !== "online" && gameMode !== "attract") {
       stats.draws += 1;
       stats.rounds += 1;
       saveStats();
@@ -3307,7 +3381,7 @@ function activateSpecial(k) {
   if (k.special < TUNE.spMax) { sfxSpFail(); return; }   // not ready
 
   // === STATS: count special activation by the local human (offline modes only) ===
-  if (gameMode !== "training" && gameMode !== "online") {
+  if (gameMode !== "training" && gameMode !== "online" && gameMode !== "attract") {
     const me = localHumanKnight();
     if (k === me && stats.specials[k.chosenSpecial] != null) {
       stats.specials[k.chosenSpecial] += 1;
@@ -4194,8 +4268,19 @@ function update(dt) {
   }
 
   if (gameState === GS.PLAYING) {
+    // === ATTRACT TIMEOUT: restart demo after 60s, even without a natural match end ===
+    if (attractActive) {
+      attractTimeoutTimer += dt;
+      if (attractTimeoutTimer >= 60) {
+        exitAttractMode();
+        // Guard: only re-enter if still on MENU (player may have exited via input
+        // between the check and the setTimeout; this prevents yanking them back).
+        setTimeout(() => { if (gameState === GS.MENU && !attractActive) enterAttractMode(); }, 50);
+        return;
+      }
+    }
     // === STATS: accumulate wall-clock playtime using raw dt (before slow-mo scale) ===
-    if (gameMode !== "training" && gameMode !== "online") {
+    if (gameMode !== "training" && gameMode !== "online" && gameMode !== "attract") {
       stats.playSeconds += dt;
       // Flush every ~5 real seconds; debounce collapses rapid calls.
       if (Math.floor(stats.playSeconds) % 5 === 0 && Math.floor(stats.playSeconds) > 0) {
@@ -4229,14 +4314,24 @@ function update(dt) {
     // Always read inputs (this also DRAINS any stray P2 attack/special arms so a
     // human key press can't leak into the CPU's slot in 1p). In 1p the CPU
     // computes P2's inputs via aiInputs() and we discard the keyboard half.
-    const [i1, i2kbd] = readInputs();
+    let [i1, i2kbd] = readInputs();
     // p2 input source: 1p => AI, online-host => relayed guest input,
-    // training => passive dummy (all-false inputs, no AI), else => P2 kbd.
+    // training => passive dummy (all-false inputs, no AI),
+    // attract => both AI, else => P2 kbd.
     let i2;
-    if (gameMode === "1p") i2 = aiInputs(p2, p1, dt);
-    else if (gameMode === "online" && net.mode === "host") i2 = hostGuestInputForFrame();
-    else if (gameMode === "training") i2 = { left:false, right:false, jump:false, guard:false, attack:false, special:false };
-    else i2 = i2kbd;
+    if (gameMode === "1p") {
+      i2 = aiInputs(p2, p1, dt);
+    } else if (gameMode === "attract") {
+      // Both players driven by AI; keyboard input already drained above.
+      i1 = aiInputs(p1, p2, dt);
+      i2 = aiInputs(p2, p1, dt);
+    } else if (gameMode === "online" && net.mode === "host") {
+      i2 = hostGuestInputForFrame();
+    } else if (gameMode === "training") {
+      i2 = { left:false, right:false, jump:false, guard:false, attack:false, special:false };
+    } else {
+      i2 = i2kbd;
+    }
     // special activation (edge-triggered) BEFORE physics so a fired MEGA/dash
     // takes effect this frame.
     if (i1.special) activateSpecial(p1);
@@ -4305,7 +4400,10 @@ function update(dt) {
     roundOverTimer -= dt;
     if (roundOverTimer <= 0) {
       if (matchWinner) {
-        gameState = GS.MATCH_OVER;
+        // ATTRACT: awardRound already scheduled a new demo via setTimeout; don't
+        // advance to MATCH_OVER — let the timeout handler restart the demo.
+        if (!attractActive) gameState = GS.MATCH_OVER;
+        // (if attractActive, state stays ROUND_OVER until the setTimeout fires)
       } else {
         startCountdown();
       }
@@ -4315,6 +4413,15 @@ function update(dt) {
 
   if (gameState === GS.MENU || gameState === GS.MATCH_OVER) {
     consumeAttack("p1"); consumeAttack("p2");
+    // ATTRACT: tick the idle timer while on MENU (not during settings/help open).
+    if (gameState === GS.MENU && !attractActive &&
+        !isSettingsOpen() &&
+        !(typeof isHelpOpen === "function" && isHelpOpen())) {
+      attractIdleTimer += dt;
+      if (attractIdleTimer >= ATTRACT_IDLE_SEC) {
+        enterAttractMode();
+      }
+    }
     return;
   }
 }
@@ -4747,6 +4854,29 @@ function drawAudioIcon(cx, cy, w) {
 // Top-right placement for the mute icon, with a small "M" caption underneath.
 // Tucked into the corner so it doesn't collide with the balance meters
 // (which start at x=30 and end at x=VW-30) or the round timer (centered).
+function drawAttractOverlay() {
+  if (!attractActive) return;
+  ctx.save();
+  ctx.textAlign = "center";
+  // Top banner "🎬 DEMO"
+  ctx.font = '900 28px "Trebuchet MS", system-ui, sans-serif';
+  ctx.lineWidth = 6; ctx.strokeStyle = PAL.ink;
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.strokeText("🎬 DEMO", VW / 2, 36);
+  ctx.fillText("🎬 DEMO", VW / 2, 36);
+  // Bottom "PRESS ANY KEY TO PLAY" blinking
+  const blink = Math.sin(frameCount * 0.12) > -0.2;
+  if (blink) {
+    ctx.font = '900 18px "Trebuchet MS", system-ui, sans-serif';
+    ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
+    ctx.fillStyle = PAL.bone;
+    ctx.strokeText("PRESS ANY KEY TO PLAY", VW / 2, VH - 18);
+    ctx.fillText("PRESS ANY KEY TO PLAY", VW / 2, VH - 18);
+  }
+  ctx.restore();
+  ctx.textAlign = "left";
+}
+
 function drawMuteIndicator() {
   const w = 20;
   const cx = VW - 22;
@@ -5598,6 +5728,10 @@ let matchBtn = null;
 
 // click restart button (or, on mobile, tap-to-Enter from MENU / SELECT / ONLINE_MENU)
 canvas.addEventListener("click", (e) => {
+  // ATTRACT MODE: any canvas click exits the demo and returns to MENU.
+  resetAttractIdle();
+  if (attractActive) { exitAttractMode(); return; }
+
   // ===== MOBILE TAP-TO-START on MENU =====
   // Phones can't press Enter without a keyboard popping up, so a canvas tap
   // on the title acts as Enter: enter online connect-flow or enter SELECT,
@@ -5777,6 +5911,9 @@ function render() {
   // Achievement toast: shows briefly when a new achievement unlocks.
   // Sits above all gameplay overlays but below the persistent mute pip.
   drawAchToast();
+  // Attract mode overlay: "🎬 DEMO" badge + blinking "PRESS ANY KEY TO PLAY".
+  // Drawn above gameplay and toasts; below the mute indicator.
+  drawAttractOverlay();
   // Mute indicator sits on top of every screen, top-right corner. Always
   // visible so the user knows what state audio is in (and finds the M key).
   drawMuteIndicator();
@@ -5799,10 +5936,11 @@ function frame(now) {
   // path so a guest who joins from a phone still gets the buttons.
   if (IS_MOBILE) {
     const showButtons = (
-      gameState === GS.PLAYING ||
-      gameState === GS.COUNTDOWN ||
-      gameState === GS.ROUND_OVER ||
-      gameState === GS.PAUSED
+      (gameState === GS.PLAYING ||
+       gameState === GS.COUNTDOWN ||
+       gameState === GS.ROUND_OVER ||
+       gameState === GS.PAUSED) &&
+      !attractActive
     );
     document.body.classList.toggle("show-touch", showButtons);
     document.body.classList.toggle("paused-mobile", gameState === GS.PAUSED);
