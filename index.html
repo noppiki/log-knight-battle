@@ -888,6 +888,13 @@ function consumeSpecial(who) {
 // each pointer up/cancel/leave decrements it. The button only releases
 // (visual + held.delete) when the count reaches 0 — so a thumb that briefly
 // leaves the visible button rect but stays held doesn't release the input.
+// IS_MOBILE: touch detection (ontouchstart || maxTouchPoints || pointer:coarse).
+// False positive on hybrid touchscreen laptops is harmless — they still have a
+// keyboard, and the on-screen buttons only push the same arming system as keys.
+// MUST be declared BEFORE setupTouchControls() runs (this IIFE reads it).
+const IS_MOBILE = ('ontouchstart' in window) ||
+                  (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
+                  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 (function setupTouchControls() {
   if (!IS_MOBILE) return;
   document.body.classList.add("mobile");
@@ -990,12 +997,6 @@ let muted = (function () {
 
 // ===== MOBILE / TOUCH DEVICE DETECTION =====
 // Permissive: any of three signals (legacy iOS ontouchstart, modern pointer API,
-// or CSS pointer:coarse media query) marks the device as touch-capable. False
-// positive on hybrid touchscreen laptops is harmless — they still have a real
-// keyboard, and the on-screen buttons only push the same arming system as keys.
-const IS_MOBILE = ('ontouchstart' in window) ||
-                  (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
-                  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 function initAudio() {
   if (audioInited) return;
   audioInited = true;
