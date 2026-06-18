@@ -356,6 +356,16 @@
             <option value="hard">HARD</option>
           </select>
         </div>
+        <div class="setting-row">
+          <label for="set_stage">STAGE</label>
+          <select id="set_stage">
+            <option value="random">RANDOM</option>
+            <option value="dusk">NORDIC DUSK</option>
+            <option value="tundra">FROZEN TUNDRA</option>
+            <option value="goldenhour">GOLDEN HOUR</option>
+            <option value="aurora">AURORA NIGHT</option>
+          </select>
+        </div>
         <div class="stats-section">
           <h3>YOUR STATS</h3>
           <div class="stats-grid">
@@ -1125,6 +1135,7 @@ let sfxVolume      = 100;       // 0..100
 let shakeIntensity = "normal";  // "off" | "reduced" | "normal"
 let koSlowmoEnabled = true;     // false = skip slow-mo, ROUND_OVER as before
 let cpuDifficulty = "normal";   // "easy" | "normal" | "hard"
+let stagePreference = "random"; // "random" | "dusk" | "tundra" | "goldenhour" | "aurora"
 function loadSettings() {
   try {
     const raw = localStorage.getItem("lkb_settings");
@@ -1137,12 +1148,19 @@ function loadSettings() {
     if (s.cpuDifficulty === "easy" || s.cpuDifficulty === "normal" || s.cpuDifficulty === "hard") {
       cpuDifficulty = s.cpuDifficulty;
     }
+    if (s.stagePreference === "random" ||
+        s.stagePreference === "dusk" ||
+        s.stagePreference === "tundra" ||
+        s.stagePreference === "goldenhour" ||
+        s.stagePreference === "aurora") {
+      stagePreference = s.stagePreference;
+    }
   } catch (e) {}
 }
 function saveSettings() {
   try {
     localStorage.setItem("lkb_settings", JSON.stringify({
-      bgmVolume, sfxVolume, shakeIntensity, koSlowmoEnabled, cpuDifficulty
+      bgmVolume, sfxVolume, shakeIntensity, koSlowmoEnabled, cpuDifficulty, stagePreference
     }));
   } catch (e) {}
 }
@@ -1393,6 +1411,8 @@ function syncSettingsUI() {
   setKoslow.value = koSlowmoEnabled ? "1" : "0";
   const setCpuEl = document.getElementById("set_cpu");
   if (setCpuEl) setCpuEl.value = cpuDifficulty;
+  const setStageEl = document.getElementById("set_stage");
+  if (setStageEl) setStageEl.value = stagePreference;
 }
 syncSettingsUI();   // mirror saved settings into the markup before first open
 
@@ -1476,6 +1496,16 @@ if (settingsEl) {
     setCpu.addEventListener("change", () => {
       if (setCpu.value === "easy" || setCpu.value === "normal" || setCpu.value === "hard") {
         cpuDifficulty = setCpu.value;
+        saveSettings();
+      }
+    });
+  }
+  const setStage = document.getElementById("set_stage");
+  if (setStage) {
+    setStage.addEventListener("change", () => {
+      const v = setStage.value;
+      if (v === "random" || v === "dusk" || v === "tundra" || v === "goldenhour" || v === "aurora") {
+        stagePreference = v;
         saveSettings();
       }
     });
@@ -2750,7 +2780,13 @@ function startMatch() {
   // Pick a random stage for this match (same stage across all rounds).
   // Per-match (not per-round) so the scene feels intentional. Host re-rolls
   // here; the snapshot carries currentStageIndex so the guest mirrors it.
-  currentStageIndex = Math.floor(Math.random() * STAGES.length);
+  // Apply stage preference: "random" -> roll; otherwise use the picked stage id.
+  if (stagePreference === "random") {
+    currentStageIndex = Math.floor(Math.random() * STAGES.length);
+  } else {
+    const idx = STAGES.findIndex(s => s.id === stagePreference);
+    currentStageIndex = (idx >= 0) ? idx : 0;
+  }
   p1.rounds = 0; p2.rounds = 0;
   matchWinner = null;
   pauseResumeState = null;   // clear any stale pause state
