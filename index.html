@@ -2705,6 +2705,7 @@ let frameCount = 0;
 // ===== ATTRACT MODE: after ATTRACT_IDLE_SEC of MENU idle, start an AI-vs-AI demo.
 // gameMode="attract" is INTERNAL only — never exposed on the title's mode-cycle UI.
 const ATTRACT_IDLE_SEC = 30;
+const ATTRACT_MAX_SEC  = 60;       // hard timeout: force-exit demo after this many seconds
 let attractIdleTimer = 0;          // seconds elapsed on title without input
 let attractActive = false;         // true while running a demo
 let attractTimeoutTimer = 0;       // wall-clock seconds the current demo has run
@@ -2931,6 +2932,7 @@ function resetAttractIdle() {
 
 function enterAttractMode() {
   if (attractActive) return;
+  if (gameState !== GS.MENU) return;
   prevModeBeforeAttract = gameMode;
   attractActive = true;
   attractTimeoutTimer = 0;
@@ -4288,6 +4290,14 @@ function update(dt) {
         checkAchievements();
       }
     }
+    // === ATTRACT: track demo wall-clock duration and force-exit after max ===
+    if (gameMode === "attract") {
+      attractTimeoutTimer += dt;
+      if (attractTimeoutTimer >= ATTRACT_MAX_SEC) {
+        exitAttractMode();
+        return;
+      }
+    }
     // ===== K.O. SLOW-MO: scale physics dt while a KO is unfolding =====
     // The slow-mo timer counts in WALL-CLOCK dt (so the dramatic window is a
     // predictable ~koSlowmoDuration seconds of real time). The PHYSICS dt is
@@ -4895,8 +4905,10 @@ function drawHUD() {
   const palR = { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim };
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
   const mw = 320;
-  const p1Label = (gameMode === "online" && net.mode === "guest") ? "CRIMSON  HOST" : "P1  CRIMSON";
-  const p2Label = (gameMode === "training") ? "AZURE  DUMMY"
+  const p1Label = (gameMode === "attract") ? "CRIMSON  CPU"
+               : (gameMode === "online" && net.mode === "guest") ? "CRIMSON  HOST" : "P1  CRIMSON";
+  const p2Label = (gameMode === "attract") ? "AZURE  CPU"
+                : (gameMode === "training") ? "AZURE  DUMMY"
                 : (gameMode === "1p") ? "AZURE  CPU"
                 : (gameMode === "online") ? ((net.mode === "guest") ? "AZURE  YOU" : "AZURE  P2") : "AZURE  P2";
   drawBalanceMeter(p1, 30, 40, mw, p1Label, palR);
@@ -5849,6 +5861,30 @@ function drawLoadingScreen() {
   ctx.textAlign = "left";
 }
 
+function drawAttractOverlay() {
+  if (!attractActive) return;
+  ctx.save();
+  // Top DEMO banner
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "900 60px system-ui, sans-serif";
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("DEMO", VW / 2, 56);
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText("DEMO", VW / 2, 56);
+  // Bottom blinking "PRESS ANY KEY TO PLAY"
+  const a = 0.55 + 0.45 * Math.sin(performance.now() / 500);
+  ctx.globalAlpha = a;
+  ctx.font = "700 24px system-ui, sans-serif";
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("PRESS ANY KEY TO PLAY", VW / 2, VH - 36);
+  ctx.fillStyle = "#f0e4cc";
+  ctx.fillText("PRESS ANY KEY TO PLAY", VW / 2, VH - 36);
+  ctx.restore();
+}
+
 function render() {
   // clear
   ctx.fillStyle = PAL.skyTop;
@@ -5905,6 +5941,8 @@ function render() {
   // ROUND_OVER, SELECT, restart, etc.) guarantees it never stalls onto the
   // round-over banner or bleeds into the next round.
   drawKoBanner();
+  // Attract overlay: DEMO banner + "PRESS ANY KEY" blink (above KO banner, below mute).
+  drawAttractOverlay();
   // Pause overlay sits above KO banner, below the mute indicator.
   // Only draws when gameState===GS.PAUSED; no-op otherwise.
   drawPaused();
