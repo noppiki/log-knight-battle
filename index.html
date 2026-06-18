@@ -457,6 +457,20 @@ const TUNE = {
   quakeShakeAmp: 14,     // px — amplitude of the log's horizontal shake
   quakeShakeHz:  10,     // Hz — frequency of the shake
 
+  // (f) WHIRLWIND — close-range MULTI-HIT spin attack. The knight's pendulum is
+  // forced into a continuous rotation at whirlSwingVel rad/s while the pan tip
+  // is hit-tested against the foe each frame. Per-hit cooldown caps damage to
+  // ~5-7 hits over the active phase. Knight is LOCKED in place during the move
+  // (vx zeroed) and CANNOT scoot/hop/swing/guard — sidestepping outside reach
+  // is the counter. Total ~30 balance if all hits land — comparable to mega.
+  whirlWindup:   0.20,   // s — vulnerable wind-up cock-back
+  whirlActive:   1.00,   // s — active spin phase (pan tip rotates around seat)
+  whirlRecovery: 0.30,   // s — vulnerable recovery
+  whirlSwingVel: 18,     // rad/s — forced continuous rotation while active
+  whirlHitBal:   5,      // per-hit balance damage during the spin
+  whirlHitKnock: 80,     // per-hit horizontal seat knockback (light)
+  whirlHitCdSec: 0.15,   // per-hit cooldown so same foe isn't hit every frame
+
   // select-screen
   readyDelay:    0.9,    // s the "READY" stamp shows before the match starts
 
@@ -486,6 +500,7 @@ const SPECIALS = [
   { id: "dash",    name: "突進タックル",     en: "DASH TACKLE",   fx: "Commit a fast dash; body-shove on contact. Risky." },
   { id: "anchor",  name: "踏ん張り",         en: "ANCHOR",        fx: "Plant for 3s: very hard to shove off the log." },
   { id: "quake",   name: "ログクエイク",     en: "EARTHQUAKE",    fx: "Slam the log: shakes briefly, shoves foe toward the edge. No damage." },
+  { id: "whirl",   name: "旋風斬り",         en: "WHIRLWIND",     fx: "Spin attack: pan multi-hits a foe in range." },
 ];
 
 // Stage variants: four Nordic-themed backgrounds randomized per match (not per
@@ -803,6 +818,7 @@ const ASSET_SRCS = {
   iconDash:     "assets/icon_dash.png",
   iconAnchor:   "assets/icon_anchor.png",
   iconQuake:    "assets/icon_quake.png",
+  iconWhirl:    "assets/icon_whirl.png",
   log:          "assets/log.webp",
   hudTimer:     "assets/hud_timer.webp",
   cardFrame:    "assets/card_frame.webp",
@@ -848,6 +864,7 @@ const SPECIAL_ICON = {
   dash:    "iconDash",
   anchor:  "iconAnchor",
   quake:   "iconQuake",
+  whirl:   "iconWhirl",
 };
 
 function resize() {
@@ -1865,6 +1882,9 @@ function makeKnight(side) {
     anchorTimer: 0,        // ANCHOR active window
     quakeTimer: 0,         // EARTHQUAKE total remaining (windup + active combined)
     quakeActive: false,    // true during the "shake" phase (after windup elapses)
+    whirlTimer: 0,         // WHIRLWIND total remaining (windup + active + recovery)
+    whirlActive: false,    // true during the active spin phase (multi-hit window)
+    whirlHitCd: 0,         // per-hit cooldown (s) so same foe isn't hit every frame
     // ===== AI bookkeeping (only used when this knight is the CPU in 1p) =====
     aiSwingCd:   0,        // cooldown until the AI may tap-swing again (cadence)
     aiReactTimer:0,        // reaction lag before committing to a fresh decision
@@ -1894,6 +1914,7 @@ function resetKnightPositions() {
     k.dashTimer = 0; k.dashHit = false;
     k.anchorTimer = 0;
     k.quakeTimer = 0; k.quakeActive = false;
+    k.whirlTimer = 0; k.whirlActive = false; k.whirlHitCd = 0;
     // AI timers reset every round / select-entry so no CPU state leaks.
     k.aiSwingCd = 0; k.aiReactTimer = 0; k.aiGuardTimer = 0; k.aiGuardCd = 0;
   }
@@ -2600,7 +2621,8 @@ function updateKnight(k, dt, input) {
 // activation — one charge at a time).
 function specialActive(k) {
   return k.windupTimer > 0 || k.megaPending || k.counterTimer > 0 ||
-         k.dashTimer > 0 || k.anchorTimer > 0 || k.quakeTimer > 0;
+         k.dashTimer > 0 || k.anchorTimer > 0 || k.quakeTimer > 0 ||
+         k.whirlTimer > 0;
 }
 
 // Add SP, clamping to spMax. Fires a one-shot "ready" pulse + chime the frame
@@ -2667,6 +2689,17 @@ function activateSpecial(k) {
       sfxAnchor();   // brief planted thud during windup — reuse for now
       addBigShake(8);
       break;
+    case "whirl":
+      // 1.5s total: windup (0.20s) + active spin (1.00s) + recovery (0.30s).
+      // During the active phase the pendulum is forced to whirlSwingVel and the
+      // pan tip is hit-tested against the foe each frame with a per-hit cooldown.
+      k.whirlTimer = TUNE.whirlWindup + TUNE.whirlActive + TUNE.whirlRecovery;
+      k.whirlActive = false;
+      k.whirlHitCd = 0;
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "WHIRL!", PAL.skyAmber, 1.7);
+      sfxDash();   // reuse the dash whoosh for the windup tell
+      addBigShake(6);
+      break;
   }
 }
 
@@ -2722,6 +2755,73 @@ function tickSpecial(k, dt) {
     // When the quake ends, clear the active flag so drawLog stops shaking.
     if (k.quakeTimer === 0) {
       k.quakeActive = false;
+    }
+  }
+
+  // WHIRLWIND: 0.20s windup + 1.00s active spin + 0.30s recovery. During the
+  // active phase the pendulum is FORCED to whirlSwingVel rad/s (facing-signed)
+  // and the pan tip is hit-tested against the foe each frame with a per-hit
+  // cooldown (whirlHitCdSec) so the same opponent is hit at most ~5-7 times.
+  // The knight is locked in place: vx zeroed, vy zeroed + grounded during
+  // active/recovery so they cannot scoot, hop, or dodge while spinning.
+  if (k.chosenSpecial === "whirl" && k.whirlTimer > 0) {
+    k.whirlTimer = Math.max(0, k.whirlTimer - dt);
+    if (k.whirlHitCd > 0) k.whirlHitCd = Math.max(0, k.whirlHitCd - dt);
+
+    // Phase derivation from REMAINING time. Order on timeline: windup (early)
+    // → active (mid) → recovery (last whirlRecovery seconds).
+    const t = k.whirlTimer;
+    const inRecovery = t > 0 && t <= TUNE.whirlRecovery;
+    const inActive   = t > TUNE.whirlRecovery && t <= TUNE.whirlRecovery + TUNE.whirlActive;
+    k.whirlActive = inActive;
+
+    // LOCK in place during active + recovery. Windup stays "vulnerable + still":
+    // we also zero vx during windup so the player can't drift on the cock-back.
+    if (k.state !== ST.FALLING && k.whirlTimer > 0) {
+      k.vx = 0;
+      // Pin to the log during active/recovery so a queued hop can't lift off.
+      if (inActive || inRecovery) {
+        k.vy = 0;
+        k.y = logTopY;
+        k.onGround = true;
+        if (k.state === ST.JUMP) k.state = ST.IDLE;
+      }
+    }
+
+    // Active spin: force the pendulum into a continuous rotation and hit-test
+    // the pan tip against the foe each frame.
+    if (inActive && k.state !== ST.FALLING) {
+      // Overwrite swingVel (not just add) so the spin is consistent regardless
+      // of springK / damping. Direction = facing so the pan sweeps forward.
+      k.swingVel = TUNE.whirlSwingVel * k.facing;
+
+      const foe = (k === p1) ? p2 : p1;
+      if (foe && foe.state !== ST.FALLING && foe.state !== ST.GUARD && k.whirlHitCd === 0) {
+        const tip = panTip(k);
+        const fb = bodyBox(foe);
+        if (circleHitsBox(tip.x, tip.y, TUNE.panTipR, fb)) {
+          // Light per-hit shove + balance loss. Direction = away from attacker.
+          const dir = (foe.x >= k.x) ? 1 : -1;
+          foe.vx += TUNE.whirlHitKnock * dir;
+          foe.knockTimer = Math.max(foe.knockTimer, 0.12);
+          foe.balance = Math.max(0, foe.balance - TUNE.whirlHitBal);
+          foe.swingVel += dir * 2;
+          // Feedback
+          spawnSparks(tip.x, tip.y, 6, PAL.spark);
+          sfxHit();
+          addShake(5);
+          // SP reward for landed hits (consistent with other specials' feedback).
+          gainSp(k, TUNE.spGainLand * 0.3);
+          // Per-hit cooldown so this same foe isn't re-hit every frame.
+          k.whirlHitCd = TUNE.whirlHitCdSec;
+        }
+      }
+    }
+
+    // End-of-move cleanup: clear active flag + hit cooldown.
+    if (k.whirlTimer === 0) {
+      k.whirlActive = false;
+      k.whirlHitCd = 0;
     }
   }
 
@@ -2866,10 +2966,18 @@ function resolveCombat(dt) {
   // its pan "live", it must NOT count as an attacker. Otherwise a same-frame
   // mutual collision would hit the CLASH branch and CLANG before applyHit() can
   // run the counter short-circuit (negate + reflect). Exclude counterTimer > 0.
+  // A WHIRLWIND-active knight's swingVel is FORCED to whirlSwingVel (well above
+  // hitSpeed) and its own multi-hit branch in tickSpecial is the authoritative
+  // damage path (with its own per-hit cooldown). Excluding it from resolveCombat
+  // prevents a same-frame double-hit (whirl + standard pan) and prevents weird
+  // CLASH/COUNTER routing through a forced-spin pan. The 0.30s recovery and
+  // 0.20s windup phases still let the residual swing oscillate naturally.
   const aLive = p1.hitCdTimer === 0 && p1.swingVel > TUNE.hitSpeed &&
-                p1.state !== ST.FALLING && p1.state !== ST.GUARD && p1.counterTimer === 0;
+                p1.state !== ST.FALLING && p1.state !== ST.GUARD &&
+                p1.counterTimer === 0 && !p1.whirlActive;
   const bLive = p2.hitCdTimer === 0 && p2.swingVel > TUNE.hitSpeed &&
-                p2.state !== ST.FALLING && p2.state !== ST.GUARD && p2.counterTimer === 0;
+                p2.state !== ST.FALLING && p2.state !== ST.GUARD &&
+                p2.counterTimer === 0 && !p2.whirlActive;
 
   const aReach = aLive && circleHitsBox(tipA.x, tipA.y, TUNE.panTipR, boxB) && p2.state !== ST.FALLING;
   const bReach = bLive && circleHitsBox(tipB.x, tipB.y, TUNE.panTipR, boxA) && p1.state !== ST.FALLING;
@@ -3187,6 +3295,7 @@ function snapKnight(k) {
     counterFlash: k.counterFlash, dashTimer: k.dashTimer,
     anchorTimer: k.anchorTimer, onGround: k.onGround,
     quakeTimer: k.quakeTimer, quakeActive: k.quakeActive,
+    whirlTimer: k.whirlTimer, whirlActive: k.whirlActive,
     rounds: k.rounds, spReadyPulse: k.spReadyPulse, bob: k.bob,
   };
 }
@@ -3202,6 +3311,10 @@ function applyKnight(k, s) {
   // EARTHQUAKE state — guarded for pre-quake snapshots from older hosts.
   k.quakeTimer = s.quakeTimer || 0;
   k.quakeActive = !!s.quakeActive;
+  // WHIRLWIND state — guarded for pre-whirl snapshots from older hosts so a
+  // backward-compat guest doesn't crash on a missing field.
+  k.whirlTimer = (typeof s.whirlTimer === "number") ? s.whirlTimer : 0;
+  k.whirlActive = !!s.whirlActive;
   k.rounds = s.rounds; k.spReadyPulse = s.spReadyPulse; k.bob = s.bob;
 }
 
@@ -3702,6 +3815,7 @@ function drawKnight(k) {
   else if (k.dashTimer > 0)   { auraCol = (k.side === "p1" ? PAL.redLight : PAL.bluLight); auraA = 0.30; }
   else if (k.anchorTimer > 0) { auraCol = PAL.steel;  auraA = 0.26; }
   else if (k.quakeTimer > 0)  { auraCol = PAL.skyAmber; auraA = k.quakeActive ? (0.30 + 0.10 * Math.sin(frameCount * 0.8)) : 0.22; }
+  else if (k.whirlTimer > 0)  { auraCol = PAL.skyAmber; auraA = k.whirlActive ? (0.28 + 0.12 * Math.sin(frameCount * 0.4)) : 0.18; }
   else if (k.counterFlash > 0){ auraCol = PAL.clash;  auraA = 0.5 * (k.counterFlash / 0.4); }
   else if (spFull)            { auraCol = PAL.sunGlow; auraA = 0.16 + 0.08 * Math.sin(frameCount * 0.18); }
   if (auraCol && auraA > 0) {
@@ -4099,10 +4213,12 @@ function drawSelect() {
   ctx.textAlign = "left";
 
   // ---- card grid ----
-  // 5 cards fit at gap=18, cardW=160: 5*160 + 4*18 = 872 (margin 44 each side
-  // within the 960 viewport). card_frame.webp sprite scales fine to 168×248.
+  // 6 cards fit at gap=15, cardW=135: 6*135 + 5*15 = 885 (margin 37.5 each side
+  // within the 960 viewport). Was gap=18,cardW=160 for 5 cards (totalW=872);
+  // tightened so the 6th (WHIRLWIND) fits without overflow. card_frame.webp
+  // scales fine at the slightly narrower width.
   const N = SPECIALS.length;
-  const gap = 18, cardW = 160, cardH = 240;
+  const gap = 15, cardW = 135, cardH = 240;
   const totalW = N * cardW + (N - 1) * gap;
   const x0 = (VW - totalW) / 2, y0 = 158;
 
@@ -4835,7 +4951,7 @@ canvas.addEventListener("click", (e) => {
   }
 
   // ===== SELECT: tap-to-pick for P1 (one tap = move cursor + lock) =====
-  // Card geometry matches drawSelectScreen: gap=18, cardW=160, cardH=240, y0=158.
+  // Card geometry matches drawSelectScreen: gap=15, cardW=135, cardH=240, y0=158.
   // Tapping an already-locked card of the same index: UNLOCK (toggle).
   // Tapping a different card while locked: silently unlock, move, re-lock in one gesture.
   // Online guest's P2 selection still uses keyboard this iteration (KNOWN LIMITATION —
@@ -4845,7 +4961,7 @@ canvas.addEventListener("click", (e) => {
   if (gameState === GS.SELECT) {
     if (sel.readyTimer > 0) return;   // READY beat in progress: freeze input
     const N = SPECIALS.length;
-    const gap = 18, cardW = 160, cardH = 240;
+    const gap = 15, cardW = 135, cardH = 240;
     const totalW = N * cardW + (N - 1) * gap;
     const x0 = (VW - totalW) / 2, y0 = 158;
     for (let i = 0; i < N; i++) {
