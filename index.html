@@ -4270,10 +4270,10 @@ function update(dt) {
   }
 
   if (gameState === GS.PLAYING) {
-    // === ATTRACT TIMEOUT: restart demo after 60s, even without a natural match end ===
+    // === ATTRACT TIMEOUT: restart demo after ATTRACT_MAX_SEC, even without a natural match end ===
     if (attractActive) {
       attractTimeoutTimer += dt;
-      if (attractTimeoutTimer >= 60) {
+      if (attractTimeoutTimer >= ATTRACT_MAX_SEC) {
         exitAttractMode();
         // Guard: only re-enter if still on MENU (player may have exited via input
         // between the check and the setTimeout; this prevents yanking them back).
@@ -4288,14 +4288,6 @@ function update(dt) {
       if (Math.floor(stats.playSeconds) % 5 === 0 && Math.floor(stats.playSeconds) > 0) {
         saveStats();
         checkAchievements();
-      }
-    }
-    // === ATTRACT: track demo wall-clock duration and force-exit after max ===
-    if (gameMode === "attract") {
-      attractTimeoutTimer += dt;
-      if (attractTimeoutTimer >= ATTRACT_MAX_SEC) {
-        exitAttractMode();
-        return;
       }
     }
     // ===== K.O. SLOW-MO: scale physics dt while a KO is unfolding =====
