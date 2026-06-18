@@ -1041,6 +1041,7 @@ const ASSET_SRCS = {
   portraitRed:        "assets/portrait_red.png",
   portraitBlue:       "assets/portrait_blue.png",
   vsEmblem:           "assets/vs_emblem.png",
+  fightEmblem:        "assets/fight_emblem.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2805,6 +2806,12 @@ function clearKoSlowmo() {
 
 const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
 
+function currentRoundLabel() {
+  if (p1.rounds === 1 && p2.rounds === 1) return "FINAL ROUND";
+  const n = p1.rounds + p2.rounds + 1;
+  return "ROUND " + n;
+}
+
 // Enter the SELECT screen: reset cursors/locks/ready beat and the chosen
 // specials. This is the single entry point for title-Enter, R (any state),
 // MATCH_OVER-Enter, and the restart button — so players always re-pick.
@@ -4342,8 +4349,11 @@ function update(dt) {
         beginPlaying();
       } else {
         countdownTimer = TUNE.countdownStep;
-        if (countdownIndex === COUNT_LABELS.length - 1) sfxFight();
-        else sfxCount();
+        if (countdownIndex === COUNT_LABELS.length - 1) {
+          sfxFight();
+          addBigShake(10);
+          spawnSparks(VW / 2, VH / 2 - 30, 20, PAL.skyAmber);
+        } else sfxCount();
       }
     }
     // let knights settle (idle physics, no inputs) during countdown
@@ -5404,6 +5414,39 @@ function drawCountdown() {
   const t = 1 - (countdownTimer / TUNE.countdownStep); // 0..1
   const scale = 1 + (1 - Math.min(1, t * 2)) * 0.6;
   const isFight = countdownIndex === COUNT_LABELS.length - 1;
+
+  // === ROUND CALLOUT: slides in during index 0, holds during index 1, fades at index 2 ===
+  {
+    const showRound = (countdownIndex === 0 || countdownIndex === 1);
+    const fadingOut = countdownIndex === 2 && countdownTimer > TUNE.countdownStep - 0.25;
+    if (showRound || fadingOut) {
+      const roundLabel = currentRoundLabel();
+      let alpha = 1, slideX = 0;
+      if (countdownIndex === 0) {
+        const tSlide = 1 - (countdownTimer / TUNE.countdownStep);
+        const easeOut = 1 - Math.pow(1 - Math.min(1, tSlide / 0.4), 3);
+        slideX = (1 - easeOut) * -300;
+        alpha = Math.min(1, tSlide * 4);
+      } else if (countdownIndex === 1) {
+        alpha = 1;
+      } else if (fadingOut) {
+        alpha = Math.max(0, (countdownTimer - (TUNE.countdownStep - 0.25)) / 0.25);
+      }
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.textAlign = "center";
+      ctx.font = '900 56px "Trebuchet MS", system-ui, sans-serif';
+      ctx.lineWidth = 9;
+      ctx.strokeStyle = PAL.ink;
+      ctx.fillStyle = (roundLabel === "FINAL ROUND") ? "#ff7050" : PAL.skyAmber;
+      const cx = VW / 2 + slideX;
+      const cy = 110;
+      ctx.strokeText(roundLabel, cx, cy);
+      ctx.fillText(roundLabel, cx, cy);
+      ctx.restore();
+    }
+  }
+
   ctx.save();
   ctx.textAlign = "center";
   ctx.translate(VW / 2, VH / 2 - 30);
@@ -5424,8 +5467,18 @@ function drawCountdown() {
   ctx.lineWidth = 8;
   ctx.strokeStyle = PAL.ink;
   ctx.fillStyle = isFight ? PAL.skyAmber : PAL.bone;
-  ctx.strokeText(label, 0, 0);
-  ctx.fillText(label, 0, 0);
+
+  if (isFight && imgReady(IMG.fightEmblem)) {
+    const ew = 560, eh = 294;
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(IMG.fightEmblem, -ew / 2, -eh / 2, ew, eh);
+    ctx.imageSmoothingEnabled = false;
+    ctx.restore();
+  } else {
+    ctx.strokeText(label, 0, 0);
+    ctx.fillText(label, 0, 0);
+  }
 
   // Stage-name reveal: only on the first countdown step "3" so it pops once
   // per round-start without distracting on 2/1/FIGHT. Still inside the existing
