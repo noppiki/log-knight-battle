@@ -2721,6 +2721,8 @@ const VS_SPLASH_DURATION = 1.6;
 let roundOverTimer = 0;
 let roundWinner = null;         // p1 | p2
 let matchWinner = null;
+let matchResultRevealTimer = 0;
+const MATCH_RESULT_REVEAL_DURATION = 2.0;
 let frameCount = 0;
 
 // Stage atmospheric overlay parallax scroll offsets (advance every frame;
@@ -2919,6 +2921,11 @@ function beginPlaying() {
   clearKoSlowmo();   // belt-and-suspenders: enter PLAYING with a clean slow-mo slate
   gameState = GS.PLAYING;
 }
+function enterMatchOver() {
+  matchResultRevealTimer = MATCH_RESULT_REVEAL_DURATION;
+  gameState = GS.MATCH_OVER;
+  sfxHorn();
+}
 function awardRound(winnerKnight) {
   if (gameState !== GS.PLAYING) return; // guard: only award once
   roundWinner = winnerKnight;
@@ -2960,14 +2967,14 @@ function awardRound(winnerKnight) {
     saveStats();
     checkAchievements();
   }
-  // === ATTRACT: chain a new demo after a match ends (brief grace to show banner)
+  // === ATTRACT: chain a new demo after a match ends; grace must be > MATCH_RESULT_REVEAL_DURATION (2.0s)
   if (gameMode === "attract" && matchWinner) {
     setTimeout(() => {
       if (attractActive) {
         exitAttractMode();
         enterAttractMode();
       }
-    }, 1500);
+    }, Math.ceil(MATCH_RESULT_REVEAL_DURATION * 1000) + 100);
   }
 }
 
@@ -3100,6 +3107,7 @@ function handleGlobalKey(code) {
   // skips SELECT entirely, so we route the player back to the mode picker so they
   // can choose a different mode (or press ENTER again to re-enter training).
   if (code === "KeyR") {
+    if (gameState === GS.MATCH_OVER && matchResultRevealTimer > 0) return;
     if (gameMode === "training") {
       // teardown active match: stop sim, clear visuals, return to TITLE
       fullResetKnight(p1); fullResetKnight(p2);
@@ -3149,6 +3157,7 @@ function handleGlobalKey(code) {
     }
     handleSelectKey(code);
   } else if (gameState === GS.MATCH_OVER) {
+    if (matchResultRevealTimer > 0) return;
     if (code === "Enter") enterSelect();
   }
 }
@@ -4142,12 +4151,14 @@ function buildSnapshot() {
     // applySnapshot side so older hosts that pre-date these fields don't crash.
     koSlowmoTimer, koSlowmoElapsed,
     koFallerSide: koFaller ? koFaller.side : null,
+    matchResultRevealTimer,
   };
 }
 
 // GUEST: write a received snapshot into local globals so render() draws it.
 function applySnapshot(s) {
   if (!s) return;
+  const wasInMatchOver = (gameState === GS.MATCH_OVER);
   gameState = s.gs;
   applyKnight(p1, s.p1);
   applyKnight(p2, s.p2);
@@ -4174,6 +4185,15 @@ function applySnapshot(s) {
   if (typeof s.koSlowmoElapsed === "number") koSlowmoElapsed = s.koSlowmoElapsed;
   if (typeof s.koFallerSide !== "undefined") {
     koFaller = s.koFallerSide === "p1" ? p1 : (s.koFallerSide === "p2" ? p2 : null);
+  }
+  // Match result reveal: mirror host timer; play horn once on the MATCH_OVER transition.
+  if (typeof s.matchResultRevealTimer === "number") {
+    const prevTimer = matchResultRevealTimer;
+    matchResultRevealTimer = s.matchResultRevealTimer;
+    if (!wasInMatchOver && gameState === GS.MATCH_OVER &&
+        matchResultRevealTimer > MATCH_RESULT_REVEAL_DURATION - 0.2) {
+      sfxHorn();
+    }
   }
 }
 
@@ -4468,7 +4488,7 @@ function update(dt) {
       if (matchWinner) {
         // ATTRACT: awardRound already scheduled a new demo via setTimeout; don't
         // advance to MATCH_OVER — let the timeout handler restart the demo.
-        if (!attractActive) gameState = GS.MATCH_OVER;
+        if (!attractActive) enterMatchOver();
         // (if attractActive, state stays ROUND_OVER until the setTimeout fires)
       } else {
         startCountdown();
@@ -4479,6 +4499,9 @@ function update(dt) {
 
   if (gameState === GS.MENU || gameState === GS.MATCH_OVER) {
     consumeAttack("p1"); consumeAttack("p2");
+    if (gameState === GS.MATCH_OVER && matchResultRevealTimer > 0) {
+      matchResultRevealTimer = Math.max(0, matchResultRevealTimer - dt);
+    }
     // ATTRACT: tick the idle timer while on MENU (not during settings/help open).
     if (gameState === GS.MENU && !attractActive &&
         !isSettingsOpen() &&
@@ -5841,9 +5864,72 @@ function drawRoundOver() {
   ctx.textAlign = "left";
 }
 
+function drawMatchResultReveal() {
+  if (!matchWinner) return;
+
+  const elapsed = MATCH_RESULT_REVEAL_DURATION - matchResultRevealTimer;
+  const slideT = Math.min(1, elapsed / 0.5);
+  const easeOut = 1 - Math.pow(1 - slideT, 3);
+  const fadeOut = Math.min(1, matchResultRevealTimer / 0.25);
+  const alpha = Math.min(1, slideT * 1.5) * fadeOut;
+
+  const isRed = matchWinner.side === "p1";
+  const portrait = isRed ? IMG.portraitRed : IMG.portraitBlue;
+  const winnerColor = isRed ? PAL.redLight : PAL.bluLight;
+  const winnerName  = isRed ? "CRIMSON KNIGHT" : "AZURE KNIGHT";
+
+  const portraitW = 400, portraitH = 480;
+  const targetX = isRed ? 80 : VW - portraitW - 80;
+  const startX  = isRed ? -portraitW : VW;
+  const px = startX + (targetX - startX) * easeOut;
+  const py = (VH - portraitH) / 2 - 30;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  if (imgReady(portrait)) {
+    ctx.drawImage(portrait, px, py, portraitW, portraitH);
+  } else {
+    ctx.fillStyle = isRed ? "#8a2a2e" : "#2a4a8a";
+    ctx.fillRect(px, py, portraitW, portraitH);
+  }
+
+  const textX = isRed ? VW * 0.74 : VW * 0.26;
+  const textY = VH * 0.42;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  ctx.font = '900 96px "Trebuchet MS", system-ui, sans-serif';
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("WINNER", textX, textY);
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText("WINNER", textX, textY);
+
+  ctx.font = '900 42px "Trebuchet MS", system-ui, sans-serif';
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(winnerName, textX, textY + 70);
+  ctx.fillStyle = winnerColor;
+  ctx.fillText(winnerName, textX, textY + 70);
+
+  ctx.font = '700 28px "Trebuchet MS", system-ui, sans-serif';
+  ctx.fillStyle = PAL.bone;
+  ctx.strokeText(`${p1.rounds}  —  ${p2.rounds}`, textX, textY + 120);
+  ctx.fillText(`${p1.rounds}  —  ${p2.rounds}`, textX, textY + 120);
+
+  ctx.textBaseline = "alphabetic";
+  ctx.restore();
+}
+
 function drawMatchOver() {
   ctx.fillStyle = "rgba(8,12,20,0.7)";
   ctx.fillRect(0, 0, VW, VH);
+
+  if (matchResultRevealTimer > 0) {
+    drawMatchResultReveal();
+    matchBtn = null;
+    return;
+  }
 
   // ornate banner backdrop behind victory text (880×110, Y=VH/2-100; bottom=VH/2+10, score at VH/2+8 just clear)
   if (imgReady(IMG.resultBanner)) {
