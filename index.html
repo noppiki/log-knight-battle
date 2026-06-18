@@ -986,6 +986,36 @@ function syncSettingsUI() {
 syncSettingsUI();   // mirror saved settings into the markup before first open
 
 function isSettingsOpen() { return !!(settingsEl && settingsEl.classList.contains("open")); }
+
+// ===== PAUSE HELPERS =====
+function canPauseHere() {
+  // Pause only makes sense during active offline gameplay.
+  // Disabled in online (fairness), during KO slow-mo, and outside PLAYING/COUNTDOWN.
+  if (gameMode === "online") return false;
+  if (gameState !== GS.PLAYING && gameState !== GS.COUNTDOWN) return false;
+  if (koSlowmoTimer > 0) return false;
+  return true;
+}
+
+function togglePause() {
+  if (gameState === GS.PAUSED) {
+    // resume
+    gameState = pauseResumeState || GS.PLAYING;
+    pauseResumeState = null;
+    try { bgm.restore && bgm.restore(0.20); } catch (e) {}
+    return;
+  }
+  if (!canPauseHere()) return;
+  pauseResumeState = gameState;
+  gameState = GS.PAUSED;
+  // Clear any held keyboard/touch input so controls don't stick on resume.
+  // On mobile, the #touchpad is hidden while PAUSED and pointerup events may
+  // not fire for already-pressed virtual buttons, leaving `held` latched.
+  held.clear();
+  attackArmed.p1 = attackArmed.p2 = false;
+  specialArmed.p1 = specialArmed.p2 = false;
+  try { bgm.duck && bgm.duck(0.020, 0.10); } catch (e) {}
+}
 function openSettings() {
   if (!settingsEl) return;
   // Opening the panel also doubles as a "first user gesture" for autoplay-gated
@@ -1099,6 +1129,22 @@ window.addEventListener("keydown", (e) => {
 
   // Ignore OS key-repeat entirely for state transitions.
   if (e.repeat) return;
+
+  // ===== PAUSE TOGGLE: Escape / P =====
+  // Placed after the e.repeat guard (no auto-repeat toggle) and after the
+  // settings Escape handler (closing settings takes precedence over pausing).
+  // canPauseHere() returns false during online → existing leaveOnline Escape
+  // handlers in handleGlobalKey() run unaffected.
+  if (code === "Escape" || code === "KeyP") {
+    if (gameState === GS.PAUSED) {
+      togglePause();   // resume
+      return;
+    }
+    if (canPauseHere()) {
+      togglePause();   // pause
+      return;
+    }
+  }
 
   held.add(code);
 
@@ -1972,8 +2018,11 @@ const GS = {
   ONLINE_HOST: "onlinehost",   // hosting: show room code, waiting for opponent
   ONLINE_JOIN: "onlinejoin",   // joining: type a room code, then waiting
   ONLINE_WAIT: "onlinewait",   // guest: connected, awaiting first host snapshot
+  // ----- PAUSE (offline only; online disabled for fairness) -----
+  PAUSED: "paused",
 };
 let gameState = GS.MENU;
+let pauseResumeState = null;   // gameState to restore when unpausing
 
 // ===== GAME MODE: "1p" (P2 is a CPU) | "2p" (local two-player) | "online" =====
 // PERSISTS across rounds/matches; chosen on the TITLE screen. Default "1p" so a
@@ -2123,6 +2172,7 @@ function enterSelect() {
   net.guestInput = { l:false, r:false, j:false, g:false, a:false, s:false };
   net.prevGuestLR = { l:false, r:false, g:false };
   clearKoSlowmo();   // re-entering SELECT must not carry a stale slow-mo / BGM duck
+  pauseResumeState = null;   // clear any stale pause state from a previous match
   gameState = GS.SELECT;
 }
 
@@ -2135,6 +2185,7 @@ function startMatch() {
   currentStageIndex = Math.floor(Math.random() * STAGES.length);
   p1.rounds = 0; p2.rounds = 0;
   matchWinner = null;
+  pauseResumeState = null;   // clear any stale pause state
   startCountdown();
 }
 function startCountdown() {
@@ -2256,6 +2307,7 @@ function handleGlobalKey(code) {
       matchWinner = null; roundWinner = null;
       drawBanner = false; timeUpBanner = false;
       clearKoSlowmo();   // never leak a slow-mo state back to the TITLE
+      pauseResumeState = null;   // clear stale pause state
       gameState = GS.MENU;
       sfxSelect();
       return;
@@ -3247,6 +3299,11 @@ function hostSelectFromGuest() {
 }
 
 function update(dt) {
+  // ===== PAUSE: freeze entire simulation when paused. =====
+  // render() still runs (called unconditionally from frame()), so the game
+  // world stays visible with the PAUSED overlay drawn on top.
+  if (gameState === GS.PAUSED) return;
+
   frameCount++;
 
   // --- HIT-STOP: freeze the sim (and the round clock) for a few ms, then
@@ -4336,6 +4393,32 @@ function drawCountdown() {
   ctx.textAlign = "left";
 }
 
+// ===== PAUSE OVERLAY =====
+// Drawn on top of all other overlays (except the mute indicator).
+// A dimmed veil over the frozen game world + amber "PAUSED" headline +
+// subtitle with key hint. No-op unless gameState===GS.PAUSED.
+function drawPaused() {
+  if (gameState !== GS.PAUSED) return;
+  // Dimmed dark overlay
+  ctx.fillStyle = "rgba(8,12,20,0.66)";
+  ctx.fillRect(0, 0, VW, VH);
+  // "PAUSED" title
+  ctx.textAlign = "center";
+  ctx.font = '900 80px "Trebuchet MS", system-ui, sans-serif';
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("PAUSED", VW / 2, VH / 2 - 10);
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText("PAUSED", VW / 2, VH / 2 - 10);
+  // Subtitle hint
+  ctx.font = '700 22px "Trebuchet MS", system-ui, sans-serif';
+  ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("Press ESC or P to resume", VW / 2, VH / 2 + 40);
+  ctx.fillStyle = "#e8dcc0";
+  ctx.fillText("Press ESC or P to resume", VW / 2, VH / 2 + 40);
+  ctx.textAlign = "left";
+}
+
 // ===== ONLINE connect screens (Nordic stone-slab styling, matches SELECT) =====
 // shared dim backdrop + heading
 function drawOnlineBackdrop(heading) {
@@ -4881,6 +4964,9 @@ function render() {
   // ROUND_OVER, SELECT, restart, etc.) guarantees it never stalls onto the
   // round-over banner or bleeds into the next round.
   drawKoBanner();
+  // Pause overlay sits above KO banner, below the mute indicator.
+  // Only draws when gameState===GS.PAUSED; no-op otherwise.
+  drawPaused();
   // Mute indicator sits on top of every screen, top-right corner. Always
   // visible so the user knows what state audio is in (and finds the M key).
   drawMuteIndicator();
