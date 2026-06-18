@@ -262,6 +262,14 @@ const TUNE = {
   anchorKnockMul: 0.25,  // incoming seat-knock multiplier while anchored
   anchorBalMul:   0.50,  // incoming balance-loss multiplier while anchored
 
+  // (e) EARTHQUAKE — slam the log; vibrates it and shoves the foe toward the
+  // nearest edge over a sustained active phase. NO balance damage (pure control).
+  quakeWindup:   0.4,    // s — telegraphed windup where the user is vulnerable
+  quakeActive:   1.0,    // s — duration the log shakes after windup
+  quakeShoveVx:  360,    // px/s — per-tick shove on the foe (away from log center)
+  quakeShakeAmp: 14,     // px — amplitude of the log's horizontal shake
+  quakeShakeHz:  10,     // Hz — frequency of the shake
+
   // select-screen
   readyDelay:    0.9,    // s the "READY" stamp shows before the match starts
 
@@ -290,6 +298,7 @@ const SPECIALS = [
   { id: "counter", name: "カウンター構え",   en: "COUNTER STANCE", fx: "Brace; negate & punish a hit during the window." },
   { id: "dash",    name: "突進タックル",     en: "DASH TACKLE",   fx: "Commit a fast dash; body-shove on contact. Risky." },
   { id: "anchor",  name: "踏ん張り",         en: "ANCHOR",        fx: "Plant for 3s: very hard to shove off the log." },
+  { id: "quake",   name: "ログクエイク",     en: "EARTHQUAKE",    fx: "Slam the log: shakes briefly, shoves foe toward the edge. No damage." },
 ];
 
 // Stage variants: four Nordic-themed backgrounds randomized per match (not per
@@ -602,6 +611,7 @@ const ASSET_SRCS = {
   iconCounter:  "assets/icon_counter.png",
   iconDash:     "assets/icon_dash.png",
   iconAnchor:   "assets/icon_anchor.png",
+  iconQuake:    "assets/icon_quake.png",
   log:          "assets/log.webp",
   hudTimer:     "assets/hud_timer.webp",
   cardFrame:    "assets/card_frame.webp",
@@ -646,6 +656,7 @@ const SPECIAL_ICON = {
   counter: "iconCounter",
   dash:    "iconDash",
   anchor:  "iconAnchor",
+  quake:   "iconQuake",
 };
 
 function resize() {
@@ -1313,6 +1324,8 @@ function makeKnight(side) {
     dashTimer: 0,          // DASH TACKLE active window
     dashHit: false,        // DASH TACKLE: already shoved this dash (one shove)
     anchorTimer: 0,        // ANCHOR active window
+    quakeTimer: 0,         // EARTHQUAKE total remaining (windup + active combined)
+    quakeActive: false,    // true during the "shake" phase (after windup elapses)
     // ===== AI bookkeeping (only used when this knight is the CPU in 1p) =====
     aiSwingCd:   0,        // cooldown until the AI may tap-swing again (cadence)
     aiReactTimer:0,        // reaction lag before committing to a fresh decision
@@ -1341,6 +1354,7 @@ function resetKnightPositions() {
     k.counterTimer = 0; k.counterFlash = 0;
     k.dashTimer = 0; k.dashHit = false;
     k.anchorTimer = 0;
+    k.quakeTimer = 0; k.quakeActive = false;
     // AI timers reset every round / select-entry so no CPU state leaks.
     k.aiSwingCd = 0; k.aiReactTimer = 0; k.aiGuardTimer = 0; k.aiGuardCd = 0;
   }
@@ -1980,7 +1994,7 @@ function updateKnight(k, dt, input) {
 // activation — one charge at a time).
 function specialActive(k) {
   return k.windupTimer > 0 || k.megaPending || k.counterTimer > 0 ||
-         k.dashTimer > 0 || k.anchorTimer > 0;
+         k.dashTimer > 0 || k.anchorTimer > 0 || k.quakeTimer > 0;
 }
 
 // Add SP, clamping to spMax. Fires a one-shot "ready" pulse + chime the frame
@@ -2037,6 +2051,16 @@ function activateSpecial(k) {
       addBigShake(12);
       sfxAnchor();
       break;
+    case "quake":
+      // 1.4s total: telegraphed windup (TUNE.quakeWindup) + active log-shake
+      // (TUNE.quakeActive). During active phase the FOE is shoved toward the
+      // nearest edge each frame — no balance damage; pure positional control.
+      k.quakeTimer = TUNE.quakeWindup + TUNE.quakeActive;
+      k.quakeActive = false;
+      spawnFloater(k.x, k.y - TUNE.knightH - 14, "QUAKE!", PAL.skyAmber, 1.7);
+      sfxAnchor();   // brief planted thud during windup — reuse for now
+      addBigShake(8);
+      break;
   }
 }
 
@@ -2058,6 +2082,43 @@ function tickSpecial(k, dt) {
   if (k.counterTimer > 0) k.counterTimer = Math.max(0, k.counterTimer - dt);
   if (k.dashTimer  > 0) k.dashTimer  = Math.max(0, k.dashTimer  - dt);
   if (k.anchorTimer > 0) k.anchorTimer = Math.max(0, k.anchorTimer - dt);
+
+  // EARTHQUAKE: 0.4s windup (still vulnerable), then 1.0s active log-shake during
+  // which the FOE's seat is shoved toward the nearest edge each frame. No balance
+  // damage — control move only. State driven by k.quakeTimer (total remaining).
+  if (k.chosenSpecial === "quake" && k.quakeTimer > 0) {
+    const wasActive = k.quakeActive;
+    k.quakeTimer = Math.max(0, k.quakeTimer - dt);
+    // Transition windup -> active when remaining time drops to <= active duration.
+    // Skip the slam if the quaker themselves got knocked off during windup — no
+    // BOOM, no shove. Timer still drains so the state cleanly clears.
+    if (!wasActive && k.quakeTimer <= TUNE.quakeActive && k.state !== ST.FALLING) {
+      k.quakeActive = true;
+      // "BOOM!" at the moment the slam lands.
+      spawnFloater(k.x, k.y - TUNE.knightH - 12, "BOOM!", PAL.skyAmber, 1.7);
+      addBigShake(20);
+      sfxFall();   // heavy rumble — reuses fall SFX as the slam impact
+    }
+    // Active phase: continuously push the FOE toward the nearest edge. Both sides
+    // must be on the log — skip if either is FALLING (no re-shove of a ring-out,
+    // no spectral push from a tumbling quaker).
+    if (k.quakeActive && k.state !== ST.FALLING) {
+      const foe = (k === p1) ? p2 : p1;
+      if (foe && foe.state !== ST.FALLING) {
+        // Direction = AWAY from log center (so foe is pushed off the closer edge).
+        const dir = (foe.x >= logCenter) ? 1 : -1;
+        foe.vx += TUNE.quakeShoveVx * dir * dt;
+        foe.knockTimer = Math.max(foe.knockTimer, 0.15);  // brief maxSpeed-clamp bypass
+        // Tiny rocking on the foe's pendulum so they look destabilized.
+        foe.swingVel += dir * 6 * dt;
+      }
+    }
+    // When the quake ends, clear the active flag so drawLog stops shaking.
+    if (k.quakeTimer === 0) {
+      k.quakeActive = false;
+    }
+  }
+
   // megaPending lingers until the swing actually lands (consumed in applyHit),
   // but if the swing decays below the hit threshold it would never connect; let
   // it clear once the pan is no longer moving forward hard, so it can't stick.
@@ -2519,6 +2580,7 @@ function snapKnight(k) {
     windupTimer: k.windupTimer, counterTimer: k.counterTimer,
     counterFlash: k.counterFlash, dashTimer: k.dashTimer,
     anchorTimer: k.anchorTimer, onGround: k.onGround,
+    quakeTimer: k.quakeTimer, quakeActive: k.quakeActive,
     rounds: k.rounds, spReadyPulse: k.spReadyPulse, bob: k.bob,
   };
 }
@@ -2531,6 +2593,9 @@ function applyKnight(k, s) {
   k.windupTimer = s.windupTimer; k.counterTimer = s.counterTimer;
   k.counterFlash = s.counterFlash; k.dashTimer = s.dashTimer;
   k.anchorTimer = s.anchorTimer; k.onGround = s.onGround;
+  // EARTHQUAKE state — guarded for pre-quake snapshots from older hosts.
+  k.quakeTimer = s.quakeTimer || 0;
+  k.quakeActive = !!s.quakeActive;
   k.rounds = s.rounds; k.spReadyPulse = s.spReadyPulse; k.bob = s.bob;
 }
 
@@ -2886,9 +2951,16 @@ function drawForest(trees, color) {
 
 function drawLog() {
   const x = logLeft, y = logTopY, w = logW, h = TUNE.logThickness;
+  // EARTHQUAKE shake: horizontal offset on the log image while EITHER knight is
+  // in the active phase. Fallback procedural log below is left unshaken (rare
+  // path) so the bark/grooves don't tear visually when the image is missing.
+  let qx = 0;
+  if ((p1 && p1.quakeActive) || (p2 && p2.quakeActive)) {
+    qx = Math.sin(frameCount * (TUNE.quakeShakeHz / 60) * Math.PI * 2) * TUNE.quakeShakeAmp;
+  }
   if (imgReady(IMG.log)) {
     ctx.imageSmoothingEnabled = true;          // smooth scale for the painted bark
-    ctx.drawImage(IMG.log, x, y, w, h);
+    ctx.drawImage(IMG.log, x + qx, y, w, h);
     ctx.imageSmoothingEnabled = false;
     return;
   }
@@ -2981,6 +3053,7 @@ function drawKnight(k) {
   else if (k.counterTimer > 0){ auraCol = PAL.bluLight; auraA = 0.32; }
   else if (k.dashTimer > 0)   { auraCol = (k.side === "p1" ? PAL.redLight : PAL.bluLight); auraA = 0.30; }
   else if (k.anchorTimer > 0) { auraCol = PAL.steel;  auraA = 0.26; }
+  else if (k.quakeTimer > 0)  { auraCol = PAL.skyAmber; auraA = k.quakeActive ? (0.30 + 0.10 * Math.sin(frameCount * 0.8)) : 0.22; }
   else if (k.counterFlash > 0){ auraCol = PAL.clash;  auraA = 0.5 * (k.counterFlash / 0.4); }
   else if (spFull)            { auraCol = PAL.sunGlow; auraA = 0.16 + 0.08 * Math.sin(frameCount * 0.18); }
   if (auraCol && auraA > 0) {
@@ -3378,8 +3451,10 @@ function drawSelect() {
   ctx.textAlign = "left";
 
   // ---- card grid ----
+  // 5 cards fit at gap=18, cardW=160: 5*160 + 4*18 = 872 (margin 44 each side
+  // within the 960 viewport). card_frame.webp sprite scales fine to 168×248.
   const N = SPECIALS.length;
-  const gap = 22, cardW = 196, cardH = 240;
+  const gap = 18, cardW = 160, cardH = 240;
   const totalW = N * cardW + (N - 1) * gap;
   const x0 = (VW - totalW) / 2, y0 = 158;
 
@@ -3422,10 +3497,12 @@ function drawSelect() {
     ctx.fillStyle = PAL.skyAmber;
     ctx.fillText(sp.en, cx + cardW / 2, y0 + 156);
 
-    // one-line effect (wrapped to two lines)
+    // one-line effect (wraps to 2-3 lines at the narrower 5-card width). Start
+    // y nudged up + tighter lineH so 3 lines never reach the LOCKED stamp at
+    // y0+cardH-30=368: lines land at 178/192/206 with cardW-24=136 wrap width.
     ctx.font = '500 12px "Trebuchet MS", sans-serif';
     ctx.fillStyle = "#b9c2d6";
-    wrapText(sp.fx, cx + cardW / 2, y0 + 182, cardW - 24, 15);
+    wrapText(sp.fx, cx + cardW / 2, y0 + 178, cardW - 24, 14);
 
     // P1 / P2 cursor highlights (crimson / azure outlines)
     if (p1Here) drawCardOutline(cx, y0, cardW, cardH, PAL.redLight, sel.p1.locked, -3);
