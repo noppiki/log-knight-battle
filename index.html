@@ -200,6 +200,16 @@ const TUNE = {
   hitStopMin:  0.040,        // light hit freeze (s)
   hitStopMax:  0.070,        // heavy hit freeze (s)
 
+  // ===== K.O. SLOW-MO FINISH =====
+  // Separate from hit-stop: slow-mo SLOWS the sim (dt × factor) rather than
+  // freezing it, so the dramatic ring-out plays out in ~3× slow motion under a
+  // big "K.O.!" banner. Triggered the frame any knight enters ST.FALLING during
+  // PLAYING. Wall-clock timed (countdown uses raw dt) so the banner has a
+  // predictable on-screen duration regardless of the scaled physics dt.
+  koSlowmoFactor:   0.35,    // dt multiplier while in slow-mo (0.35 ≈ 3× slower)
+  koSlowmoDuration: 0.9,     // s — wall-clock duration of the slow-mo window
+  koBannerInDur:    0.18,    // s — banner pop-in animation length
+
   // balance = LIFE. It ONLY drops from taking hits (no passive drain, no
   // passive recovery). 0 balance => the knight loses their balance and tumbles
   // off the log (see updateKnight). Where you sit no longer changes life.
@@ -521,6 +531,10 @@ function enterTitleFromOnline() {
   attackArmed.p1 = attackArmed.p2 = false;
   specialArmed.p1 = specialArmed.p2 = false;
   held.clear();
+  // A peer-drop during a slow-mo would otherwise leave the K.O. banner drawn
+  // on top of the title and the BGM stuck ducked. Funnel through the single
+  // exit helper so BGM restores and the banner stops drawing.
+  clearKoSlowmo();
   gameState = GS.MENU;
 }
 
@@ -1062,7 +1076,26 @@ const bgm = (function () {
   // Kept for API symmetry — actual mute lives on globalGain so SFX also mute.
   function setMuted(_m) { /* no-op: globalGain is the single source of truth */ }
 
-  return { init, start, stop, setMuted };
+  // Duck the BGM bus to `level` over `ramp` seconds. Used by the K.O. slow-mo
+  // finish to drop the mix during the dramatic beat so the moment punches. No-op
+  // when the audio graph isn't up (autoplay still locked, tab muted, etc.).
+  function duck(level, ramp) {
+    if (!actx || !bgmGain) return;
+    const t = actx.currentTime;
+    bgmGain.gain.cancelScheduledValues(t);
+    bgmGain.gain.linearRampToValueAtTime(level, t + (ramp || 0.1));
+  }
+  // Ramp the BGM bus back to its normal under-mix level. Mirrors the visibility
+  // handler's restore. Used as the SINGLE exit path from the duck — every
+  // slow-mo termination route funnels through clearKoSlowmo() which calls this.
+  function restore(ramp) {
+    if (!actx || !bgmGain) return;
+    const t = actx.currentTime;
+    bgmGain.gain.cancelScheduledValues(t);
+    bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL, t + (ramp || 0.4));
+  }
+
+  return { init, start, stop, setMuted, duck, restore };
 })();
 
 // ===== GLOBAL MUTE TOGGLE ==============================================
@@ -1517,6 +1550,48 @@ function triggerHitStop(sec) {
   if (sec > hitStopTimer) hitStopTimer = sec;
 }
 
+// ===== K.O. SLOW-MO FINISH (state + entry/exit helpers) =====
+// koSlowmoTimer counts down in WALL-CLOCK dt (so the slow-mo lasts a predictable
+// ~koSlowmoDuration seconds of real time regardless of the scaled physics dt).
+// koSlowmoElapsed counts UP in wall-clock dt for the banner's pop-in animation.
+// koFaller is the knight that just entered FALLING — used by the banner to
+// color/subtitle the "X LANDS THE BLOW" line in the WINNER's color (the foe).
+let koSlowmoTimer = 0;
+let koSlowmoElapsed = 0;
+let koFaller = null;
+
+// SINGLE entry point for the slow-mo. Called from every FALLING-entry site so
+// the trigger logic stays DRY. Self-guards against re-entry (only one slow-mo
+// per round; the second knight falling — e.g. ring-out + KO same frame — does
+// not retrigger). Also ignored in TRAINING (a passive dummy + auto-recenter
+// means a "fall" is transient and not dramatically meaningful) and outside of
+// PLAYING (no slow-mo during ROUND_OVER/SELECT/etc.).
+function startKoSlowmo(k) {
+  if (gameMode === "training") return;
+  if (gameState !== GS.PLAYING) return;
+  if (koSlowmoTimer > 0) return;
+  koSlowmoTimer = TUNE.koSlowmoDuration;
+  koSlowmoElapsed = 0;
+  koFaller = k;
+  // Duck BGM hard for the dramatic beat. clearKoSlowmo() restores on every exit
+  // path (natural timeout, ROUND_OVER, draw, restart, etc.) so the bus can
+  // never get stuck ducked.
+  bgm.duck(0.012, 0.10);
+  addBigShake(16);   // dramatic punctuation; netRecord'd → guest sees the same kick
+}
+
+// SINGLE exit point for the slow-mo. Called from EVERY interruption path so
+// (1) BGM is always restored, (2) the banner stops drawing the moment the
+// round ends, (3) a stale faller pointer doesn't leak into the next round.
+// Idempotent (safe to call when no slow-mo is active).
+function clearKoSlowmo() {
+  if (koSlowmoTimer === 0 && koFaller === null) return;
+  koSlowmoTimer = 0;
+  koSlowmoElapsed = 0;
+  koFaller = null;
+  bgm.restore(0.4);
+}
+
 const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
 
 // Enter the SELECT screen: reset cursors/locks/ready beat and the chosen
@@ -1579,6 +1654,7 @@ function enterSelect() {
   // Zeroing both together makes the next real guest packet a clean baseline.
   net.guestInput = { l:false, r:false, j:false, g:false, a:false, s:false };
   net.prevGuestLR = { l:false, r:false, g:false };
+  clearKoSlowmo();   // re-entering SELECT must not carry a stale slow-mo / BGM duck
   gameState = GS.SELECT;
 }
 
@@ -1603,12 +1679,14 @@ function startCountdown() {
   drawBanner = false;
   roundTimer = TUNE.roundTime;   // reset to 99 every round (incl. replays/draws)
   hitStopTimer = 0;
+  clearKoSlowmo();   // never carry slow-mo / banner / BGM duck into the next round
   countdownIndex = 0;
   countdownTimer = TUNE.countdownStep;
   gameState = GS.COUNTDOWN;
   sfxCount();
 }
 function beginPlaying() {
+  clearKoSlowmo();   // belt-and-suspenders: enter PLAYING with a clean slow-mo slate
   gameState = GS.PLAYING;
 }
 function awardRound(winnerKnight) {
@@ -1619,6 +1697,7 @@ function awardRound(winnerKnight) {
   gameState = GS.ROUND_OVER;
   sfxFall();
   addShake(8);
+  clearKoSlowmo();   // K.O. banner / slow-mo / BGM duck end at ROUND_OVER (no stall onto the round-over banner)
   // check match end
   if (winnerKnight.rounds >= TUNE.roundsToWin) {
     matchWinner = winnerKnight;
@@ -1639,6 +1718,7 @@ function resolveTimeUp() {
     gameState = GS.ROUND_OVER;
     sfxFall();
     addShake(6);
+    clearKoSlowmo();   // defensive: time-up draw never triggers slow-mo, but be belt-and-suspenders
   } else {
     awardRound(diff > 0 ? p1 : p2);
   }
@@ -1658,6 +1738,7 @@ function tryKnockout(k) {
   if (k.vy > -120) k.vy = -120;               // ensure a tumble pop even if airborne
   k.tumble = 0;
   sfxFall();
+  startKoSlowmo(k);   // dramatic slow-mo finish (no-op if already active / training / not PLAYING)
 }
 
 // 4-way title mode order so ↑↓ cycles through all reachable modes.
@@ -1706,6 +1787,7 @@ function handleGlobalKey(code) {
       shake = 0;
       matchWinner = null; roundWinner = null;
       drawBanner = false; timeUpBanner = false;
+      clearKoSlowmo();   // never leak a slow-mo state back to the TITLE
       gameState = GS.MENU;
       sfxSelect();
       return;
@@ -1986,6 +2068,7 @@ function updateKnight(k, dt, input) {
     k.vy = -120;
     k.tumble = 0;
     sfxFall();
+    startKoSlowmo(k);   // dramatic slow-mo finish (no-op if already active / training / not PLAYING)
   }
 }
 
@@ -2619,6 +2702,11 @@ function buildSnapshot() {
     shake,   // current shake is carried so the guest's world jitter tracks host;
              // FX shake EVENTS also fire, but updateEffects decays both consistently.
     stage: currentStageIndex,   // host-rolled stage so the guest's drawBackground matches
+    // K.O. SLOW-MO finish: host carries the timer/elapsed/faller side so the
+    // guest's drawKoBanner reproduces the same dramatic beat. Guarded on the
+    // applySnapshot side so older hosts that pre-date these fields don't crash.
+    koSlowmoTimer, koSlowmoElapsed,
+    koFallerSide: koFaller ? koFaller.side : null,
   };
 }
 
@@ -2642,6 +2730,15 @@ function applySnapshot(s) {
   // Mirror the host's chosen stage so the guest's background matches. Guarded
   // against older snapshots that pre-date the field.
   if (typeof s.stage === "number") currentStageIndex = s.stage;
+  // K.O. slow-mo: mirror the host's timer/elapsed + map the faller side back to
+  // the local knight (so subtitle color renders identically). Fields are
+  // guarded against older snapshots — a guest on a newer build paired with an
+  // older host simply never sees a banner (graceful degrade, no crash).
+  if (typeof s.koSlowmoTimer === "number") koSlowmoTimer = s.koSlowmoTimer;
+  if (typeof s.koSlowmoElapsed === "number") koSlowmoElapsed = s.koSlowmoElapsed;
+  if (typeof s.koFallerSide !== "undefined") {
+    koFaller = s.koFallerSide === "p1" ? p1 : (s.koFallerSide === "p2" ? p2 : null);
+  }
 }
 
 // HOST: flush this frame's snapshot + recorded FX events to the guest.
@@ -2777,6 +2874,29 @@ function update(dt) {
   }
 
   if (gameState === GS.PLAYING) {
+    // ===== K.O. SLOW-MO: scale physics dt while a KO is unfolding =====
+    // The slow-mo timer counts in WALL-CLOCK dt (so the dramatic window is a
+    // predictable ~koSlowmoDuration seconds of real time). The PHYSICS dt is
+    // then multiplied by koSlowmoFactor so everything downstream (movement,
+    // gravity, tumble, swings, AI) moves in slow motion. Effects above
+    // (updateEffects) already ran on unscaled dt — banner pop-in + shake decay
+    // animate at normal speed, which is the intended cinematic look.
+    //
+    // Round-clock pause is handled implicitly: the `if (!falling)` gate around
+    // the timer decrement below already pauses the clock while a knight is
+    // FALLING — which is exactly when slow-mo is active.
+    //
+    // BGM restore on natural timeout funnels through clearKoSlowmo() so EVERY
+    // exit path (timeout, ROUND_OVER, draw, restart, training) goes through
+    // the same restore. checkRoundResolution() still fires normally — the
+    // faller just crosses VH+120 a bit later (after slow-mo ends, the rest of
+    // the fall plays at normal speed; total fall takes < 1.5s wall-clock).
+    if (koSlowmoTimer > 0) {
+      koSlowmoTimer = Math.max(0, koSlowmoTimer - dt);
+      koSlowmoElapsed += dt;
+      dt = dt * TUNE.koSlowmoFactor;
+      if (koSlowmoTimer === 0) clearKoSlowmo();   // restores BGM + clears faller
+    }
     // Always read inputs (this also DRAINS any stray P2 attack/special arms so a
     // human key press can't leak into the CPU's slot in 1p). In 1p the CPU
     // computes P2's inputs via aiInputs() and we discard the keyboard half.
@@ -3646,6 +3766,62 @@ function wrapText(text, cx, y, maxW, lineH) {
   if (line) ctx.fillText(line, cx, yy);
 }
 
+// ===== K.O. SLOW-MO BANNER =====
+// Pop-in scale curve (0..1 over koBannerInDur seconds, overshoot to 1.2 then
+// settle to 1.0) layered with a fade-out alpha that ramps down in the final
+// 0.2s of the slow-mo window. Drawn over a slight dim of the world so the
+// banner reads as the dominant element. Faller side picks the WINNER's color +
+// "X LANDS THE BLOW" subtitle. clearKoSlowmo() guarantees this stops drawing
+// the moment ROUND_OVER/SELECT/restart fires (no stall onto the round-over
+// banner). No-op when no slow-mo is active.
+function drawKoBanner() {
+  if (koSlowmoTimer === 0) return;
+  // Pop-in: 0..1 over koBannerInDur. Half-1 grows 0.4 → 1.2, half-2 settles
+  // 1.2 → 1.0 (slight overshoot for "snap" feel). After 1.0, stays at 1.0.
+  const inT = Math.min(1, koSlowmoElapsed / TUNE.koBannerInDur);
+  const popScale = inT < 0.5 ? (0.4 + 1.6 * (inT * 2)) : (1.2 - 0.2 * ((inT - 0.5) * 2));
+  const scale = Math.max(0.4, popScale);
+  // Out-fade: alpha 1 → 0 over the last 0.20s of the slow-mo.
+  const remaining = koSlowmoTimer;
+  const outAlpha = remaining < 0.20 ? Math.max(0, remaining / 0.20) : 1.0;
+
+  ctx.save();
+  // Slight world dim to elevate the banner.
+  ctx.fillStyle = `rgba(8,12,20,${0.32 * outAlpha})`;
+  ctx.fillRect(0, 0, VW, VH);
+  ctx.textAlign = "center";
+  ctx.translate(VW / 2, VH / 2 - 10);
+  ctx.scale(scale, scale);
+  // Cheap "glow" via two concentric amber plates behind the text.
+  ctx.globalAlpha = 0.20 * outAlpha;
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillRect(-220, -64, 440, 128);
+  ctx.globalAlpha = 0.35 * outAlpha;
+  ctx.fillRect(-180, -50, 360, 100);
+  // Big stroked "K.O.!" headline.
+  ctx.globalAlpha = 1.0 * outAlpha;
+  ctx.font = `900 ${Math.round(150)}px "Trebuchet MS", sans-serif`;
+  ctx.lineWidth = 14;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText("K.O.!", 0, 30);
+  ctx.fillStyle = "#fff5d8";
+  ctx.fillText("K.O.!", 0, 30);
+  // Subtitle: name the winner (the faller's foe) in the WINNER's color.
+  if (koFaller && (koFaller.side === "p1" || koFaller.side === "p2")) {
+    const fallerIsP1 = koFaller.side === "p1";
+    const subtitle = fallerIsP1 ? "AZURE LANDS THE BLOW" : "CRIMSON LANDS THE BLOW";
+    ctx.font = '800 22px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(subtitle, 0, 78);
+    ctx.fillStyle = fallerIsP1 ? PAL.bluLight : PAL.redLight;
+    ctx.fillText(subtitle, 0, 78);
+  }
+  ctx.restore();
+  ctx.textAlign = "left";
+  ctx.globalAlpha = 1.0;
+}
+
 function drawCountdown() {
   const label = COUNT_LABELS[Math.min(countdownIndex, COUNT_LABELS.length - 1)];
   // pop scale based on time within the step
@@ -4152,6 +4328,11 @@ function render() {
   else if (gameState === GS.ONLINE_JOIN) drawOnlineJoin();
   else if (gameState === GS.ONLINE_WAIT) drawOnlineWait();
 
+  // K.O. slow-mo banner overlays everything except the mute indicator. The
+  // banner only draws while koSlowmoTimer > 0; clearKoSlowmo() (called on
+  // ROUND_OVER, SELECT, restart, etc.) guarantees it never stalls onto the
+  // round-over banner or bleeds into the next round.
+  drawKoBanner();
   // Mute indicator sits on top of every screen, top-right corner. Always
   // visible so the user knows what state audio is in (and finds the M key).
   drawMuteIndicator();
