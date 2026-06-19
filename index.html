@@ -5404,6 +5404,45 @@ function drawHUD() {
                 : (gameMode === "online") ? ((net.mode === "guest") ? "AZURE  YOU" : "AZURE  P2") : "AZURE  P2";
   drawBalanceMeter(p1, 30, 40, mw, p1Label, palR);
   drawBalanceMeter(p2, VW - 30 - mw, 40, mw, p2Label, palB);
+  // Iter 48 HUD PORTRAIT ICONS — small head-crop avatar next to each life bar
+  // for character identity reinforcement during PLAYING. Uses iter 32 portrait
+  // assets via source-rect to crop just the head + helm region (top ~30% of
+  // each portrait). 56x56 circular masked icon framed with a thin amber ring.
+  if (gameState === GS.PLAYING || gameState === GS.COUNTDOWN || gameState === GS.ROUND_OVER) {
+    const iconSize = 56;
+    const iconY = 18;
+    const ringW = 3;
+    function drawHudIcon(img, cx, cy, sideCol) {
+      if (!imgReady(img)) return;
+      const sw = img.naturalWidth, sh = img.naturalHeight;
+      // Source crop: top ~30% (head + helm). Knight figure is centered
+      // horizontally so take a square window from the top center.
+      const srcSize = Math.min(sw, sh * 0.32);
+      const sx = (sw - srcSize) / 2, sy = 0;
+      ctx.save();
+      // Circular clip mask
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconSize / 2, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, sx, sy, srcSize, srcSize,
+                         cx - iconSize / 2, cy - iconSize / 2, iconSize, iconSize);
+      ctx.imageSmoothingEnabled = false;
+      ctx.restore();
+      // Amber ring frame around the icon
+      ctx.save();
+      ctx.strokeStyle = sideCol;
+      ctx.lineWidth = ringW;
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconSize / 2 + ringW / 2, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    // P1 icon: left of the P1 balance meter (which starts at x=30)
+    drawHudIcon(IMG.portraitRed,  30 + mw + iconSize / 2 + 4, iconY + iconSize / 2, PAL.redLight);
+    // P2 icon: right of the P2 balance meter (which ends at VW-30)
+    drawHudIcon(IMG.portraitBlue, VW - 30 - mw - iconSize / 2 - 4, iconY + iconSize / 2, PAL.bluLight);
+  }
   // TRAINING: replace the round timer with a small "TRAINING — press R to exit"
   // label in the same screen real estate. Balance meters + win pips stay (pips
   // will all show empty because rounds=0 in training).
