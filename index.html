@@ -3693,6 +3693,7 @@ function tickSpecial(k, dt) {
           foe.balance = Math.max(0, foe.balance - TUNE.whirlHitBal);
           foe.swingVel += dir * 2;
           // Feedback
+          spawnFloater(foe.x, foe.y - TUNE.knightH - 30, `-${TUNE.whirlHitBal}`, PAL.skyAmber, 0.85);
           spawnSparks(tip.x, tip.y, 6, PAL.spark);
           sfxHit();
           addShake(5);
@@ -3769,6 +3770,10 @@ function applyBodyShove(attacker, target, knockBase, balBase, label, color) {
   spawnSparks(cx, cy, 22, color || PAL.spark);
   spawnFloater(cx, cy - 16, label || (Math.random() < 0.5 ? "DOSUN!" : "SHOVE!"),
                color || (attacker.side === "p1" ? PAL.redLight : PAL.bluLight), 1.9);
+  {
+    const dmg = Math.round(balLoss);
+    if (dmg > 0) spawnFloater(cx, cy - 40, `-${dmg}`, "#ff9b3a", 0.9);
+  }
   addBigShake(18);
   triggerHitStop(TUNE.hitStopMax);
 }
@@ -3917,6 +3922,7 @@ function applyHit(attacker, target, tip) {
     spawnSparks(tip.x, tip.y, 24, PAL.clash);
     spawnFloater(target.x, target.y - TUNE.knightH - 6, "COUNTER!",
                  target.side === "p1" ? PAL.redLight : PAL.bluLight, 2.0);
+    spawnFloater(tip.x, tip.y - 40, `-${TUNE.counterBal}`, "#ff6a3a", 1.0);
     addBigShake(18);
     triggerHitStop(TUNE.hitStopMax);
     sfxCounter();
@@ -3992,6 +3998,16 @@ function applyHit(attacker, target, tip) {
   spawnFloater(cx, cy - 16, words[Math.floor(Math.random() * words.length)],
                guarding ? PAL.steel : (attacker.side === "p1" ? PAL.redLight : PAL.bluLight),
                mega ? 2.4 : 1);
+  {
+    const dmg = Math.round(balLoss);
+    if (dmg > 0) {
+      let dmgColor;
+      if (mega || dmg >= 25)       dmgColor = "#ff6a3a";
+      else if (heavy || dmg >= 12) dmgColor = "#ff9b3a";
+      else                          dmgColor = PAL.skyAmber;
+      spawnFloater(cx, cy - 40, `-${dmg}`, dmgColor, 0.9);
+    }
+  }
   if (mega) addBigShake(24);
   else addShake(guarding ? 4 : (heavy ? 12 : 8));
   // hit-stop scaled to force (MEGA always max)
