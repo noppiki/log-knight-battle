@@ -726,6 +726,70 @@ const STAGES = [
 ];
 let currentStageIndex = 0;   // index into STAGES; randomized per match in startMatch()
 
+// Per-stage ambient particle emission profiles
+const AMBIENT_PROFILES = {
+  tundra: {
+    intervalMs: 80,
+    maxAlive:   220,
+    spawn: () => ({
+      x: Math.random() * (VW + 200) - 100,
+      y: -10,
+      vx: -8 + Math.random() * -22,
+      vy: 25 + Math.random() * 35,
+      life: 0,
+      maxLife: 4.0 + Math.random() * 2.0,
+      color: "rgba(232, 240, 255, 0.85)",
+      size: 1 + Math.random() * 2,
+      kind: "snow",
+    }),
+  },
+  aurora: {
+    intervalMs: 220,
+    maxAlive: 80,
+    spawn: () => ({
+      x: 40 + Math.random() * (VW - 80),
+      y: 80 + Math.random() * (VH - 260),
+      vx: -8 + Math.random() * 16,
+      vy: -4 + Math.random() * 8,
+      life: 0,
+      maxLife: 5.0 + Math.random() * 3.0,
+      color: "rgba(220, 255, 180, 0.85)",
+      size: 1.5 + Math.random() * 1.5,
+      kind: "firefly",
+    }),
+  },
+  goldenhour: {
+    intervalMs: 150,
+    maxAlive: 140,
+    spawn: () => ({
+      x: Math.random() * VW,
+      y: VH * 0.45 + Math.random() * (VH * 0.4),
+      vx: 4 + Math.random() * 8,
+      vy: -10 - Math.random() * 15,
+      life: 0,
+      maxLife: 5.5 + Math.random() * 2.0,
+      color: "rgba(244, 214, 168, 0.7)",
+      size: 1 + Math.random() * 1.5,
+      kind: "dust",
+    }),
+  },
+  dusk: {
+    intervalMs: 380,
+    maxAlive: 50,
+    spawn: () => ({
+      x: Math.random() * VW,
+      y: VH - 60 - Math.random() * 30,
+      vx: -10 + Math.random() * 20,
+      vy: -25 - Math.random() * 30,
+      life: 0,
+      maxLife: 3.0 + Math.random() * 1.5,
+      color: "rgba(255, 180, 90, 0.9)",
+      size: 1.2 + Math.random() * 1.3,
+      kind: "ember",
+    }),
+  },
+};
+
 // ----------------------------- NETPLAY (online 2-player) -------------
 // Host-authoritative relay netplay. The HOST runs the FULL simulation using its
 // local keyboard as p1 and the GUEST's relayed inputs as p2; each frame it sends
@@ -2604,6 +2668,11 @@ const particles = [];   // {x,y,vx,vy,life,maxLife,size,color}
 const floaters = [];    // {x,y,vy,life,maxLife,text,color,scale}
 let shake = 0;          // current screen-shake magnitude
 
+// Per-stage ambient particle systems (behind log/knights, in front of parallax bg)
+let ambientParticles = [];   // {x, y, vx, vy, life, maxLife, color, size, kind?}
+let ambientEmitTimer = 0;    // accumulates dt in ms; emit when threshold reached
+let lastAmbientStageIdx = -1;
+
 // ===== FX helpers: RAW (_-prefixed) do the actual work; the public names wrap
 // them and, WHEN HOSTING ONLINE, also record a compact FX event so the guest can
 // reproduce the juice (see netRecord/playEvent). The guest replays events through
@@ -2698,6 +2767,39 @@ function updateEffects(dt) {
   if (shake > 0) {
     shake -= 48 * dt;
     if (shake < 0) shake = 0;
+  }
+
+  // Stage ambient particles: per-stage emit + uniform tick
+  {
+    const stage = STAGES[currentStageIndex] || STAGES[0];
+    const profile = AMBIENT_PROFILES[stage.id];
+    // Clear ambient when stage changes
+    if (currentStageIndex !== lastAmbientStageIdx) {
+      ambientParticles.length = 0;
+      ambientEmitTimer = 0;
+      lastAmbientStageIdx = currentStageIndex;
+    }
+    if (profile) {
+      ambientEmitTimer += dt * 1000;
+      while (ambientEmitTimer >= profile.intervalMs && ambientParticles.length < profile.maxAlive) {
+        ambientEmitTimer -= profile.intervalMs;
+        ambientParticles.push(profile.spawn());
+      }
+      if (ambientParticles.length >= profile.maxAlive) ambientEmitTimer = 0;
+    }
+    for (let i = ambientParticles.length - 1; i >= 0; i--) {
+      const p = ambientParticles[i];
+      p.life += dt;
+      if (p.life >= p.maxLife) { ambientParticles.splice(i, 1); continue; }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.kind === "firefly") {
+        p.vx += (Math.random() - 0.5) * 30 * dt;
+        p.vy += (Math.random() - 0.5) * 30 * dt;
+        if (p.vx > 12) p.vx = 12; if (p.vx < -12) p.vx = -12;
+        if (p.vy > 8) p.vy = 8;   if (p.vy < -8) p.vy = -8;
+      }
+    }
   }
 }
 
@@ -4965,6 +5067,26 @@ function drawParticles() {
   }
   ctx.globalAlpha = 1;
 }
+
+function drawAmbientParticles() {
+  if (ambientParticles.length === 0) return;
+  ctx.save();
+  for (const p of ambientParticles) {
+    const fIn = Math.min(1, p.life / 0.3);
+    const fOut = Math.min(1, (p.maxLife - p.life) / 0.6);
+    const a = Math.min(fIn, fOut);
+    let pulse = 1;
+    if (p.kind === "firefly") {
+      pulse = 0.5 + 0.5 * Math.sin(p.life * 4);
+    }
+    ctx.globalAlpha = a * pulse;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
 function drawFloaters() {
   ctx.textAlign = "center";
   for (const f of floaters) {
@@ -6625,6 +6747,7 @@ function render() {
   }
 
   drawBackground();
+  drawAmbientParticles();   // mid-depth: behind log/knights, in front of parallax bg
   drawLog();
 
   // draw knights (back-most by x for slight depth: draw farther first)
