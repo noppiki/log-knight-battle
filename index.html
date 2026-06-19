@@ -5412,13 +5412,36 @@ function drawHUD() {
     const iconSize = 56;
     const iconY = 18;
     const ringW = 3;
-    function drawHudIcon(img, cx, cy, sideCol) {
+    function drawHudIcon(img, knight, cx, cy, sideCol) {
       if (!imgReady(img)) return;
       const sw = img.naturalWidth, sh = img.naturalHeight;
-      // Source crop: top ~30% (head + helm). Knight figure is centered
+      // Source crop: top ~32% (head + helm). Knight figure is centered
       // horizontally so take a square window from the top center.
       const srcSize = Math.min(sw, sh * 0.32);
       const sx = (sw - srcSize) / 2, sy = 0;
+      // Iter 49 reactive states
+      const lowLifeFrac = knight.balance / TUNE.balanceMax;
+      const isLowLife = lowLifeFrac < 0.25;
+      const isHit = knight.knockTimer > 0 && knight.state !== ST.FALLING;
+      const comboGlow = (knight.comboCount || 0) >= 4 && (knight.comboTimer || 0) > 0;
+      const t = performance.now() / 1000;
+
+      // Iter 49 COMBO GLOW: amber pulsing halo BEHIND the icon
+      if (comboGlow) {
+        const pulse = 0.5 + 0.5 * Math.sin(t * 6);
+        const grow = Math.min(0.8, (knight.comboCount - 4) * 0.12);
+        const haloR = iconSize / 2 + 8 + grow * 4;
+        ctx.save();
+        ctx.globalAlpha = 0.35 + 0.25 * pulse;
+        const gr = ctx.createRadialGradient(cx, cy, iconSize / 2 - 2, cx, cy, haloR);
+        gr.addColorStop(0, "rgba(216, 164, 90, 0.85)");
+        gr.addColorStop(1, "rgba(216, 164, 90, 0)");
+        ctx.fillStyle = gr;
+        ctx.beginPath();
+        ctx.arc(cx, cy, haloR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
       ctx.save();
       // Circular clip mask
       ctx.beginPath();
@@ -5428,8 +5451,15 @@ function drawHUD() {
       ctx.drawImage(img, sx, sy, srcSize, srcSize,
                          cx - iconSize / 2, cy - iconSize / 2, iconSize, iconSize);
       ctx.imageSmoothingEnabled = false;
+      // Iter 49 HIT FLASH: red overlay inside circle on knockback
+      if (isHit) {
+        const flashA = Math.min(0.55, knight.knockTimer / 0.30 * 0.55);
+        ctx.fillStyle = `rgba(255, 60, 40, ${flashA})`;
+        ctx.fillRect(cx - iconSize / 2, cy - iconSize / 2, iconSize, iconSize);
+      }
       ctx.restore();
-      // Amber ring frame around the icon
+      // Iter 49 LOW LIFE PULSE: red pulsing border (drawn on top of base ring)
+      // Amber ring frame around the icon (base)
       ctx.save();
       ctx.strokeStyle = sideCol;
       ctx.lineWidth = ringW;
@@ -5437,11 +5467,22 @@ function drawHUD() {
       ctx.arc(cx, cy, iconSize / 2 + ringW / 2, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
+      if (isLowLife) {
+        const pulse = 0.5 + 0.5 * Math.sin(t * 5);
+        ctx.save();
+        ctx.globalAlpha = 0.5 + 0.4 * pulse;
+        ctx.strokeStyle = "#ff3a20";
+        ctx.lineWidth = ringW + 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, iconSize / 2 + ringW + 2, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
     // P1 icon: left of the P1 balance meter (which starts at x=30)
-    drawHudIcon(IMG.portraitRed,  30 + mw + iconSize / 2 + 4, iconY + iconSize / 2, PAL.redLight);
+    drawHudIcon(IMG.portraitRed,  p1, 30 + mw + iconSize / 2 + 4, iconY + iconSize / 2, PAL.redLight);
     // P2 icon: right of the P2 balance meter (which ends at VW-30)
-    drawHudIcon(IMG.portraitBlue, VW - 30 - mw - iconSize / 2 - 4, iconY + iconSize / 2, PAL.bluLight);
+    drawHudIcon(IMG.portraitBlue, p2, VW - 30 - mw - iconSize / 2 - 4, iconY + iconSize / 2, PAL.bluLight);
   }
   // TRAINING: replace the round timer with a small "TRAINING — press R to exit"
   // label in the same screen real estate. Balance meters + win pips stay (pips
