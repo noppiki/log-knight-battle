@@ -522,6 +522,9 @@ const PAL = {
 };
 
 // --- Tuning constants (grouped for easy tweaking) ---
+const COMBO_WINDOW = 1.4;          // seconds — chain timeout
+const COMBO_MIN_TO_DISPLAY = 2;   // start showing callout at xN where N >= 2
+
 const TUNE = {
   // log geometry
   logWidthFrac: 0.62,        // log spans 62% of width
@@ -2519,6 +2522,9 @@ function makeKnight(side) {
     panTrail: [],              // [{x, y, t}] ring buffer of recent pan-tip positions
     tapCdTimer: 0,             // backstop min interval between taps
     hitCdTimer: 0,             // post-hit lockout (one swing = one hit)
+    comboCount: 0,             // consecutive hits within the combo window
+    comboTimer: 0,             // counts DOWN; 0 = combo expired
+    comboBig: 0,               // biggest combo this round (end-of-round bragging)
     knockTimer: 0,             // window where vx is NOT clamped (knockback in flight)
     attackFlash: 0,            // brief ATTACK label timer (for SFX/anim only)
     // falling bookkeeping
@@ -2565,6 +2571,7 @@ function resetKnightPositions() {
     k.state = ST.IDLE;
     k.swingAngle = 0; k.swingVel = 0;
     k.tapCdTimer = 0; k.hitCdTimer = 0; k.knockTimer = 0; k.attackFlash = 0;
+    k.comboCount = 0; k.comboTimer = 0; k.comboBig = 0;
     k.fellAtFrame = -1; k.landDust = 0;
     // SP gauge + all transient special states reset each round.
     // chosenSpecial is DELIBERATELY left intact (picked once per match).
@@ -3329,6 +3336,10 @@ function updateKnight(k, dt, input) {
   if (k.hitCdTimer  > 0) k.hitCdTimer  = Math.max(0, k.hitCdTimer  - dt);
   if (k.knockTimer  > 0) k.knockTimer  = Math.max(0, k.knockTimer  - dt);
   if (k.attackFlash > 0) k.attackFlash = Math.max(0, k.attackFlash - dt);
+  if (k.comboTimer  > 0) {
+    k.comboTimer = Math.max(0, k.comboTimer - dt);
+    if (k.comboTimer === 0) k.comboCount = 0;  // chain expired
+  }
 
   const guarding = input.guard && k.onGround;
 
@@ -3699,6 +3710,10 @@ function tickSpecial(k, dt) {
           addShake(5);
           // SP reward for landed hits (consistent with other specials' feedback).
           gainSp(k, TUNE.spGainLand * 0.3);
+          // Combo counter: each whirl bite is a clean hit
+          k.comboCount++;
+          k.comboTimer = COMBO_WINDOW;
+          if (k.comboCount > k.comboBig) k.comboBig = k.comboCount;
           // Per-hit cooldown so this same foe isn't re-hit every frame.
           k.whirlHitCd = TUNE.whirlHitCdSec;
         }
@@ -3765,6 +3780,11 @@ function applyBodyShove(attacker, target, knockBase, balBase, label, color) {
   // SP gain for both sides
   attacker.special = Math.min(TUNE.spMax, attacker.special + TUNE.spGainLand);
   target.special   = Math.min(TUNE.spMax, target.special   + TUNE.spGainTake);
+
+  // Combo counter: dash body-shove is a clean hit
+  attacker.comboCount++;
+  attacker.comboTimer = COMBO_WINDOW;
+  if (attacker.comboCount > attacker.comboBig) attacker.comboBig = attacker.comboCount;
 
   const cx = (attacker.x + target.x) / 2, cy = target.y - TUNE.knightH * 0.5;
   spawnSparks(cx, cy, 22, color || PAL.spark);
@@ -3980,6 +4000,13 @@ function applyHit(attacker, target, tip) {
   // consume MY energy + one-hit lockout
   attacker.swingVel *= TUNE.swingConsume;
   attacker.hitCdTimer = TUNE.hitCooldown;
+
+  // Combo counter: only clean hits count (guard chips don't increment/reset)
+  if (!guarding) {
+    attacker.comboCount++;
+    attacker.comboTimer = COMBO_WINDOW;
+    if (attacker.comboCount > attacker.comboBig) attacker.comboBig = attacker.comboCount;
+  }
 
   // SP gain: lander gets more, taker gets a smaller amount; guard chips a little.
   gainSp(attacker, TUNE.spGainLand);
@@ -4205,6 +4232,7 @@ function snapKnight(k) {
     quakeTimer: k.quakeTimer, quakeActive: k.quakeActive,
     whirlTimer: k.whirlTimer, whirlActive: k.whirlActive,
     rounds: k.rounds, spReadyPulse: k.spReadyPulse, bob: k.bob,
+    comboCount: k.comboCount, comboTimer: k.comboTimer,
   };
 }
 function applyKnight(k, s) {
@@ -4224,6 +4252,8 @@ function applyKnight(k, s) {
   k.whirlTimer = (typeof s.whirlTimer === "number") ? s.whirlTimer : 0;
   k.whirlActive = !!s.whirlActive;
   k.rounds = s.rounds; k.spReadyPulse = s.spReadyPulse; k.bob = s.bob;
+  k.comboCount = (typeof s.comboCount === "number") ? s.comboCount : 0;
+  k.comboTimer = (typeof s.comboTimer === "number") ? s.comboTimer : 0;
 }
 
 // Build the full authoritative snapshot the guest needs to render any state.
@@ -5579,6 +5609,37 @@ function wrapText(text, cx, y, maxW, lineH) {
   if (line) ctx.fillText(line, cx, yy);
 }
 
+// ===== COMBO COUNTER CALLOUT =====
+function drawCombos() {
+  for (const k of [p1, p2]) {
+    if (k.comboCount < COMBO_MIN_TO_DISPLAY) continue;
+    if (k.comboTimer <= 0) continue;
+    const side = (k.side === "p1");
+    const x = side ? 140 : VW - 140;
+    const y = 70;
+    const baseScale = 1.0 + Math.min(0.8, (k.comboCount - 2) * 0.15);
+    const fadeIn  = Math.min(1, (COMBO_WINDOW - k.comboTimer) / 0.15);
+    const fadeOut = Math.min(1, k.comboTimer / 0.30);
+    const alpha = Math.min(fadeIn, fadeOut);
+    let color;
+    if (k.comboCount >= 6)      color = "#ff5030";
+    else if (k.comboCount >= 4) color = "#ff9b3a";
+    else                         color = PAL.skyAmber || "#d8a45a";
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = "center";
+    ctx.translate(x, y);
+    ctx.scale(baseScale, baseScale);
+    ctx.font = '900 32px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(`x${k.comboCount} HITS!`, 0, 0);
+    ctx.fillStyle = color;
+    ctx.fillText(`x${k.comboCount} HITS!`, 0, 0);
+    ctx.restore();
+  }
+}
+
 // ===== K.O. SLOW-MO BANNER =====
 // Pop-in scale curve (0..1 over koBannerInDur seconds, overshoot to 1.2 then
 // settle to 1.0) layered with a fade-out alpha that ramps down in the final
@@ -6597,6 +6658,9 @@ function render() {
   else if (gameState === GS.ONLINE_HOST) drawOnlineConnect();
   else if (gameState === GS.ONLINE_JOIN) drawOnlineJoin();
   else if (gameState === GS.ONLINE_WAIT) drawOnlineWait();
+
+  // Combo callout: drawn above HUD but below K.O. banner and other overlays.
+  drawCombos();
 
   // K.O. slow-mo banner overlays everything except the mute indicator. The
   // banner only draws while koSlowmoTimer > 0; clearKoSlowmo() (called on
