@@ -5794,6 +5794,25 @@ function drawTitle() {
   ctx.fillStyle = "rgba(8,12,20,0.55)";
   ctx.fillRect(0, 0, VW, VH);
 
+  // === ITER 36: portrait knights flanking the title ===
+  const t = performance.now() / 1000;
+  const bobL = Math.sin(t * 0.6) * 4;
+  const bobR = Math.sin(t * 0.55 + 1.2) * 4;
+  const portraitW = 300;
+  const portraitH = 380;
+  const portraitY = 140;
+  const leftX = -20;
+  const rightX = VW - portraitW + 20;
+  ctx.save();
+  ctx.globalAlpha = 0.88;
+  if (imgReady(IMG.portraitRed)) {
+    ctx.drawImage(IMG.portraitRed, leftX, portraitY + bobL, portraitW, portraitH);
+  }
+  if (imgReady(IMG.portraitBlue)) {
+    ctx.drawImage(IMG.portraitBlue, rightX, portraitY + bobR, portraitW, portraitH);
+  }
+  ctx.restore();
+
   // ----- heraldic crest, centered ABOVE the title text -----
   // The emblem (crossed frying pans + helm + shield) crowns the title. Scaled
   // to ~150px tall to sit in the top band without crowding the title/controls
