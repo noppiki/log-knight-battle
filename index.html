@@ -4982,6 +4982,30 @@ function drawPanTrail(k) {
   ctx.restore();
 }
 
+// Computes a subtle idle breathing bob (vertical) + pan wobble (angular).
+// Returns {dy, dAngle, idle}. Applied ONLY to draw position — never mutates
+// k.y or k.swingAngle so hit detection is byte-identical.
+function idleBob(k) {
+  const sv = Math.abs(k.swingVel);
+  const idle = k.state !== ST.FALLING
+    && k.onGround
+    && sv < 1.5
+    && Math.abs(k.vx) < 8
+    && k.knockTimer <= 0
+    && (k.windupTimer || 0) === 0
+    && (k.counterTimer || 0) === 0
+    && (k.dashTimer || 0) === 0
+    && (k.anchorTimer || 0) === 0
+    && (k.quakeTimer || 0) === 0
+    && (k.whirlTimer || 0) === 0;
+  if (!idle) return { dy: 0, dAngle: 0, idle: false };
+  const t = performance.now() / 1000;
+  const phase = (k.side === "p1") ? 0 : 0.6;
+  const dy = Math.sin(t * 0.9 + phase) * 1.5;
+  const dAngle = Math.sin(t * 0.7 + phase + 0.3) * 0.025;
+  return { dy, dAngle, idle: true };
+}
+
 // surface at k.y, the torso rises UP above it, and BOTH legs drape DOWN over
 // the NEAR (camera-facing) side of the log — thigh down the log front, lower
 // leg / boot dangling. One hand wields a cast-iron FRYING PAN, the free hand
@@ -4989,6 +5013,9 @@ function drawPanTrail(k) {
 // (top of the log); the whole figure fills the [k.y-H .. k.y] hitbox so the
 // combat boxes stay honest. Legs are drawn BELOW k.y, over the log front.
 function drawKnight(k) {
+  const bob = idleBob(k);
+  const drawY = k.y + bob.dy;
+  const drawSwing = k.swingAngle + bob.dAngle;
   const pal = (k.side === "p1")
     ? { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim }
     : { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
@@ -5047,10 +5074,10 @@ function drawKnight(k) {
     const dw = sw * SPRITE_S, dh = sh * SPRITE_S;
 
     ctx.save();
-    ctx.translate(k.x + hipShift, k.y + bobY);
+    ctx.translate(k.x + hipShift, drawY + bobY);
     ctx.scale(k.facing, 1);                 // mirror P2 to face left
     if (k.state === ST.FALLING) ctx.rotate(k.tumble || 0); // tumble off the log
-    ctx.rotate(k.swingAngle);               // rigid pendulum swing about the seat
+    ctx.rotate(drawSwing);                  // rigid pendulum swing about the seat
     ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
     // place the seat anchor at the origin: shift so (SEAT_FX*sw, SEAT_FY*sh) -> 0,0
     ctx.drawImage(sprite, -SEAT_FX * dw, -SEAT_FY * dh, dw, dh);
