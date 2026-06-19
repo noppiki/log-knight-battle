@@ -5184,6 +5184,79 @@ function drawSelect() {
   ctx.fillStyle = "rgba(8,12,20,0.62)";
   ctx.fillRect(0, 0, VW, VH);
 
+  // === ITER 38: SELECT screen portrait avatars ===
+  // Cropped busts in top corners; locked players get amber halo + LOCKED stamp.
+  {
+    const avatarW = 130, avatarH = 165;
+    const leftX  = 14;
+    const rightX = VW - avatarW - 14; // 816
+    const avY    = 14;
+
+    // Locked halos (drawn BEHIND the portraits)
+    if (sel.p1.locked) {
+      ctx.save();
+      ctx.fillStyle = "rgba(216, 164, 90, 0.30)";
+      ctx.beginPath();
+      ctx.ellipse(leftX + avatarW / 2, avY + avatarH / 2 + 10, avatarW * 0.55, avatarH * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    if (sel.p2.locked) {
+      ctx.save();
+      ctx.fillStyle = "rgba(216, 164, 90, 0.30)";
+      ctx.beginPath();
+      ctx.ellipse(rightX + avatarW / 2, avY + avatarH / 2 + 10, avatarW * 0.55, avatarH * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Cropped portrait drawImage (top 55% of source = head + shoulders)
+    if (imgReady(IMG.portraitRed)) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(IMG.portraitRed,
+        0, 0, IMG.portraitRed.naturalWidth, IMG.portraitRed.naturalHeight * 0.55,
+        leftX, avY, avatarW, avatarH);
+      ctx.imageSmoothingEnabled = false;
+    }
+    if (imgReady(IMG.portraitBlue)) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(IMG.portraitBlue,
+        0, 0, IMG.portraitBlue.naturalWidth, IMG.portraitBlue.naturalHeight * 0.55,
+        rightX, avY, avatarW, avatarH);
+      ctx.imageSmoothingEnabled = false;
+    }
+
+    // Team labels and optional LOCKED stamp below avatars
+    ctx.save();
+    ctx.font = '900 22px "Trebuchet MS", sans-serif';
+    ctx.textAlign = "center";
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = PAL.ink;
+    ctx.strokeText("CRIMSON", leftX + avatarW / 2, avY + avatarH + 28);
+    ctx.fillStyle = PAL.redLight;
+    ctx.fillText("CRIMSON", leftX + avatarW / 2, avY + avatarH + 28);
+    ctx.strokeText("AZURE", rightX + avatarW / 2, avY + avatarH + 28);
+    ctx.fillStyle = PAL.bluLight;
+    ctx.fillText("AZURE", rightX + avatarW / 2, avY + avatarH + 28);
+    if (sel.p1.locked) {
+      ctx.font = '900 16px "Trebuchet MS", sans-serif';
+      ctx.strokeStyle = PAL.ink;
+      ctx.lineWidth = 4;
+      ctx.strokeText("LOCKED", leftX + avatarW / 2, avY + avatarH + 50);
+      ctx.fillStyle = PAL.skyAmber;
+      ctx.fillText("LOCKED", leftX + avatarW / 2, avY + avatarH + 50);
+    }
+    if (sel.p2.locked) {
+      ctx.font = '900 16px "Trebuchet MS", sans-serif';
+      ctx.strokeStyle = PAL.ink;
+      ctx.lineWidth = 4;
+      ctx.strokeText("LOCKED", rightX + avatarW / 2, avY + avatarH + 50);
+      ctx.fillStyle = PAL.skyAmber;
+      ctx.fillText("LOCKED", rightX + avatarW / 2, avY + avatarH + 50);
+    }
+    ctx.restore();
+  }
+
   ctx.textAlign = "center";
   ctx.font = '900 52px "Trebuchet MS", sans-serif';
   ctx.lineWidth = 9; ctx.strokeStyle = PAL.ink;
