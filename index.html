@@ -5073,11 +5073,36 @@ function drawKnight(k) {
     const sw = sprite.naturalWidth, sh = sprite.naturalHeight;
     const dw = sw * SPRITE_S, dh = sh * SPRITE_S;
 
+    // Iter 45 SPRITE ANIMATION (programmatic): apply pose-shaping transforms to
+    // the single sprite based on combat state. SWING pose = forward lean +
+    // slight horizontal stretch (knight torquing into the strike); HIT REACTION
+    // = backward lean + vertical squash (knight rocking from impact). Physics
+    // state (k.y, k.swingAngle) untouched — pure render-side transform.
+    let leanX = 0, scaleX = 1, scaleY = 1;
+    if (k.knockTimer > 0 && k.state !== ST.FALLING) {
+      // hit reaction: lean opposite to swing (recoiling away), squash vertically
+      const intensity = Math.min(1, k.knockTimer / 0.30);
+      leanX = -0.18 * intensity;          // body shears backward
+      scaleY = 1 - 0.06 * intensity;      // compress vertically
+      scaleX = 1 + 0.04 * intensity;      // bulge horizontally
+    } else if (Math.abs(k.swingVel) > 4) {
+      // active swing: lean forward into the strike, stretch horizontally
+      const intensity = Math.min(1, (Math.abs(k.swingVel) - 4) / 6);
+      const dirSign = Math.sign(k.swingVel) || 1;
+      leanX = 0.14 * intensity * dirSign;  // body shears toward swing direction
+      scaleX = 1 + 0.05 * intensity;       // stretch horizontally
+      scaleY = 1 - 0.03 * intensity;       // slight vertical compression
+    }
+
     ctx.save();
     ctx.translate(k.x + hipShift, drawY + bobY);
     ctx.scale(k.facing, 1);                 // mirror P2 to face left
     if (k.state === ST.FALLING) ctx.rotate(k.tumble || 0); // tumble off the log
     ctx.rotate(drawSwing);                  // rigid pendulum swing about the seat
+    // Iter 45 pose shaping: shear + scale around the seat (already at origin)
+    if (leanX !== 0 || scaleX !== 1 || scaleY !== 1) {
+      ctx.transform(scaleX, 0, leanX, scaleY, 0, 0);
+    }
     ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
     // place the seat anchor at the origin: shift so (SEAT_FX*sw, SEAT_FY*sh) -> 0,0
     ctx.drawImage(sprite, -SEAT_FX * dw, -SEAT_FY * dh, dw, dh);
