@@ -2037,6 +2037,7 @@ const bgm = (function () {
     1,0,0,0, 0,0,1,0, 0,0,0,0, 1,0,0,0,
     0,0,0,1, 0,0,0,0, 1,0,0,0, 0,0,0,0,
   ];
+  let bgmStageDetune = 0;  // cents; applied to bell + accent oscillators per stage
   let bgmGain = null;
   let droneGain = null;
   let bellGain = null;
@@ -2119,6 +2120,7 @@ const bgm = (function () {
     const o = actx.createOscillator();
     o.type = "triangle";
     o.frequency.value = freq;
+    o.detune.value = bgmStageDetune;
     const g = actx.createGain();
     g.gain.setValueAtTime(0.0001, when);
     g.gain.exponentialRampToValueAtTime(vol, when + 0.015);
@@ -2253,7 +2255,17 @@ const bgm = (function () {
     bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, t + 0.15);
   }
 
-  return { init, start, stop, setMuted, duck, restore, setVolume };
+  function setStage(stageId) {
+    switch (stageId) {
+      case "tundra":     bgmStageDetune = 700;  break;
+      case "goldenhour": bgmStageDetune = -200; break;
+      case "aurora":     bgmStageDetune = 1200; break;
+      case "dusk":
+      default:           bgmStageDetune = 0;    break;
+    }
+  }
+
+  return { init, start, stop, setMuted, duck, restore, setVolume, setStage };
 })();
 
 // ===== GLOBAL MUTE TOGGLE ==============================================
@@ -2917,6 +2929,9 @@ function startMatch() {
   } else {
     const idx = STAGES.findIndex(s => s.id === stagePreference);
     currentStageIndex = (idx >= 0) ? idx : 0;
+  }
+  if (typeof bgm.setStage === "function") {
+    bgm.setStage(STAGES[currentStageIndex].id);
   }
   p1.rounds = 0; p2.rounds = 0;
   matchWinner = null;
@@ -4247,7 +4262,12 @@ function applySnapshot(s) {
   shake = Math.max(shake, s.shake || 0);
   // Mirror the host's chosen stage so the guest's background matches. Guarded
   // against older snapshots that pre-date the field.
-  if (typeof s.stage === "number") currentStageIndex = s.stage;
+  if (typeof s.stage === "number") {
+    currentStageIndex = s.stage;
+    if (typeof bgm.setStage === "function") {
+      bgm.setStage(STAGES[currentStageIndex].id);
+    }
+  }
   // K.O. slow-mo: mirror the host's timer/elapsed + map the faller side back to
   // the local knight (so subtitle color renders identically). Fields are
   // guarded against older snapshots — a guest on a newer build paired with an
