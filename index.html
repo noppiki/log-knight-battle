@@ -1473,6 +1473,7 @@ function canPauseHere() {
   if (gameMode === "attract") return false;
   if (gameState !== GS.PLAYING && gameState !== GS.COUNTDOWN) return false;
   if (koSlowmoTimer > 0) return false;
+  if (cutinTimer > 0) return false;   // mid-cinematic: don't trap the overlay
   return true;
 }
 
@@ -2776,6 +2777,18 @@ let koSlowmoElapsed = 0;
 let koFaller = null;
 let koFlashTimer = 0;
 
+// ===== ITER 39: SPECIAL ACTIVATION CUT-IN =====
+// Brief (~0.7s) full-screen cinematic when ANY special activates. Portrait
+// slides in from the activating knight's side, speed-lines + radial flash +
+// HUGE special name. World physics keeps ticking so the special's actual
+// effect doesn't lag behind the visual overlay. Cut-in is purely cosmetic
+// (the per-special SFX still fires; this layers a horn blast on top).
+const CUTIN_DURATION = 0.7;
+let cutinTimer       = 0;     // counts DOWN; 0 = no cut-in active
+let cutinSide        = null;  // "p1" | "p2" (activating knight's side)
+let cutinSpecial     = null;  // copy of k.chosenSpecial at activation
+let cutinSpecialName = null;  // display name (uppercased at render time)
+
 // SINGLE entry point for the slow-mo. Called from every FALLING-entry site so
 // the trigger logic stays DRY. Self-guards against re-entry (only one slow-mo
 // per round; the second knight falling — e.g. ring-out + KO same frame — does
@@ -3538,6 +3551,27 @@ function activateSpecial(k) {
       addBigShake(6);
       break;
   }
+
+  // ITER 39: trigger cinematic cut-in after the per-special branch fires.
+  // Cosmetic only — world physics keeps running so the special's wind-up /
+  // dash / etc. doesn't lag behind the overlay. Side, special ID, and display
+  // name are captured here so the rest of the cut-in lifecycle is independent
+  // of the activating knight's later state changes (FALLING etc.).
+  cutinTimer       = CUTIN_DURATION;
+  cutinSide        = k.side;
+  cutinSpecial     = k.chosenSpecial;
+  const _sp        = SPECIALS.find(s => s.id === k.chosenSpecial);
+  cutinSpecialName = _sp ? _sp.name : k.chosenSpecial.toUpperCase();
+  // Bigger spark burst at the activation site — team color for personal
+  // specials, amber for area specials.
+  const _isTeamColored = (k.chosenSpecial === "counter" || k.chosenSpecial === "dash" ||
+                          k.chosenSpecial === "anchor"  || k.chosenSpecial === "mega");
+  const _sparkColor = _isTeamColored
+    ? (k.side === "p1" ? PAL.redLight : PAL.bluLight)
+    : PAL.skyAmber;
+  spawnSparks(k.x, k.y - 40, 30, _sparkColor);
+  // Cinematic horn blast layered over the per-special SFX.
+  sfxHorn();
 }
 
 // Per-frame upkeep of active special states. Run in PLAYING after updateKnight.
@@ -4187,6 +4221,8 @@ function buildSnapshot() {
     koSlowmoTimer, koSlowmoElapsed,
     koFallerSide: koFaller ? koFaller.side : null,
     matchResultRevealTimer,
+    // Iter 39 cut-in cinematic — guest mirrors so the overlay stays synced.
+    cutinTimer, cutinSide, cutinSpecial, cutinSpecialName,
   };
 }
 
@@ -4229,6 +4265,16 @@ function applySnapshot(s) {
         matchResultRevealTimer > MATCH_RESULT_REVEAL_DURATION - 0.2) {
       sfxHorn();
     }
+  }
+  // Iter 39 cut-in cinematic mirror — guest plays its own horn once on the
+  // fresh-cut-in transition (timer just set to ~CUTIN_DURATION).
+  if (typeof s.cutinTimer === "number") {
+    const wasCutin = cutinTimer > 0;
+    cutinTimer = s.cutinTimer;
+    cutinSide = s.cutinSide || null;
+    cutinSpecial = s.cutinSpecial || null;
+    cutinSpecialName = s.cutinSpecialName || null;
+    if (!wasCutin && cutinTimer > CUTIN_DURATION - 0.15) sfxHorn();
   }
 }
 
@@ -4283,6 +4329,9 @@ function update(dt) {
   // koFlashTimer fades regardless of game state so a mid-flash state change
   // (pause, round-over, etc.) never leaves the screen stuck flashed.
   if (koFlashTimer > 0) koFlashTimer = Math.max(0, koFlashTimer - dt);
+  // Cut-in cinematic timer fades regardless of pause so a mid-cinematic
+  // pause never traps the overlay on-screen.
+  if (cutinTimer > 0) cutinTimer = Math.max(0, cutinTimer - dt);
   // ===== PAUSE: freeze entire simulation when paused. =====
   // render() still runs (called unconditionally from frame()), so the game
   // world stays visible with the PAUSED overlay drawn on top.
@@ -5184,13 +5233,21 @@ function drawSelect() {
   ctx.fillStyle = "rgba(8,12,20,0.62)";
   ctx.fillRect(0, 0, VW, VH);
 
-  // === ITER 38: SELECT screen portrait avatars ===
-  // Cropped busts in top corners; locked players get amber halo + LOCKED stamp.
+  // === ITER 38 + 39: SELECT screen portrait avatars ===
+  // Cropped busts in top corners; locked players get amber halo. Iter 39 fixes
+  // aspect distortion by picking a source-crop that matches the dest aspect
+  // (130x165 / 0.787 → sw=550, sh=700 centered horizontally on the 1151-wide
+  // portrait), and moves CRIMSON/AZURE + LOCKED labels INTO semi-trans bands
+  // ON the avatar so nothing overflows into the card grid at y>=158.
   {
     const avatarW = 130, avatarH = 165;
     const leftX  = 14;
     const rightX = VW - avatarW - 14; // 816
     const avY    = 14;
+    // Source crop: aspect-matched bust. Portrait natives are 1151x1367 → take
+    // a 550x700 window centered horizontally from the top so head+shoulders fill
+    // the 130x165 dest without horizontal compression.
+    const SX = 300, SY = 0, SW = 550, SH = 700;
 
     // Locked halos (drawn BEHIND the portraits)
     if (sel.p1.locked) {
@@ -5210,49 +5267,55 @@ function drawSelect() {
       ctx.restore();
     }
 
-    // Cropped portrait drawImage (top 55% of source = head + shoulders)
+    // Aspect-preserved portrait drawImage (bust crop)
     if (imgReady(IMG.portraitRed)) {
       ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(IMG.portraitRed,
-        0, 0, IMG.portraitRed.naturalWidth, IMG.portraitRed.naturalHeight * 0.55,
-        leftX, avY, avatarW, avatarH);
+      ctx.drawImage(IMG.portraitRed, SX, SY, SW, SH, leftX, avY, avatarW, avatarH);
       ctx.imageSmoothingEnabled = false;
     }
     if (imgReady(IMG.portraitBlue)) {
       ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(IMG.portraitBlue,
-        0, 0, IMG.portraitBlue.naturalWidth, IMG.portraitBlue.naturalHeight * 0.55,
-        rightX, avY, avatarW, avatarH);
+      ctx.drawImage(IMG.portraitBlue, SX, SY, SW, SH, rightX, avY, avatarW, avatarH);
       ctx.imageSmoothingEnabled = false;
     }
 
-    // Team labels and optional LOCKED stamp below avatars
+    // TOP band: team name baked INTO the avatar so nothing overflows.
     ctx.save();
-    ctx.font = '900 22px "Trebuchet MS", sans-serif';
     ctx.textAlign = "center";
-    ctx.lineWidth = 5;
+    ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
+    ctx.fillRect(leftX,  avY, avatarW, 22);
+    ctx.fillRect(rightX, avY, avatarW, 22);
+    ctx.font = '900 14px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 3;
     ctx.strokeStyle = PAL.ink;
-    ctx.strokeText("CRIMSON", leftX + avatarW / 2, avY + avatarH + 28);
+    ctx.strokeText("CRIMSON", leftX  + avatarW / 2, avY + 15);
     ctx.fillStyle = PAL.redLight;
-    ctx.fillText("CRIMSON", leftX + avatarW / 2, avY + avatarH + 28);
-    ctx.strokeText("AZURE", rightX + avatarW / 2, avY + avatarH + 28);
+    ctx.fillText  ("CRIMSON", leftX  + avatarW / 2, avY + 15);
+    ctx.strokeText("AZURE",   rightX + avatarW / 2, avY + 15);
     ctx.fillStyle = PAL.bluLight;
-    ctx.fillText("AZURE", rightX + avatarW / 2, avY + avatarH + 28);
+    ctx.fillText  ("AZURE",   rightX + avatarW / 2, avY + 15);
+
+    // BOTTOM band: LOCKED stamp baked INTO the avatar (only when locked).
+    // y in [avY+avatarH-26, avY+avatarH-4] — entirely inside the avatar
+    // (avY=14, avatarH=165 → 153..175), well above the card grid at y>=158
+    // because cards are pushed below by their own y0=158 backplate top.
     if (sel.p1.locked) {
-      ctx.font = '900 16px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
+      ctx.fillRect(leftX, avY + avatarH - 26, avatarW, 22);
+      ctx.lineWidth = 3;
       ctx.strokeStyle = PAL.ink;
-      ctx.lineWidth = 4;
-      ctx.strokeText("LOCKED", leftX + avatarW / 2, avY + avatarH + 50);
+      ctx.strokeText("LOCKED", leftX + avatarW / 2, avY + avatarH - 11);
       ctx.fillStyle = PAL.skyAmber;
-      ctx.fillText("LOCKED", leftX + avatarW / 2, avY + avatarH + 50);
+      ctx.fillText  ("LOCKED", leftX + avatarW / 2, avY + avatarH - 11);
     }
     if (sel.p2.locked) {
-      ctx.font = '900 16px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
+      ctx.fillRect(rightX, avY + avatarH - 26, avatarW, 22);
+      ctx.lineWidth = 3;
       ctx.strokeStyle = PAL.ink;
-      ctx.lineWidth = 4;
-      ctx.strokeText("LOCKED", rightX + avatarW / 2, avY + avatarH + 50);
+      ctx.strokeText("LOCKED", rightX + avatarW / 2, avY + avatarH - 11);
       ctx.fillStyle = PAL.skyAmber;
-      ctx.fillText("LOCKED", rightX + avatarW / 2, avY + avatarH + 50);
+      ctx.fillText  ("LOCKED", rightX + avatarW / 2, avY + avatarH - 11);
     }
     ctx.restore();
   }
@@ -5716,6 +5779,106 @@ function drawVsSplash() {
   ctx.fillText  ("AZURE KNIGHT",   rightX + portraitW / 2, portraitY + portraitH + 28);
 
   ctx.restore();
+}
+
+// ===== ITER 39: SPECIAL ACTIVATION CUT-IN =====
+// Brief 0.7s cinematic when ANY special activates. Composed of:
+//   * dim veil + radial white-amber flash burst from center
+//   * manga-style diagonal speed-lines streaming from the OPPOSITE side
+//     of the portrait
+//   * bust portrait sliding in from the activating knight's side
+//   * MASSIVE special name in team color + "CRIMSON KNIGHT" / "AZURE KNIGHT"
+//     subtitle
+// World physics keeps running during the cut-in so the special's effect
+// stays synchronized; the cut-in is a pure overlay.
+function drawSpecialCutin() {
+  if (cutinTimer <= 0 || !cutinSide || !cutinSpecial) return;
+  const elapsed   = CUTIN_DURATION - cutinTimer;
+  // Phases: 0..0.18s slide-in, 0.18..0.50s hold, 0.50..0.70s fade-out.
+  const slideT    = Math.min(1, elapsed / 0.18);
+  const easeOut   = 1 - Math.pow(1 - slideT, 3);
+  const fadeOut   = Math.min(1, cutinTimer / 0.20);
+  const alpha     = Math.min(1, slideT * 1.5) * fadeOut;
+
+  const sideColor = (cutinSide === "p1") ? PAL.redLight : PAL.bluLight;
+  const knightLabel = (cutinSide === "p1") ? "CRIMSON KNIGHT" : "AZURE KNIGHT";
+  const portraitImg = (cutinSide === "p1") ? IMG.portraitRed : IMG.portraitBlue;
+
+  ctx.save();
+
+  // 1. Dim veil
+  ctx.fillStyle = `rgba(8, 12, 20, ${0.45 * alpha})`;
+  ctx.fillRect(0, 0, VW, VH);
+
+  // 2. Radial white-amber flash burst from center (peaks early, fades quickly)
+  const flashT = Math.min(1, elapsed / 0.18);
+  const flashAlpha = (1 - flashT) * 0.85;
+  if (flashAlpha > 0.02) {
+    const gr = ctx.createRadialGradient(VW / 2, VH / 2, 10, VW / 2, VH / 2, VW * 0.7 * Math.max(flashT, 0.05));
+    gr.addColorStop(0,   `rgba(255, 245, 216, ${flashAlpha})`);
+    gr.addColorStop(0.4, `rgba(216, 164, 90, ${flashAlpha * 0.6})`);
+    gr.addColorStop(1,   "rgba(216, 164, 90, 0)");
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, VW, VH);
+  }
+
+  // 3. Manga-style diagonal speed-lines from the side OPPOSITE the portrait.
+  // P1 portrait slides in from left → lines stream from RIGHT toward left,
+  // and vice versa.
+  ctx.globalAlpha = alpha * 0.40;
+  ctx.strokeStyle = sideColor;
+  ctx.lineWidth   = 4;
+  const linesFromRight = (cutinSide === "p1"); // portrait on left → lines from right
+  for (let i = 0; i < 12; i++) {
+    const y0  = (i / 12) * VH;
+    const len = 240 + (i % 3) * 80;
+    const x0  = linesFromRight ? VW : 0;
+    const dx  = linesFromRight ? -len : len;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x0 + dx, y0 + 30);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = alpha;
+
+  // 4. Portrait bust slides in from the activating knight's side.
+  if (imgReady(portraitImg)) {
+    const pw  = 420;
+    // Preserve native aspect (1151/1367 ≈ 0.842) → ph ≈ 499 at pw=420.
+    const ph  = pw / (portraitImg.naturalWidth / portraitImg.naturalHeight);
+    const px  = (cutinSide === "p1")
+      ? (-pw + (pw + 40) * easeOut)            // slide in from left
+      : (VW   - (pw + 40) * easeOut);          // slide in from right
+    const py  = (VH - ph) / 2 - 10;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(portraitImg, px, py, pw, ph);
+    ctx.imageSmoothingEnabled = false;
+  }
+
+  // 5. HUGE special name on the OPPOSITE side of the portrait, in team color.
+  ctx.font          = '900 84px "Trebuchet MS", sans-serif';
+  ctx.textAlign     = "center";
+  ctx.textBaseline  = "middle";
+  ctx.lineWidth     = 14;
+  ctx.strokeStyle   = PAL.ink;
+  ctx.fillStyle     = sideColor;
+  const textX = (cutinSide === "p1") ? VW * 0.72 : VW * 0.28;
+  const textY = VH / 2 - 30;
+  const upper = cutinSpecialName.toUpperCase();
+  ctx.strokeText(upper, textX, textY);
+  ctx.fillText  (upper, textX, textY);
+
+  // 6. "CRIMSON / AZURE KNIGHT" subtitle.
+  ctx.font        = '900 36px "Trebuchet MS", sans-serif';
+  ctx.lineWidth   = 8;
+  ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(knightLabel, textX, textY + 60);
+  ctx.fillStyle = PAL.bone;
+  ctx.fillText  (knightLabel, textX, textY + 60);
+
+  ctx.restore();
+  // Reset baseline so subsequent overlays render normally.
+  ctx.textBaseline = "alphabetic";
 }
 
 // ===== PAUSE OVERLAY =====
@@ -6415,6 +6578,9 @@ function render() {
   // Attract mode overlay: "🎬 DEMO" badge + blinking "PRESS ANY KEY TO PLAY".
   // Drawn above gameplay and toasts; below the mute indicator.
   drawAttractOverlay();
+  // Iter 39 SPECIAL CUT-IN: brief 0.7s portrait cinematic when any special
+  // activates. Drawn above gameplay/toasts/attract; below the mute pip.
+  drawSpecialCutin();
   // Mute indicator sits on top of every screen, top-right corner. Always
   // visible so the user knows what state audio is in (and finds the M key).
   drawMuteIndicator();
