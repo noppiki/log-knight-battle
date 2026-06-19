@@ -2105,6 +2105,7 @@ const bgm = (function () {
     0,0,0,1, 0,0,0,0, 1,0,0,0, 0,0,0,0,
   ];
   let bgmStageDetune = 0;  // cents; applied to bell + accent oscillators per stage
+  let bgmExtraDetune = 0;  // cents; match-point tension layer (+300 when active)
   let bgmGain = null;
   let droneGain = null;
   let bellGain = null;
@@ -2187,7 +2188,7 @@ const bgm = (function () {
     const o = actx.createOscillator();
     o.type = "triangle";
     o.frequency.value = freq;
-    o.detune.value = bgmStageDetune;
+    o.detune.value = bgmStageDetune + bgmExtraDetune;
     const g = actx.createGain();
     g.gain.setValueAtTime(0.0001, when);
     g.gain.exponentialRampToValueAtTime(vol, when + 0.015);
@@ -2332,7 +2333,11 @@ const bgm = (function () {
     }
   }
 
-  return { init, start, stop, setMuted, duck, restore, setVolume, setStage };
+  function setMatchPointActive(active) {
+    bgmExtraDetune = active ? 300 : 0;
+  }
+
+  return { init, start, stop, setMuted, duck, restore, setVolume, setStage, setMatchPointActive };
 })();
 
 // ===== GLOBAL MUTE TOGGLE ==============================================
@@ -2955,6 +2960,10 @@ function clearKoSlowmo() {
 
 const COUNT_LABELS = ["3", "2", "1", "FIGHT!"];
 
+function isMatchPoint() {
+  return (p1.rounds === 1) || (p2.rounds === 1);
+}
+
 function currentRoundLabel() {
   if (p1.rounds === 1 && p2.rounds === 1) return "FINAL ROUND";
   const n = p1.rounds + p2.rounds + 1;
@@ -3074,6 +3083,9 @@ function startCountdown() {
   countdownIndex = 0;
   countdownTimer = TUNE.countdownStep;
   gameState = GS.COUNTDOWN;
+  if (typeof bgm.setMatchPointActive === "function") {
+    bgm.setMatchPointActive(isMatchPoint());
+  }
   sfxCount();
 }
 function beginPlaying() {
@@ -4415,6 +4427,9 @@ function applySnapshot(s) {
     if (typeof bgm.setStage === "function") {
       bgm.setStage(STAGES[currentStageIndex].id);
     }
+    if (typeof bgm.setMatchPointActive === "function") {
+      bgm.setMatchPointActive(isMatchPoint());
+    }
   }
   // K.O. slow-mo: mirror the host's timer/elapsed + map the faller side back to
   // the local knight (so subtitle color renders identically). Fields are
@@ -5358,6 +5373,17 @@ function drawMuteIndicator() {
 }
 
 function drawHUD() {
+  if (isMatchPoint() && gameState === GS.PLAYING) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 150);
+    ctx.save();
+    ctx.globalAlpha = 0.35 * pulse;
+    ctx.strokeStyle = "#ff4030";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.rect(4, 4, VW - 8, 76);
+    ctx.stroke();
+    ctx.restore();
+  }
   const palR = { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim };
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
   const mw = 320;
@@ -5924,6 +5950,20 @@ function drawCountdown() {
       ctx.strokeText(roundLabel, cx, cy);
       ctx.fillText(roundLabel, cx, cy);
       ctx.restore();
+
+      if (isMatchPoint() && (countdownIndex === 0 || countdownIndex === 1 || (countdownIndex === 2 && countdownTimer > TUNE.countdownStep - 0.25))) {
+        const pulse = 0.7 + 0.3 * Math.sin(performance.now() / 120);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = "center";
+        ctx.font = '900 32px "Trebuchet MS", system-ui, sans-serif';
+        ctx.lineWidth = 7;
+        ctx.strokeStyle = PAL.ink;
+        ctx.strokeText("MATCH POINT", cx, cy + 50);
+        ctx.fillStyle = `rgba(255, ${Math.round(70 + 40 * pulse)}, ${Math.round(70 + 40 * pulse)}, ${pulse})`;
+        ctx.fillText("MATCH POINT", cx, cy + 50);
+        ctx.restore();
+      }
     }
   }
 
