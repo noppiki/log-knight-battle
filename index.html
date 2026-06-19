@@ -3106,6 +3106,15 @@ function awardRound(winnerKnight) {
   sfxFall();
   addShake(8);
   clearKoSlowmo();   // K.O. banner / slow-mo / BGM duck end at ROUND_OVER (no stall onto the round-over banner)
+  // Iter 47 WINNER CELEBRATION CONFETTI: burst of team-colored sparks around
+  // the winning knight to make the round-win moment feel earned. Routes through
+  // the netted spawnSparks wrapper so online guest replays it.
+  {
+    const wx = winnerKnight.x, wy = winnerKnight.y - TUNE.knightH * 0.5;
+    const teamCol = (winnerKnight.side === "p1") ? PAL.redLight : PAL.bluLight;
+    spawnSparks(wx, wy, 28, teamCol);
+    spawnSparks(wx, wy - 20, 18, PAL.skyAmber || "#d8a45a");
+  }
   // check match end
   if (winnerKnight.rounds >= TUNE.roundsToWin) {
     matchWinner = winnerKnight;
