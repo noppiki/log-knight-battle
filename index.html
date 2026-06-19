@@ -2503,6 +2503,7 @@ function makeKnight(side) {
     // ===== pendulum (rigid upper body about the seat pivot) =====
     swingAngle: 0,              // rad; 0 = upright, + = leaning toward opponent
     swingVel: 0,               // rad/s
+    panTrail: [],              // [{x, y, t}] ring buffer of recent pan-tip positions
     tapCdTimer: 0,             // backstop min interval between taps
     hitCdTimer: 0,             // post-hit lockout (one swing = one hit)
     knockTimer: 0,             // window where vx is NOT clamped (knockback in flight)
@@ -2561,6 +2562,7 @@ function resetKnightPositions() {
     k.anchorTimer = 0;
     k.quakeTimer = 0; k.quakeActive = false;
     k.whirlTimer = 0; k.whirlActive = false; k.whirlHitCd = 0;
+    k.panTrail.length = 0;
     // AI timers reset every round / select-entry so no CPU state leaks.
     k.aiSwingCd = 0; k.aiReactTimer = 0; k.aiGuardTimer = 0; k.aiGuardCd = 0;
   }
@@ -2738,6 +2740,11 @@ const SNOW_SCROLL_PX_PER_SEC    = 25;
 const CLOUD_SCROLL_PX_PER_SEC   = 15;
 const AURORA_SCROLL_PX_PER_SEC  = 12;
 const SUN_RAY_SCROLL_PX_PER_SEC = 8;
+
+// PAN TRAIL visual constants
+const TRAIL_MAX_SAMPLES    = 7;     // ring buffer cap
+const TRAIL_LIFETIME       = 0.18;  // seconds; samples older than this are dropped
+const TRAIL_MIN_SWING_VEL  = 4.5;  // rad/s — below this, no trail (idle/slow swing)
 
 // ===== ATTRACT MODE: after ATTRACT_IDLE_SEC of MENU idle, start an AI-vs-AI demo.
 // gameMode="attract" is INTERNAL only — never exposed on the title's mode-cycle UI.
@@ -3323,6 +3330,19 @@ function updateKnight(k, dt, input) {
   } else if (k.swingAngle < -TUNE.swingMax) {
     k.swingAngle = -TUNE.swingMax;
     if (k.swingVel < 0) k.swingVel = -k.swingVel * TUNE.swingReflect;
+  }
+
+  // PAN TRAIL: sample pan tip when swing is fast enough
+  {
+    if (Math.abs(k.swingVel) > TRAIL_MIN_SWING_VEL) {
+      const tip = panTip(k);
+      k.panTrail.push({ x: tip.x, y: tip.y, t: 0 });
+      if (k.panTrail.length > TRAIL_MAX_SAMPLES) k.panTrail.shift();
+    }
+    for (const s of k.panTrail) s.t += dt;
+    while (k.panTrail.length > 0 && k.panTrail[0].t > TRAIL_LIFETIME) {
+      k.panTrail.shift();
+    }
   }
 
   // --- HORIZONTAL MOVEMENT ---
@@ -4721,6 +4741,30 @@ function fillEllipse(cx, cy, rx, ry) {
 
 // ---- Knight rendering ----
 // Each knight SITS ASTRIDE the log: the seat (hips) rests on the log's top
+function drawPanTrail(k) {
+  if (!k.panTrail || k.panTrail.length < 2) return;
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (let i = 1; i < k.panTrail.length; i++) {
+    const a = k.panTrail[i - 1];
+    const b = k.panTrail[i];
+    const ageA = 1 - Math.min(1, a.t / TRAIL_LIFETIME);
+    const ageB = 1 - Math.min(1, b.t / TRAIL_LIFETIME);
+    const avgAge = (ageA + ageB) * 0.5;
+    const alpha = avgAge * 0.55;
+    const width = 2 + avgAge * 6;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = PAL.skyAmber;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // surface at k.y, the torso rises UP above it, and BOTH legs drape DOWN over
 // the NEAR (camera-facing) side of the log — thigh down the log front, lower
 // leg / boot dangling. One hand wields a cast-iron FRYING PAN, the free hand
@@ -6252,7 +6296,10 @@ function render() {
 
   // draw knights (back-most by x for slight depth: draw farther first)
   const order = [p1, p2];
-  for (const k of order) drawKnight(k);
+  for (const k of order) {
+    drawPanTrail(k);
+    drawKnight(k);
+  }
 
   drawParticles();
   drawFloaters();
