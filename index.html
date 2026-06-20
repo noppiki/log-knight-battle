@@ -1115,6 +1115,7 @@ const ASSET_SRCS = {
   onomatopoeia:       "assets/onomatopoeia.png",
   impactBurst:        "assets/impact_burst.png",
   winPips:            "assets/win_pips.png",
+  cursorBracket:      "assets/cursor_bracket.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -1131,6 +1132,17 @@ for (const key in ASSET_SRCS) {
 }
 function imgReady(img) { return !!img && img.complete && img.naturalWidth > 0; }
 function allAssetsLoaded() { return assetsLoaded >= ASSET_TOTAL; }
+
+// SELECT-screen cursor bracket sprite layout constants.
+// cursor_bracket.png: 1×2 grid, each cell contains one L-shaped corner bracket
+// (elbow/gem at top-left, arms extend right and down). Cell 0 = red, cell 1 = blue.
+const BRACKET = {
+  cols:    2,
+  cellW:   707,   // packed cell width  (px in source sheet)
+  cellH:   759,   // packed cell height (px in source sheet)
+  elbowFX: 0,     // elbow corner offset as fraction of cellW (≈0, content starts at pad)
+  elbowFY: 0,     // elbow corner offset as fraction of cellH (≈0, content starts at pad)
+};
 
 // The below-canvas hint strip reflects the current mode (P2 = CPU in 1p).
 const hintEl = document.getElementById("hint");
@@ -5956,11 +5968,54 @@ function drawSelect() {
 }
 
 function drawCardOutline(x, y, w, h, color, locked, inset) {
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = locked ? 5 : 3;
-  ctx.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
-  ctx.restore();
+  // Corners of the inset rect (P1: inset=-3 = outside card; P2: inset=+3 = inside)
+  const rectL = x + inset, rectT = y + inset;
+  const rectR = x + w - inset, rectB = y + h - inset;
+
+  if (imgReady(IMG.cursorBracket)) {
+    // Ornate pixel-art corner bracket sprite.
+    // Cell 0 = red, cell 1 = blue. Bracket: elbow/gem at TL, arms right+down.
+    // Rotating 0/90/180/270° maps TL bracket onto each of the four card corners.
+    const cell = (color === PAL.redLight) ? 0 : 1;
+    const sx   = cell * BRACKET.cellW;   // source x in the sprite sheet
+    // Base draw size; scale up slightly when locked for a pulsing "locked in" feel.
+    const bs       = 46;
+    const drawSize = locked ? bs * 1.12 : bs;
+    // Elbow offset in draw-space so the gem lands exactly on the card corner.
+    const ex = BRACKET.elbowFX * drawSize;
+    const ey = BRACKET.elbowFY * drawSize;
+    // Locked: alpha pulse so the bracket breathes
+    const alpha = locked ? (0.75 + 0.25 * Math.sin(frameCount * 0.2)) : 1;
+
+    const corners = [
+      // [cornerX, cornerY, rotationRadians]
+      [rectL, rectT,           0],              // TL  — no rotation
+      [rectR, rectT,  Math.PI / 2],             // TR  — 90° CW
+      [rectR, rectB,  Math.PI],                 // BR  — 180°
+      [rectL, rectB, -Math.PI / 2],             // BL  — 270° CW
+    ];
+
+    for (const [cx, cy, rot] of corners) {
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
+      ctx.globalAlpha = alpha;
+      ctx.translate(cx, cy);
+      ctx.rotate(rot);
+      ctx.drawImage(
+        IMG.cursorBracket,
+        sx, 0, BRACKET.cellW, BRACKET.cellH,   // source rect
+        -ex, -ey, drawSize, drawSize            // dest: elbow lands on corner
+      );
+      ctx.restore();
+    }
+  } else {
+    // Fallback: plain strokeRect while sprite is loading
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = locked ? 5 : 3;
+    ctx.strokeRect(rectL, rectT, rectR - rectL, rectB - rectT);
+    ctx.restore();
+  }
 }
 
 function drawLockStamp(cx, cy, color) {
