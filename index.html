@@ -1086,6 +1086,7 @@ const ASSET_SRCS = {
   bgAurora:     "assets/bg_aurora.jpg",
   knightRed:    "assets/knight_red.png",
   knightBlue:   "assets/knight_blue.png",
+  knightAtlas:  "assets/knight_atlas.png",
   titleCrest:   "assets/title_crest.png",
   iconMega:     "assets/icon_mega.png",
   iconCounter:  "assets/icon_counter.png",
@@ -3939,6 +3940,25 @@ const SPRITE_W = 182, SPRITE_H = 256;
 const KNIGHT_DRAW_H = SPRITE_H * SPRITE_S;   // ~158.7px on-screen sprite height
 const KNIGHT_SEAT_TO_TOP = SEAT_FY * SPRITE_H * SPRITE_S; // ~101.6px seat->helm
 
+// ===== SPRITE ATLAS (iter 50) =====
+// Packed 6-col x 2-row atlas (assets/knight_atlas.png). Row 0 = red (p1),
+// row 1 = blue (p2). Cols = pose: 0 IDLE, 1 WINDUP, 2 STRIKE, 3 HIT-RECOIL,
+// 4 GUARD, 5 KO-FALL. Only IDLE/HIT/GUARD/FALL are rendered at runtime. Every
+// cell shares the SAME seat anchor (figures were aligned to it when packing),
+// so anchorFX/anchorFY are constant across cells. The packer chroma-keyed the
+// green source to RGBA + despilled the AA fringe. These constants come straight
+// from /tmp/atlas_pack.py's stdout. This block is PURE render metadata; it does
+// NOT touch panTip/bodyBox/SEAT_*/PAN_*/SPRITE_* hit geometry above.
+const ATLAS = { cols: 6, rows: 2, cellW: 315, cellH: 350, anchorFX: 0.5, anchorFY: 0.66 };
+// pose -> column. WINDUP/STRIKE exist in the sheet but are never drawn (the
+// swing is the rotating IDLE base; see drawKnight) so they get no enum here.
+const POSE = { IDLE: 0, HIT: 3, GUARD: 4, FALL: 5 };
+// On-screen draw scale for the atlas: match the proven sprite envelope. The
+// median USED figure is ~312px tall in-cell; KNIGHT_DRAW_H (~158.7px) is the
+// established on-screen height, so atlasScale = KNIGHT_DRAW_H / 312 ~= 0.51.
+const ATLAS_FIG_PX = 312;
+const ATLAS_SCALE = KNIGHT_DRAW_H / ATLAS_FIG_PX;  // ~0.509
+
 // World-space frying-pan TIP, computed from the seat pivot + swingAngle so it
 // tracks the rigidly-rotated sprite EXACTLY as drawn. Render order is:
 //   translate(k.x,k.y) · scale(f,1) · rotate(swingAngle)   [pivot = seat]
@@ -4348,7 +4368,7 @@ function snapKnight(k) {
     x: k.x, y: k.y, facing: k.facing,
     swingAngle: k.swingAngle, state: k.state,
     balance: k.balance, special: k.special, chosenSpecial: k.chosenSpecial,
-    tumble: k.tumble || 0, attackFlash: k.attackFlash,
+    tumble: k.tumble || 0, knockTimer: k.knockTimer, attackFlash: k.attackFlash,
     windupTimer: k.windupTimer, counterTimer: k.counterTimer,
     counterFlash: k.counterFlash, dashTimer: k.dashTimer,
     anchorTimer: k.anchorTimer, onGround: k.onGround,
@@ -4364,6 +4384,8 @@ function applyKnight(k, s) {
   k.swingAngle = s.swingAngle; k.state = s.state;
   k.balance = s.balance; k.special = s.special; k.chosenSpecial = s.chosenSpecial;
   k.tumble = s.tumble; k.attackFlash = s.attackFlash;
+  // knockTimer drives the HIT-RECOIL atlas frame; guard for pre-iter50 hosts.
+  k.knockTimer = (typeof s.knockTimer === "number") ? s.knockTimer : 0;
   k.windupTimer = s.windupTimer; k.counterTimer = s.counterTimer;
   k.counterFlash = s.counterFlash; k.dashTimer = s.dashTimer;
   k.anchorTimer = s.anchorTimer; k.onGround = s.onGround;
@@ -5083,52 +5105,62 @@ function drawKnight(k) {
   // pendulum swing rotates the whole figure about that seat — so the pan arcs
   // exactly where panTip() computes its hit point. facing flips P2 to face left.
   // A tiny seated bob/scoot shuffle is applied as a translate (the art stays rigid).
+  // small seated cues: idle breathing bob + scooting shuffle (translate only)
+  let bobY = 0, hipShift = 0;
+  if (k.state === ST.WALK) {
+    bobY = Math.abs(Math.sin(k.bob)) * 1.8;
+    hipShift = Math.sin(k.bob) * 3;
+  } else if (k.state === ST.IDLE) {
+    bobY = Math.sin(k.bob) * 1.2;
+  }
+
+  if (imgReady(IMG.knightAtlas)) {
+    // ===== ATLAS FRAME (iter 50) =====
+    // Pick the pose frame from NET-SNAPSHOT fields only (deterministic across
+    // online peers): FALLING -> KO-FALL; else a live hit (knockTimer>0) ->
+    // HIT-RECOIL; else GUARD; else IDLE. The IDLE frame is the SOLE rotating
+    // base — its pan is near-neutral, so rotate(drawSwing) is the one and only
+    // source of pan excursion (no double-counting vs panTip). HIT/GUARD/FALL are
+    // posed frames that are NOT swing-rotated (a victim/bracing/falling knight
+    // isn't mid-swing; FALL uses tumble only).
+    const row = (k.side === "p1") ? 0 : 1;
+    const pose = (k.state === ST.FALLING) ? POSE.FALL
+               : (k.knockTimer > 0)       ? POSE.HIT
+               : (k.state === ST.GUARD)   ? POSE.GUARD
+               :                            POSE.IDLE;
+    const sx = pose * ATLAS.cellW, sy = row * ATLAS.cellH;
+    const sw = ATLAS.cellW, sh = ATLAS.cellH;
+    const dw = ATLAS.cellW * ATLAS_SCALE, dh = ATLAS.cellH * ATLAS_SCALE;
+
+    ctx.save();
+    ctx.translate(k.x + hipShift, drawY + bobY);
+    ctx.scale(k.facing, 1);                 // mirror P2 to face left
+    if (pose === POSE.FALL) {
+      ctx.rotate(k.tumble || 0);            // tumble off the log
+    } else if (pose === POSE.IDLE) {
+      ctx.rotate(drawSwing);                // proven hit-coupled pendulum swing
+    }
+    ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
+    // place the shared seat anchor at the origin (= seat pivot at k.x,k.y)
+    ctx.drawImage(IMG.knightAtlas, sx, sy, sw, sh,
+                  -ATLAS.anchorFX * dw, -ATLAS.anchorFY * dh, dw, dh);
+    ctx.restore();
+    return;
+  }
+
+  // ===== FALLBACK: single posed sprite (atlas missing) =====
+  // Pre-iter45 clean path: rigid pendulum swing about the seat, no shear.
   const sprite = (k.side === "p1") ? IMG.knightRed : IMG.knightBlue;
   if (imgReady(sprite)) {
-    // small seated cues: idle breathing bob + scooting shuffle (translate only)
-    let bobY = 0, hipShift = 0;
-    if (k.state === ST.WALK) {
-      bobY = Math.abs(Math.sin(k.bob)) * 1.8;
-      hipShift = Math.sin(k.bob) * 3;
-    } else if (k.state === ST.IDLE) {
-      bobY = Math.sin(k.bob) * 1.2;
-    }
-
     const sw = sprite.naturalWidth, sh = sprite.naturalHeight;
     const dw = sw * SPRITE_S, dh = sh * SPRITE_S;
-
-    // Iter 45 SPRITE ANIMATION (programmatic): apply pose-shaping transforms to
-    // the single sprite based on combat state. SWING pose = forward lean +
-    // slight horizontal stretch (knight torquing into the strike); HIT REACTION
-    // = backward lean + vertical squash (knight rocking from impact). Physics
-    // state (k.y, k.swingAngle) untouched — pure render-side transform.
-    let leanX = 0, scaleX = 1, scaleY = 1;
-    if (k.knockTimer > 0 && k.state !== ST.FALLING) {
-      // hit reaction: lean opposite to swing (recoiling away), squash vertically
-      const intensity = Math.min(1, k.knockTimer / 0.30);
-      leanX = -0.18 * intensity;          // body shears backward
-      scaleY = 1 - 0.06 * intensity;      // compress vertically
-      scaleX = 1 + 0.04 * intensity;      // bulge horizontally
-    } else if (Math.abs(k.swingVel) > 4) {
-      // active swing: lean forward into the strike, stretch horizontally
-      const intensity = Math.min(1, (Math.abs(k.swingVel) - 4) / 6);
-      const dirSign = Math.sign(k.swingVel) || 1;
-      leanX = 0.14 * intensity * dirSign;  // body shears toward swing direction
-      scaleX = 1 + 0.05 * intensity;       // stretch horizontally
-      scaleY = 1 - 0.03 * intensity;       // slight vertical compression
-    }
-
     ctx.save();
     ctx.translate(k.x + hipShift, drawY + bobY);
     ctx.scale(k.facing, 1);                 // mirror P2 to face left
     if (k.state === ST.FALLING) ctx.rotate(k.tumble || 0); // tumble off the log
     ctx.rotate(drawSwing);                  // rigid pendulum swing about the seat
-    // Iter 45 pose shaping: shear + scale around the seat (already at origin)
-    if (leanX !== 0 || scaleX !== 1 || scaleY !== 1) {
-      ctx.transform(scaleX, 0, leanX, scaleY, 0, 0);
-    }
     ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
-    // place the seat anchor at the origin: shift so (SEAT_FX*sw, SEAT_FY*sh) -> 0,0
+    // place the seat anchor at the origin: shift so (SEAT_FX*sw, SEAT_FY*sh)->0,0
     ctx.drawImage(sprite, -SEAT_FX * dw, -SEAT_FY * dh, dw, dh);
     ctx.restore();
   }
