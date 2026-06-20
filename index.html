@@ -760,6 +760,12 @@ const CHARACTERS = [
     signatureSpecial:"counter", archetype:"TECHNIQUE",
     blurb:"鋭い受けと返し。間合いの支配者。",
     mul:{ maxSpeed:1.08, accel:1.10, swingImpulse:1.05, springK:1.15, hopV:1.05, knockScale:0.95 } },
+  { id:"ember", name:"エンバー", en:"EMBER KNIGHT", sprite:"knightEmber", portrait:"portraitEmber",
+    atlas:"knightEmberAtlas", atlasRow:0,
+    accent:"#ff7a2a", accentRGB:"205,100,35", badgeRGB:"160,76,28",
+    signatureSpecial:"quake", archetype:"BERSERKER",
+    blurb:"高火力・高速だが隙も大きい。攻めの化身。",
+    mul:{ maxSpeed:1.10, accel:1.12, swingImpulse:1.18, springK:0.82, hopV:1.0, knockScale:1.12 } },
 ];
 // charId -> character metadata (defaults to crimson on any unknown id, so a
 // stale/missing charId can never break a draw or a physics read).
@@ -1151,9 +1157,11 @@ const ASSET_SRCS = {
   knightBlue:   "assets/knight_blue.png",
   knightWarden: "assets/knight_warden.png",
   knightVesper: "assets/knight_vesper.png",
+  knightEmber:  "assets/knight_ember.png",
   knightAtlas:  "assets/knight_atlas.png",
   knightWardenAtlas: "assets/knight_warden_atlas.png",
   knightVesperAtlas: "assets/knight_vesper_atlas.png",
+  knightEmberAtlas:  "assets/knight_ember_atlas.png",
   titleCrest:   "assets/title_crest.png",
   iconMega:     "assets/icon_mega.png",
   iconCounter:  "assets/icon_counter.png",
@@ -1178,6 +1186,7 @@ const ASSET_SRCS = {
   portraitBlue:       "assets/portrait_blue.png",
   portraitWarden:     "assets/portrait_warden.png",
   portraitVesper:     "assets/portrait_vesper.png",
+  portraitEmber:      "assets/portrait_ember.png",
   vsEmblem:           "assets/vs_emblem.png",
   fightEmblem:        "assets/fight_emblem.png",
   koEmblem:           "assets/ko_emblem.png",
