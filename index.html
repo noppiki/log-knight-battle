@@ -1061,6 +1061,7 @@ function playEvent(ev) {
     case "spark":  _spawnSparks(ev.x, ev.y, ev.n, ev.color); break;
     case "dust":   _spawnDust(ev.x, ev.y); break;
     case "float":  _spawnFloater(ev.x, ev.y, ev.text, ev.color, ev.scale); break;
+    case "impact": _spawnImpact(ev.x, ev.y, ev.kind, ev.scale); break;
     case "shake":  { const a = ev.amt * shakeMul(); if (ev.big) _addBigShake(a); else _addShake(a); break; }
     case "sfx":    { const fn = SFX_MAP[ev.id]; if (fn) fn(); break; }
   }
@@ -1112,6 +1113,7 @@ const ASSET_SRCS = {
   fightEmblem:        "assets/fight_emblem.png",
   koEmblem:           "assets/ko_emblem.png",
   onomatopoeia:       "assets/onomatopoeia.png",
+  impactBurst:        "assets/impact_burst.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -2673,6 +2675,7 @@ function fullResetKnight(k) {
 // ----------------------------- EFFECTS -------------------------------
 const particles = [];   // {x,y,vx,vy,life,maxLife,size,color}
 const floaters = [];    // {x,y,vy,life,maxLife,text,color,scale}
+const impacts = [];     // {x,y,kind,scale,life,maxLife,rot} — sprite-based comic impact burst
 let shake = 0;          // current screen-shake magnitude
 
 // Per-stage ambient particle systems (behind log/knights, in front of parallax bg)
@@ -2720,6 +2723,19 @@ function _spawnFloater(x, y, text, color, scale) {
   const s = scale || 1;
   floaters.push({ x, y, vy: -42, life: 0, maxLife: s > 1 ? 1.1 : 0.85, text, color: color || PAL.bone, scale: s });
 }
+// Sprite-based comic impact burst at the point of contact. kind: 0 light / 1
+// heavy / 2 mega / 3 guard. rot is derived from x (NO Math.random) so host and
+// guest pick the same tilt without a serialized field.
+function _spawnImpact(x, y, kind, scale) {
+  impacts.push({
+    x, y,
+    kind: kind || 0,
+    scale: scale || (kind === 2 ? 1.3 : kind === 1 ? 0.95 : kind === 3 ? 0.8 : 0.7),
+    life: 0,
+    maxLife: kind === 2 ? 0.5 : 0.34,
+    rot: ((Math.round(x) % 7) - 3) * 0.12,
+  });
+}
 function _addShake(amount) { shake = Math.min(10, shake + amount * 0.6); }
 // Specials are allowed a much stronger, uncapped-by-the-normal-limit kick.
 function _addBigShake(amount) { shake = Math.min(24, Math.max(shake, amount)); }
@@ -2738,6 +2754,10 @@ function spawnDust(x, y) {
 function spawnFloater(x, y, text, color, scale) {
   _spawnFloater(x, y, text, color, scale);
   netRecord({ k: "float", x, y, text, color: color || PAL.bone, scale: scale || 1 });
+}
+function spawnImpact(x, y, kind, scale) {
+  _spawnImpact(x, y, kind, scale);
+  netRecord({ k: "impact", x, y, kind, scale });
 }
 function addShake(amount) {
   // Settings: scale by user's shake intensity preference (off=0, reduced=0.4, normal=1.0).
@@ -2770,6 +2790,11 @@ function updateEffects(dt) {
     if (f.life >= f.maxLife) { floaters.splice(i, 1); continue; }
     f.y += f.vy * dt;
     f.vy *= (1 - 1.5 * dt);
+  }
+  for (let i = impacts.length - 1; i >= 0; i--) {
+    const im = impacts[i];
+    im.life += dt;
+    if (im.life >= im.maxLife) { impacts.splice(i, 1); continue; }
   }
   if (shake > 0) {
     shake -= 48 * dt;
@@ -3064,6 +3089,7 @@ function enterVsSplash() {
   resetKnightPositions();
   particles.length = 0;
   floaters.length = 0;
+  impacts.length = 0;
   shake = 0;
   hitStopTimer = 0;
   clearKoSlowmo();
@@ -3075,6 +3101,7 @@ function startCountdown() {
   resetKnightPositions();
   particles.length = 0;
   floaters.length = 0;
+  impacts.length = 0;
   shake = 0;
   roundWinner = null;
   timeUpBanner = false;
@@ -3299,6 +3326,7 @@ function handleGlobalKey(code) {
       held.clear();
       particles.length = 0;
       floaters.length = 0;
+      impacts.length = 0;
       shake = 0;
       matchWinner = null; roundWinner = null;
       drawBanner = false; timeUpBanner = false;
@@ -4161,6 +4189,7 @@ function applyHit(attacker, target, tip) {
   const cx = tip.x, cy = tip.y;
   spawnSparks(cx, cy, guarding ? 10 : (mega ? 32 : (heavy ? 22 : 15)),
               guarding ? PAL.steel : (mega ? PAL.clash : PAL.spark));
+  spawnImpact(cx, cy, mega ? 2 : (guarding ? 3 : (heavy ? 1 : 0)));
   let words;
   if (mega) words = ["GWAAAN!", "SMASH!"];
   else if (guarding) words = ["CLANG!", "GUARD!"];
@@ -5175,6 +5204,40 @@ function drawParticles() {
     ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
   }
   ctx.globalAlpha = 1;
+}
+
+// Sprite-based comic IMPACT BURST sheet: 2 cols x 2 rows uniform grid (see
+// assets/impact_burst.png). kind index -> [row, col]: source rect is
+// sx = col*cellW, sy = row*cellH.
+//   0 = light spark-flash   1 = heavy star-burst
+//   2 = mega shockwave       3 = guard clash
+const IMPACT = { cols: 2, rows: 2, cellW: 641, cellH: 607 };
+const IMPACT_CELL = [[0, 0], [0, 1], [1, 0], [1, 1]];
+function drawImpacts() {
+  if (!imgReady(IMG.impactBurst)) return;   // sparks still play -> no regression
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";  // additive glow for the burst
+  ctx.imageSmoothingEnabled = true;
+  for (const im of impacts) {
+    const t = im.life / im.maxLife;
+    const alpha = Math.max(0, 1 - t * t);
+    // quick pop-in then settle; size scales with the burst kind's base scale.
+    const pop = 0.55 + 0.55 * Math.min(1, im.life / 0.07);
+    const sizeScale = im.scale * pop;
+    const dh = 110 * sizeScale;
+    const dw = dh * (IMPACT.cellW / IMPACT.cellH);
+    const cell = IMPACT_CELL[im.kind] || IMPACT_CELL[0];
+    const sx = cell[1] * IMPACT.cellW;
+    const sy = cell[0] * IMPACT.cellH;
+    ctx.globalAlpha = alpha;
+    ctx.translate(im.x, im.y);
+    ctx.rotate(im.rot);
+    ctx.drawImage(IMG.impactBurst, sx, sy, IMPACT.cellW, IMPACT.cellH,
+                  -dw / 2, -dh / 2, dw, dh);
+    ctx.rotate(-im.rot);
+    ctx.translate(-im.x, -im.y);
+  }
+  ctx.restore();   // restores globalCompositeOperation, globalAlpha, smoothing
 }
 
 function drawAmbientParticles() {
@@ -7008,7 +7071,8 @@ function render() {
   }
 
   drawParticles();
-  drawFloaters();
+  drawImpacts();    // sprite burst: in front of knights at the hit point...
+  drawFloaters();   // ...the onomatopoeia STAMP layers on TOP of the burst
 
   ctx.restore(); // end shake transform — UI must NOT jitter
 
