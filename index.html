@@ -1114,6 +1114,7 @@ const ASSET_SRCS = {
   koEmblem:           "assets/ko_emblem.png",
   onomatopoeia:       "assets/onomatopoeia.png",
   impactBurst:        "assets/impact_burst.png",
+  winPips:            "assets/win_pips.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -5405,16 +5406,34 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
   const lx = k.side === "p1" ? x : x + w;
   ctx.fillText(label, lx, y - 8);
 
-  // pips ●●○
-  const pipR = 6;
+  // pips — emblem sprites (empty socket / red gem / blue gem)
+  const WINPIP = { cols: 3, cellW: 496, cellH: 496 };
+  const pipSize = 18;   // on-screen diameter (px)
+  const pipStep = 22;   // center-to-center spacing
   for (let i = 0; i < TUNE.roundsToWin; i++) {
     const px = k.side === "p1"
-      ? x + w - 12 - i * 18
-      : x + 12 + i * 18;
-    ctx.beginPath();
-    ctx.arc(px, y - 13, pipR, 0, Math.PI * 2);
-    if (i < k.rounds) { ctx.fillStyle = pal.light; ctx.fill(); }
-    else { ctx.strokeStyle = PAL.steelDk; ctx.lineWidth = 2; ctx.stroke(); }
+      ? x + w - 13 - i * pipStep
+      : x + 13 + i * pipStep;
+    if (imgReady(IMG.winPips)) {
+      // cell 0=empty, 1=red gem (P1 win), 2=blue gem (P2 win)
+      const cell = (i < k.rounds) ? (k.side === "p1" ? 1 : 2) : 0;
+      const sx = cell * WINPIP.cellW;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(
+        IMG.winPips,
+        sx, 0, WINPIP.cellW, WINPIP.cellH,
+        px - pipSize / 2, (y - 13) - pipSize / 2,
+        pipSize, pipSize  // square cells so width === height
+      );
+      ctx.imageSmoothingEnabled = false;
+    } else {
+      // fallback: original arc circles until asset loads
+      const pipR = 6;
+      ctx.beginPath();
+      ctx.arc(px, y - 13, pipR, 0, Math.PI * 2);
+      if (i < k.rounds) { ctx.fillStyle = pal.light; ctx.fill(); }
+      else { ctx.strokeStyle = PAL.steelDk; ctx.lineWidth = 2; ctx.stroke(); }
+    }
   }
   ctx.textAlign = "left";
 }
