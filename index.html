@@ -119,18 +119,34 @@
     border-color: #d8a45a;
     color: #fff;
   }
-  .tb-l  { left: 14px;  bottom: 92px;  width: 76px;  height: 76px; }
-  .tb-r  { left: 100px; bottom: 92px;  width: 76px;  height: 76px; }
-  .tb-up { left: 14px;  bottom: 178px; width: 162px; height: 60px;  font-size: 18px; }
-  .tb-att{ right: 14px; bottom: 100px; width: 120px; height: 120px; font-size: 28px; }
-  .tb-sp { right: 142px; bottom: 100px; width: 84px;  height: 80px; font-size: 14px; }
-  .tb-gd { right: 142px; bottom: 188px; width: 84px;  height: 60px; font-size: 16px; }
+  /* Touch buttons add env(safe-area-inset-*) on top of their base px offset so
+     they never sit under the notch / home-indicator when the page uses
+     viewport-fit=cover. The 0px fallback keeps non-notch devices unchanged. */
+  .tb-l  { left: calc(14px + env(safe-area-inset-left, 0px));  bottom: calc(92px + env(safe-area-inset-bottom, 0px));  width: 76px;  height: 76px; }
+  .tb-r  { left: calc(100px + env(safe-area-inset-left, 0px)); bottom: calc(92px + env(safe-area-inset-bottom, 0px));  width: 76px;  height: 76px; }
+  .tb-up { left: calc(14px + env(safe-area-inset-left, 0px));  bottom: calc(178px + env(safe-area-inset-bottom, 0px)); width: 162px; height: 60px;  font-size: 18px; }
+  .tb-att{ right: calc(14px + env(safe-area-inset-right, 0px)); bottom: calc(100px + env(safe-area-inset-bottom, 0px)); width: 120px; height: 120px; font-size: 28px; }
+  .tb-sp { right: calc(142px + env(safe-area-inset-right, 0px)); bottom: calc(100px + env(safe-area-inset-bottom, 0px)); width: 84px;  height: 80px; font-size: 14px; }
+  .tb-gd { right: calc(142px + env(safe-area-inset-right, 0px)); bottom: calc(188px + env(safe-area-inset-bottom, 0px)); width: 84px;  height: 60px; font-size: 16px; }
   .tb-pause {
     left: 50%; transform: translateX(-50%);
-    top: 14px; width: 60px; height: 44px;
+    top: calc(14px + env(safe-area-inset-top, 0px)); width: 60px; height: 44px;
     font-size: 22px; letter-spacing: 4px;
     background: rgba(20,26,40,0.62);
     border-color: #4a5a7a;
+  }
+  /* Landscape with little vertical room (phones held sideways): the stacked
+     buttons (tb-up reaches bottom+height = 238px, tb-gd reaches 248px) plus the
+     bottom safe-area inset must stay within the viewport and clear of the top
+     HUD. Scale the clusters down and tighten the vertical stack so all six
+     buttons remain fully on-screen and tappable. */
+  @media (orientation: landscape) and (max-height: 430px) {
+    .tb-l  { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); width: 64px; height: 64px; }
+    .tb-r  { left: calc(86px + env(safe-area-inset-left, 0px)); bottom: calc(72px + env(safe-area-inset-bottom, 0px)); width: 64px; height: 64px; }
+    .tb-up { bottom: calc(144px + env(safe-area-inset-bottom, 0px)); width: 136px; height: 50px; font-size: 16px; }
+    .tb-att{ bottom: calc(76px + env(safe-area-inset-bottom, 0px)); width: 100px; height: 100px; font-size: 24px; }
+    .tb-sp { right: calc(120px + env(safe-area-inset-right, 0px)); bottom: calc(76px + env(safe-area-inset-bottom, 0px)); width: 76px; height: 68px; font-size: 13px; }
+    .tb-gd { right: calc(120px + env(safe-area-inset-right, 0px)); bottom: calc(150px + env(safe-area-inset-bottom, 0px)); width: 76px; height: 50px; font-size: 14px; }
   }
   body.show-touch.paused-mobile .tb:not(.tb-pause) { display: none; }
   /* ===== SETTINGS PANEL =====
