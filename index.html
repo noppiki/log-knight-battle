@@ -731,15 +731,29 @@ const SPECIALS = [
 //                       global so azure's lighter shove is still amplified normally)
 // Each character commits its signatureSpecial when picked. sprite/portrait/en
 // drive ALL appearance (f(charId), not f(side)); team COLOR stays side-based.
+// `atlas`/`atlasRow` route the sprite-atlas frame per CHARACTER (not per side):
+// crimson/azure SHARE knight_atlas (rows 0/1); warden has its own 1-row sheet.
+// `accent`/`accentRGB` drive the SELECT card's name/glow/badge so each knight
+// owns its palette (no red-vs-blue binary) — crimson red, azure blue, warden amber.
 const CHARACTERS = [
   { id:"crimson", name:"クリムゾン", en:"CRIMSON KNIGHT", sprite:"knightRed",  portrait:"portraitRed",
+    atlas:"knightAtlas", atlasRow:0,
+    accent:"#ff6b5e", accentRGB:"180,60,55", badgeRGB:"150,40,38",
     signatureSpecial:"mega", archetype:"POWER",
     blurb:"標準にして重厚。最強の一撃。",
     mul:{ maxSpeed:1.0, accel:1.0, swingImpulse:1.0, springK:1.0, hopV:1.0, knockScale:1.0 } },
   { id:"azure", name:"アジュール", en:"AZURE KNIGHT", sprite:"knightBlue", portrait:"portraitBlue",
+    atlas:"knightAtlas", atlasRow:1,
+    accent:"#6fb3ff", accentRGB:"60,110,200", badgeRGB:"40,80,170",
     signatureSpecial:"dash", archetype:"SPEED",
     blurb:"俊敏・軽量。手数とフットワーク。",
     mul:{ maxSpeed:1.18, accel:1.20, swingImpulse:0.90, springK:1.06, hopV:1.12, knockScale:0.85 } },
+  { id:"warden", name:"ウォーデン", en:"WARDEN KNIGHT", sprite:"knightWarden", portrait:"portraitWarden",
+    atlas:"knightWardenAtlas", atlasRow:0,
+    accent:"#e0a45a", accentRGB:"190,140,70", badgeRGB:"150,104,40",
+    signatureSpecial:"anchor", archetype:"TANK",
+    blurb:"鈍重だが難攻不落。踏ん張りの壁。",
+    mul:{ maxSpeed:0.85, accel:0.85, swingImpulse:1.10, springK:0.95, hopV:0.85, knockScale:1.18 } },
 ];
 // charId -> character metadata (defaults to crimson on any unknown id, so a
 // stale/missing charId can never break a draw or a physics read).
@@ -1129,7 +1143,9 @@ const ASSET_SRCS = {
   bgAurora:     "assets/bg_aurora.jpg",
   knightRed:    "assets/knight_red.png",
   knightBlue:   "assets/knight_blue.png",
+  knightWarden: "assets/knight_warden.png",
   knightAtlas:  "assets/knight_atlas.png",
+  knightWardenAtlas: "assets/knight_warden_atlas.png",
   titleCrest:   "assets/title_crest.png",
   iconMega:     "assets/icon_mega.png",
   iconCounter:  "assets/icon_counter.png",
@@ -1152,6 +1168,7 @@ const ASSET_SRCS = {
   sunRays:            "assets/sun_rays.png",
   portraitRed:        "assets/portrait_red.png",
   portraitBlue:       "assets/portrait_blue.png",
+  portraitWarden:     "assets/portrait_warden.png",
   vsEmblem:           "assets/vs_emblem.png",
   fightEmblem:        "assets/fight_emblem.png",
   koEmblem:           "assets/ko_emblem.png",
@@ -5248,7 +5265,13 @@ function drawKnight(k) {
     bobY = Math.sin(k.bob) * 1.2;
   }
 
-  if (imgReady(IMG.knightAtlas)) {
+  // Character-driven atlas routing: crimson/azure share knight_atlas (rows 0/1),
+  // warden uses its own knight_warden_atlas (row 0). Cells are 315x350 for every
+  // sheet so the SAME ATLAS consts (anchor/scale) apply unchanged. Fall through to
+  // the single-sprite path if the chosen character's atlas hasn't decoded yet.
+  const ch = charOf(k);
+  const atlasImg = IMG[ch.atlas] || IMG.knightAtlas;
+  if (imgReady(atlasImg)) {
     // ===== ATLAS FRAME (iter 50) =====
     // Pick the pose frame from NET-SNAPSHOT fields only (deterministic across
     // online peers): FALLING -> KO-FALL; else a live hit (knockTimer>0) ->
@@ -5257,9 +5280,10 @@ function drawKnight(k) {
     // source of pan excursion (no double-counting vs panTip). HIT/GUARD/FALL are
     // posed frames that are NOT swing-rotated (a victim/bracing/falling knight
     // isn't mid-swing; FALL uses tumble only).
-    // Atlas row is the CHARACTER's sprite row (crimson=row0/red, azure=row1/blue),
-    // NOT the side — so the chosen character's art is drawn regardless of slot.
-    const row = (charOf(k).sprite === "knightRed") ? 0 : 1;
+    // Atlas row is the CHARACTER's own row (crimson=row0, azure=row1 of the shared
+    // sheet; warden=row0 of its own sheet), NOT the side — so the chosen
+    // character's art is drawn regardless of slot.
+    const row = ch.atlasRow || 0;
     const pose = (k.state === ST.FALLING) ? POSE.FALL
                : (k.knockTimer > 0)       ? POSE.HIT
                : (k.state === ST.GUARD)   ? POSE.GUARD
@@ -5278,7 +5302,7 @@ function drawKnight(k) {
     }
     ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
     // place the shared seat anchor at the origin (= seat pivot at k.x,k.y)
-    ctx.drawImage(IMG.knightAtlas, sx, sy, sw, sh,
+    ctx.drawImage(atlasImg, sx, sy, sw, sh,
                   -ATLAS.anchorFX * dw, -ATLAS.anchorFY * dh, dw, dh);
     ctx.restore();
     return;
@@ -5932,9 +5956,19 @@ function drawCenterText(text, sub, big) {
 // tap target. With N=2 the cards are wide showcase panels (not the old narrow
 // 6-special strip). pitch = cardW + gap (step between card left edges).
 function selectCardLayout(N) {
-  const gap = 40, cardW = 300, cardH = 300;
+  // Dynamic so 3+ cards fit within VW (960) with side margin: N=2 keeps the
+  // proven 300px showcase cards; for N>=3 the card width shrinks to fit (capped
+  // at 300). drawSelect() and the mobile tap path both read this so the drawn
+  // rect always matches the tap target. Cards are square (cardH==cardW).
+  const gap = N >= 3 ? 24 : 40;
+  const margin = 80;                              // total horizontal breathing room
+  const maxCardW = (VW - margin - (N - 1) * gap) / N;
+  const cardW = Math.min(300, Math.floor(maxCardW));
+  const cardH = cardW;
   const totalW = N * cardW + (N - 1) * gap;
-  const x0 = (VW - totalW) / 2, y0 = 150;
+  const x0 = (VW - totalW) / 2;
+  // keep the grid roughly vertically centered; for smaller cards nudge down a bit
+  const y0 = 150 + Math.round((300 - cardH) * 0.35);
   return { gap, cardW, cardH, totalW, x0, y0, pitch: cardW + gap };
 }
 
@@ -5990,13 +6024,17 @@ function drawSelect() {
   const N = CHARACTERS.length;
   const { cardW, cardH, x0, y0, pitch } = selectCardLayout(N);
 
+  // Content was tuned for a 300px-tall card; `sc` scales every vertical offset so
+  // a shrunk card (N>=3) keeps the same layout proportions without clipping.
+  const sc = cardH / 300;
+  const Y = (off) => y0 + off * sc;   // helper: 300-tuned offset -> scaled card-Y
   for (let i = 0; i < N; i++) {
     const ch = CHARACTERS[i];
     const cx = x0 + i * pitch;
     const ccx = cx + cardW / 2;
     const p1Here = sel.p1.cursor === i;
     const p2Here = sel.p2.cursor === i;
-    const teamCol = ch.id === "crimson" ? PAL.redLight : PAL.bluLight;
+    const teamCol = ch.accent;   // per-character accent (red / blue / amber)
 
     // card backplate: reuse the Nordic carved-stone tablet sprite (procedural fallback)
     if (imgReady(IMG.cardFrame)) {
@@ -6014,15 +6052,16 @@ function drawSelect() {
 
     // === character bust (aspect-matched crop, head+shoulders) ===
     const portrait = IMG[ch.portrait];
-    const busW = 150, busH = 192;
-    const busX = ccx - busW / 2, busY = y0 + 18;
+    const busW = 150 * sc, busH = 192 * sc;
+    const busX = ccx - busW / 2, busY = Y(18);
     if (imgReady(portrait)) {
       ctx.save();
-      // soft team-colored backing glow so the bust reads against the tablet
-      ctx.fillStyle = ch.id === "crimson" ? "rgba(180,60,55,0.16)" : "rgba(60,110,200,0.16)";
+      // soft per-character backing glow so the bust reads against the tablet
+      ctx.fillStyle = `rgba(${ch.accentRGB},0.16)`;
       ctx.fillRect(busX - 6, busY - 4, busW + 12, busH + 4);
       ctx.imageSmoothingEnabled = true;
-      // portrait natives ~1151x1367; take a 620x794 window from the top centered
+      // portraits are normalized to 1151x1367; take a 620x794 window from the top
+      // centered (warden's bust is framed identically so this window lands the same)
       ctx.drawImage(portrait, 270, 0, 620, 794, busX, busY, busW, busH);
       ctx.imageSmoothingEnabled = false;
       ctx.restore();
@@ -6034,8 +6073,8 @@ function drawSelect() {
       ctx.textAlign = "left";
       ctx.font = '900 13px "Trebuchet MS", sans-serif';
       const padX = 8, badgeW = ctx.measureText(ch.archetype).width + padX * 2;
-      const bx = cx + 10, by = y0 + 12;
-      ctx.fillStyle = ch.id === "crimson" ? "rgba(150,40,38,0.92)" : "rgba(40,80,170,0.92)";
+      const bx = cx + 10, by = Y(12);
+      ctx.fillStyle = `rgba(${ch.badgeRGB},0.92)`;
       ctx.fillRect(bx, by, badgeW, 20);
       ctx.fillStyle = PAL.bone;
       ctx.fillText(ch.archetype, bx + padX, by + 15);
@@ -6046,17 +6085,17 @@ function drawSelect() {
     ctx.textAlign = "center";
     ctx.font = '900 27px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
-    ctx.strokeText(ch.name, ccx, y0 + 234);
+    ctx.strokeText(ch.name, ccx, Y(234));
     ctx.fillStyle = teamCol;
-    ctx.fillText(ch.name, ccx, y0 + 234);
+    ctx.fillText(ch.name, ccx, Y(234));
     ctx.font = '800 13px "Trebuchet MS", sans-serif';
     ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText(ch.en, ccx, y0 + 252);
+    ctx.fillText(ch.en, ccx, Y(252));
 
     // === signature special (icon + name) ===
     {
       const sig = SPECIALS.find(s => s.id === ch.signatureSpecial) || SPECIALS[0];
-      const iconX = cx + 30, iconY = y0 + 282;
+      const iconX = cx + 30, iconY = Y(282);
       drawSpecialIcon(sig.id, iconX, iconY, 22);
       ctx.textAlign = "left";
       ctx.font = '700 11px "Trebuchet MS", sans-serif';
@@ -6068,15 +6107,16 @@ function drawSelect() {
     }
 
     // === stat bars (derived from the character's multipliers; crimson=baseline) ===
-    // Normalize each mul into a 0..1 fill across the two characters' range so the
+    // Normalize each mul into a 0..1 fill across the FULL roster range so the
     // contrast is legible. SPD=maxSpeed, PWR=swingImpulse, WT(weight)=knockScale
-    // (heavier knight shoves harder => bigger knockScale => fuller WT bar).
+    // (heavier knight shoves harder => bigger knockScale => fuller WT bar). Ranges
+    // span warden's TANK extremes (slow/heavy) and azure's SPEED extremes.
     {
       const sx = cx + cardW - 124, sw = 110;
       const norm = (v, lo, hi) => (v - lo) / (hi - lo);
-      drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.95, 1.20), sx, y0 + 280, sw, "#6fd3ff");
-      drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.88, 1.02), sx, y0 + 296, sw, "#ff9b6a");
-      drawStatBar("WT",  norm(ch.mul.knockScale,   0.83, 1.02), sx, y0 + 312, sw, "#ffd66a");
+      drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.85, 1.18), sx, Y(280), sw, "#6fd3ff");
+      drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.90, 1.10), sx, Y(296), sw, "#ff9b6a");
+      drawStatBar("WT",  norm(ch.mul.knockScale,   0.85, 1.18), sx, Y(312), sw, "#ffd66a");
     }
 
     // P1 / P2 cursor highlights (team-colored brackets)
