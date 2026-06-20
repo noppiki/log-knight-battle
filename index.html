@@ -5959,26 +5959,35 @@ function drawCenterText(text, sub, big) {
   ctx.textAlign = "left";
 }
 
-// ===== SELECT screen: pick one special per player, Nordic chunky-pixel HUD =====
-// Shared card geometry for the CHARACTER SELECT grid. drawSelect() and the
-// mobile tap hit-test both read this so a card's drawn rect EXACTLY matches its
-// tap target. With N=2 the cards are wide showcase panels (not the old narrow
-// 6-special strip). pitch = cardW + gap (step between card left edges).
-function selectCardLayout(N) {
-  // Dynamic so 3+ cards fit within VW (960) with side margin: N=2 keeps the
-  // proven 300px showcase cards; for N>=3 the card width shrinks to fit (capped
-  // at 300). drawSelect() and the mobile tap path both read this so the drawn
-  // rect always matches the tap target. Cards are square (cardH==cardW).
-  const gap = N >= 3 ? 24 : 40;
-  const margin = 80;                              // total horizontal breathing room
-  const maxCardW = (VW - margin - (N - 1) * gap) / N;
-  const cardW = Math.min(300, Math.floor(maxCardW));
-  const cardH = cardW;
-  const totalW = N * cardW + (N - 1) * gap;
-  const x0 = (VW - totalW) / 2;
-  // keep the grid roughly vertically centered; for smaller cards nudge down a bit
-  const y0 = 150 + Math.round((300 - cardH) * 0.35);
-  return { gap, cardW, cardH, totalW, x0, y0, pitch: cardW + gap };
+// ===== SELECT screen: ROSTER UI — shared icon strip + dual hero previews =====
+// Geometry for the centered character ICON STRIP. drawSelect() and the mobile
+// tap hit-test BOTH read this (single source of truth) so a drawn emblem's rect
+// EXACTLY matches its tap target. The strip is N-driven: each emblem is a small
+// square head/bust tile sized so the row stays centered within VW. At N=4 it is
+// roomy; the emblem size shrinks gracefully as N grows so 5/6 characters fit the
+// same band later (the flanking hero previews are tuned for the current N=4).
+// Returns an array of {x,y,w,h} emblem rects (index i == CHARACTERS[i]).
+// Hero preview panels occupy panX=24,panW=300 on each side; keep these in sync
+// with drawHeroPreview so the strip is clamped to the clear band BETWEEN them.
+const HERO_PANEL_X = 24, HERO_PANEL_W = 300;
+function rosterIconRects(N) {
+  const gap = 14;                                  // horizontal gap between emblems
+  // Clear band between the two hero panels (derived, not magic) + a small inset
+  // so an emblem (and its outset P1 bracket) never overlaps a preview panel.
+  const bandL = HERO_PANEL_X + HERO_PANEL_W + 10;        // 334
+  const bandR = (VW - HERO_PANEL_X - HERO_PANEL_W) - 10; // 626
+  const bandW = bandR - bandL;                            // ~292
+  const ideal = 96;                                // preferred emblem edge
+  const fitW = (bandW - (N - 1) * gap) / N;
+  const size = Math.max(44, Math.min(ideal, Math.floor(fitW)));
+  const totalW = N * size + (N - 1) * gap;
+  const x0 = bandL + (bandW - totalW) / 2;         // center within the band
+  const y = 250;                                   // top of the emblem band (center-ish)
+  const rects = [];
+  for (let i = 0; i < N; i++) {
+    rects.push({ x: x0 + i * (size + gap), y, w: size, h: size });
+  }
+  return rects;
 }
 
 // Tiny labeled stat bar (0..1 fill) used on the character cards. `sc` (card scale,
@@ -6001,6 +6010,170 @@ function drawStatBar(label, frac, x, y, w, color, sc = 1) {
   ctx.lineWidth = 1;
   ctx.strokeRect(barX + 0.5, y - barH + 1.5, barW - 1, barH - 1);
   ctx.restore();
+}
+
+// === Strip emblem: head/bust crop of a character portrait into a framed tile ===
+// Reuses the iter-48 HUD head-crop window (top ~32% of the portrait) so the
+// emblem reads as a face/helm. `frameCol` is the neutral/accent ring color.
+// imgReady-guarded: a mid-load frame draws a colored fallback tile, never throws.
+function drawRosterEmblem(ch, r, frameCol) {
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+  const portrait = IMG[ch.portrait];
+  // soft per-character backing glow so the emblem pops off the dim overlay
+  ctx.save();
+  ctx.fillStyle = `rgba(${ch.accentRGB},0.22)`;
+  ctx.fillRect(r.x - 3, r.y - 3, r.w + 6, r.h + 6);
+  ctx.restore();
+  if (imgReady(portrait)) {
+    const sw = portrait.naturalWidth, sh = portrait.naturalHeight;
+    const srcSize = Math.min(sw, sh * 0.34);       // top head+helm window
+    const sx = (sw - srcSize) / 2, sy = 0;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);                   // rounded-tile via clip rect
+    ctx.clip();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(portrait, sx, sy, srcSize, srcSize, r.x, r.y, r.w, r.h);
+    ctx.imageSmoothingEnabled = false;
+    ctx.restore();
+  } else {
+    // fallback colored tile + name initial so identity still reads while loading
+    ctx.save();
+    ctx.fillStyle = `rgba(${ch.accentRGB},0.6)`;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.fillStyle = PAL.bone;
+    ctx.textAlign = "center";
+    ctx.font = `900 ${Math.round(r.h * 0.4)}px "Trebuchet MS", sans-serif`;
+    ctx.fillText(ch.en.charAt(0), cx, cy + r.h * 0.14);
+    ctx.restore();
+  }
+  // thin Nordic frame around the tile
+  ctx.save();
+  ctx.strokeStyle = frameCol;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(r.x + 1.5, r.y + 1.5, r.w - 3, r.h - 3);
+  ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+  ctx.restore();
+}
+
+// === Large hero PREVIEW panel for one player's focused character. ===
+// `side` = "p1" (left, name left-aligned) | "p2" (right, name right-aligned).
+// Driven entirely by CHARACTERS[cursor]; updates live as the cursor/CPU walks.
+function drawHeroPreview(ch, side, locked, isCpu) {
+  const left = side === "p1";
+  const panW = 300, panH = 360;
+  const panX = left ? 24 : VW - 24 - panW;
+  const panY = 150;
+  const teamCol = ch.accent;
+  const align = left ? "left" : "right";
+  const tx = left ? panX + 18 : panX + panW - 18;   // text origin (edge-aligned)
+
+  ctx.save();
+  // panel backplate: dark Nordic slab with an accent top rail + locked amber wash
+  ctx.fillStyle = "rgba(10,14,24,0.72)";
+  ctx.fillRect(panX, panY, panW, panH);
+  ctx.fillStyle = `rgba(${ch.accentRGB},0.9)`;
+  ctx.fillRect(panX, panY, panW, 5);
+  if (locked) {
+    ctx.fillStyle = "rgba(231,163,107,0.10)";       // subtle amber "locked" wash
+    ctx.fillRect(panX, panY, panW, panH);
+  }
+  ctx.strokeStyle = locked ? PAL.sunGlow : `rgba(${ch.accentRGB},0.7)`;
+  ctx.lineWidth = locked ? 3 : 2;
+  ctx.strokeRect(panX + 1, panY + 1, panW - 2, panH - 2);
+  ctx.restore();
+
+  // large portrait bust (head+shoulders), anchored to the panel's inner edge
+  const portrait = IMG[ch.portrait];
+  const busW = 150, busH = 192;
+  const busX = left ? panX + panW - busW - 14 : panX + 14;
+  const busY = panY + 40;
+  if (imgReady(portrait)) {
+    ctx.save();
+    ctx.fillStyle = `rgba(${ch.accentRGB},0.14)`;
+    ctx.fillRect(busX - 6, busY - 4, busW + 12, busH + 4);
+    ctx.imageSmoothingEnabled = true;
+    // same 620x794 top window the old card used (portraits normalized 1151x1367)
+    ctx.drawImage(portrait, 270, 0, 620, 794, busX, busY, busW, busH);
+    ctx.imageSmoothingEnabled = false;
+    ctx.restore();
+  }
+
+  // archetype badge + CPU/LOCKED tag (top inner corner)
+  {
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.font = '900 13px "Trebuchet MS", sans-serif';
+    const padX = 8, badgeW = ctx.measureText(ch.archetype).width + padX * 2, badgeH = 20;
+    const bx = left ? panX + 14 : panX + panW - 14 - badgeW, by = panY + 16;
+    ctx.fillStyle = `rgba(${ch.badgeRGB},0.92)`;
+    ctx.fillRect(bx, by, badgeW, badgeH);
+    ctx.fillStyle = PAL.bone;
+    ctx.fillText(ch.archetype, bx + padX, by + badgeH * 0.75);
+    ctx.restore();
+  }
+  if (isCpu) {
+    ctx.save();
+    ctx.textAlign = align;
+    ctx.font = '900 13px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.bluLight;
+    ctx.fillText("CPU", tx, panY + 30);
+    ctx.restore();
+  }
+
+  // names (JP big in accent + EN small in amber)
+  ctx.textAlign = align;
+  ctx.font = '900 30px "Trebuchet MS", sans-serif';
+  ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+  ctx.strokeText(ch.name, tx, panY + 78);
+  ctx.fillStyle = teamCol;
+  ctx.fillText(ch.name, tx, panY + 78);
+  ctx.font = '800 14px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = PAL.skyAmber;
+  ctx.fillText(ch.en, tx, panY + 98);
+
+  // signature special (icon + label)
+  {
+    const sig = SPECIALS.find(s => s.id === ch.signatureSpecial) || SPECIALS[0];
+    const iconSz = 26;
+    const iconX = left ? panX + 18 + iconSz / 2 : panX + panW - 18 - iconSz / 2;
+    const iconY = panY + 134;
+    drawSpecialIcon(sig.id, iconX, iconY, iconSz);
+    const lblX = left ? iconX + iconSz / 2 + 8 : iconX - iconSz / 2 - 8;
+    ctx.textAlign = align;
+    ctx.font = '700 10px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = "#9aa6bd";
+    ctx.fillText("SIGNATURE", lblX, iconY - 6);
+    ctx.font = '900 14px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = PAL.bone;
+    ctx.fillText(sig.en, lblX, iconY + 11);
+  }
+
+  // stat bars (same norm ranges as the old card so values stay consistent)
+  {
+    const sw = 150, sx = left ? panX + 18 : panX + panW - 18 - sw;
+    const sy = panY + 168;
+    const norm = (v, lo, hi) => (v - lo) / (hi - lo);
+    drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.85, 1.18), sx, sy,      sw, "#6fd3ff", 1);
+    drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.90, 1.10), sx, sy + 18, sw, "#ff9b6a", 1);
+    drawStatBar("WT",  norm(ch.mul.knockScale,   0.85, 1.18), sx, sy + 36, sw, "#ffd66a", 1);
+  }
+
+  // blurb (wrapped to panel width, accent-tinted)
+  {
+    ctx.textAlign = align;
+    ctx.font = '600 14px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = "#cdd4e2";
+    const bx = left ? panX + 18 : panX + panW - 18;
+    ctx.fillText(ch.blurb, bx, panY + panH - 22);
+  }
+
+  // LOCKED stamp across the panel
+  if (locked) {
+    drawLockStamp(panX + panW / 2, panY + panH - 48, locked ? PAL.sunGlow : teamCol);
+  }
 }
 
 function drawSelect() {
@@ -6033,134 +6206,49 @@ function drawSelect() {
   }
   ctx.textAlign = "left";
 
-  // ---- 2-character card grid ----
   const N = CHARACTERS.length;
-  const { cardW, cardH, x0, y0, pitch } = selectCardLayout(N);
 
-  // Content was tuned for a 300px-tall card; `sc` scales every vertical offset so
-  // a shrunk card (N>=3) keeps the same layout proportions without clipping.
-  const sc = cardH / 300;
-  const Y = (off) => y0 + off * sc;   // helper: 300-tuned offset -> scaled card-Y
+  // ---- LEFT / RIGHT hero previews (focused character per player) ----
+  drawHeroPreview(charById(CHARACTERS[sel.p1.cursor].id), "p1", sel.p1.locked, false);
+  drawHeroPreview(charById(CHARACTERS[sel.p2.cursor].id), "p2", sel.p2.locked, gameMode === "1p");
+
+  // ---- CENTER icon strip (shared roster) ----
+  const rects = rosterIconRects(N);
   for (let i = 0; i < N; i++) {
     const ch = CHARACTERS[i];
-    const cx = x0 + i * pitch;
-    const ccx = cx + cardW / 2;
+    const r = rects[i];
     const p1Here = sel.p1.cursor === i;
     const p2Here = sel.p2.cursor === i;
-    const teamCol = ch.accent;   // per-character accent (red / blue / amber)
+    // frame: tint toward the focusing player's color; neutral otherwise
+    const frameCol = p1Here ? PAL.redLight : (p2Here ? PAL.bluLight : PAL.steelDk);
+    drawRosterEmblem(ch, r, frameCol);
 
-    // card backplate: reuse the Nordic carved-stone tablet sprite (procedural fallback)
-    if (imgReady(IMG.cardFrame)) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(IMG.cardFrame, cx - 4, y0 - 4, cardW + 8, cardH + 8);
-      ctx.imageSmoothingEnabled = false;
-    } else {
-      ctx.fillStyle = PAL.ink;
-      ctx.fillRect(cx - 4, y0 - 4, cardW + 8, cardH + 8);
-      ctx.fillStyle = "#202a40";
-      ctx.fillRect(cx, y0, cardW, cardH);
-      ctx.fillStyle = "#2e3a56";
-      ctx.fillRect(cx, y0, cardW, 6);
-    }
+    // cursor brackets on the emblem (P1 outset, P2 inset so both read if shared)
+    if (p1Here) drawCardOutline(r.x, r.y, r.w, r.h, PAL.redLight, sel.p1.locked, -3);
+    if (p2Here) drawCardOutline(r.x, r.y, r.w, r.h, PAL.bluLight, sel.p2.locked, 3);
 
-    // === character bust (aspect-matched crop, head+shoulders) ===
-    const portrait = IMG[ch.portrait];
-    const busW = 150 * sc, busH = 192 * sc;
-    const busX = ccx - busW / 2, busY = Y(18);
-    if (imgReady(portrait)) {
+    // player tags below the emblem when focused (offset so a shared pick shows both)
+    if (p1Here || p2Here) {
       ctx.save();
-      // soft per-character backing glow so the bust reads against the tablet
-      ctx.fillStyle = `rgba(${ch.accentRGB},0.16)`;
-      ctx.fillRect(busX - 6, busY - 4, busW + 12, busH + 4);
-      ctx.imageSmoothingEnabled = true;
-      // portraits are normalized to 1151x1367; take a 620x794 window from the top
-      // centered (warden's bust is framed identically so this window lands the same)
-      ctx.drawImage(portrait, 270, 0, 620, 794, busX, busY, busW, busH);
-      ctx.imageSmoothingEnabled = false;
+      ctx.font = '900 12px "Trebuchet MS", sans-serif';
+      ctx.lineWidth = 3; ctx.strokeStyle = PAL.ink;
+      const tagY = r.y + r.h + 16;
+      if (p1Here) {
+        ctx.textAlign = "left";
+        const lbl = sel.p1.locked ? "P1 ✓" : "P1";
+        ctx.strokeText(lbl, r.x - 2, tagY);
+        ctx.fillStyle = sel.p1.locked ? PAL.sunGlow : PAL.redLight;
+        ctx.fillText(lbl, r.x - 2, tagY);
+      }
+      if (p2Here) {
+        ctx.textAlign = "right";
+        const lbl = sel.p2.locked ? "✓ P2" : "P2";
+        ctx.strokeText(lbl, r.x + r.w + 2, tagY);
+        ctx.fillStyle = sel.p2.locked ? PAL.sunGlow : PAL.bluLight;
+        ctx.fillText(lbl, r.x + r.w + 2, tagY);
+      }
       ctx.restore();
     }
-
-    // === archetype badge (top-left of card) ===
-    // Font + padding scale by `sc` so the badge shrinks with the card (a fixed-px
-    // badge would overrun a narrowed N>=4 card and crowd the bust).
-    {
-      ctx.save();
-      ctx.textAlign = "left";
-      ctx.font = `900 ${Math.max(9, Math.round(13 * sc))}px "Trebuchet MS", sans-serif`;
-      const padX = Math.round(8 * sc), badgeW = ctx.measureText(ch.archetype).width + padX * 2;
-      const bx = cx + 10 * sc, by = Y(12), badgeH = Math.round(20 * sc);
-      ctx.fillStyle = `rgba(${ch.badgeRGB},0.92)`;
-      ctx.fillRect(bx, by, badgeW, badgeH);
-      ctx.fillStyle = PAL.bone;
-      ctx.fillText(ch.archetype, bx + padX, by + badgeH * 0.75);
-      ctx.restore();
-    }
-
-    // === names (JP big + EN small) — fonts scale by `sc` ===
-    ctx.textAlign = "center";
-    ctx.font = `900 ${Math.round(27 * sc)}px "Trebuchet MS", sans-serif`;
-    ctx.lineWidth = 4 * sc; ctx.strokeStyle = PAL.ink;
-    ctx.strokeText(ch.name, ccx, Y(234));
-    ctx.fillStyle = teamCol;
-    ctx.fillText(ch.name, ccx, Y(234));
-    ctx.font = `800 ${Math.round(13 * sc)}px "Trebuchet MS", sans-serif`;
-    ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText(ch.en, ccx, Y(252));
-
-    // === signature special (icon + name) — icon size, X-gutters and fonts scale
-    // by `sc`. At the N>=4 width the COUNTER STANCE label is the longest EN string,
-    // so scaling (not fixed px) is what keeps it from overrunning the stat block. ===
-    {
-      const sig = SPECIALS.find(s => s.id === ch.signatureSpecial) || SPECIALS[0];
-      const iconSz = Math.round(22 * sc);
-      const iconX = cx + 30 * sc, iconY = Y(282);
-      drawSpecialIcon(sig.id, iconX, iconY, iconSz);
-      ctx.textAlign = "left";
-      const tx = iconX + iconSz;
-      ctx.font = `700 ${Math.max(8, Math.round(11 * sc))}px "Trebuchet MS", sans-serif`;
-      ctx.fillStyle = "#9aa6bd";
-      ctx.fillText("SIGNATURE", tx, iconY - 6 * sc);
-      ctx.font = `900 ${Math.max(10, Math.round(15 * sc))}px "Trebuchet MS", sans-serif`;
-      ctx.fillStyle = PAL.bone;
-      ctx.fillText(sig.en, tx, iconY + 11 * sc);
-    }
-
-    // === stat bars (derived from the character's multipliers; crimson=baseline) ===
-    // Normalize each mul into a 0..1 fill across the FULL roster range so the
-    // contrast is legible. SPD=maxSpeed, PWR=swingImpulse, WT(weight)=knockScale
-    // (heavier knight shoves harder => bigger knockScale => fuller WT bar). Ranges
-    // span warden's TANK extremes (slow/heavy) and azure's SPEED extremes.
-    // The block's WIDTH and X-origin scale by `sc` too (a fixed 124/110px block
-    // would collide with the signature label on a narrowed N>=4 card).
-    {
-      const sw = Math.round(110 * sc);
-      const sx = cx + cardW - Math.round(124 * sc);
-      const norm = (v, lo, hi) => (v - lo) / (hi - lo);
-      drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.85, 1.18), sx, Y(280), sw, "#6fd3ff", sc);
-      drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.90, 1.10), sx, Y(296), sw, "#ff9b6a", sc);
-      drawStatBar("WT",  norm(ch.mul.knockScale,   0.85, 1.18), sx, Y(312), sw, "#ffd66a", sc);
-    }
-
-    // P1 / P2 cursor highlights (team-colored brackets)
-    if (p1Here) drawCardOutline(cx, y0, cardW, cardH, PAL.redLight, sel.p1.locked, -3);
-    if (p2Here) drawCardOutline(cx, y0, cardW, cardH, PAL.bluLight, sel.p2.locked, 3);
-
-    // "CPU" badge on the P2-hovered card (1p)
-    if (p2Here && gameMode === "1p") {
-      ctx.save();
-      ctx.textAlign = "center";
-      ctx.font = '900 13px "Trebuchet MS", sans-serif';
-      const bcx = cx + cardW - 34, bby = y0 + 6, bbw = 46, bbh = 18;
-      ctx.fillStyle = PAL.ink;
-      ctx.fillRect(bcx - bbw / 2, bby, bbw, bbh);
-      ctx.fillStyle = PAL.bluLight;
-      ctx.fillText("CPU", bcx, bby + 14);
-      ctx.restore();
-    }
-
-    // LOCKED stamps (offset so both can stack on one card in a mirror pick)
-    if (p1Here && sel.p1.locked) drawLockStamp(ccx - 40, y0 + cardH - 28, PAL.redLight);
-    if (p2Here && sel.p2.locked) drawLockStamp(ccx + 40, y0 + cardH - 28, PAL.bluLight);
   }
 
   // footer / prompt
@@ -7245,21 +7333,21 @@ canvas.addEventListener("click", (e) => {
   }
 
   // ===== SELECT: tap-to-pick for P1 (one tap = move cursor + lock) =====
-  // Card geometry matches drawSelectScreen: gap=15, cardW=135, cardH=240, y0=158.
-  // Tapping an already-locked card of the same index: UNLOCK (toggle).
-  // Tapping a different card while locked: silently unlock, move, re-lock in one gesture.
+  // Hit rects come from rosterIconRects (the SAME helper drawSelect uses for the
+  // icon strip) so a tapped emblem's rect EXACTLY matches what's drawn.
+  // Tapping an already-locked emblem of the same index: UNLOCK (toggle).
+  // Tapping a different emblem while locked: silently unlock, move, re-lock in one gesture.
   // Online guest's P2 selection still uses keyboard this iteration (KNOWN LIMITATION —
   // guest controls sel.p2 via host-authoritative snapshot; tap driving sel.p1 on the
   // guest side would mismatch. Will be addressed in mobile iter 3.)
   // Guard: if readyTimer > 0 both players are locked and countdown is running — ignore tap.
   if (gameState === GS.SELECT) {
     if (sel.readyTimer > 0) return;   // READY beat in progress: freeze input
-    const N = CHARACTERS.length;   // 2 CHARACTER cards now
-    const layout = selectCardLayout(N);
-    const { cardW, cardH, x0, y0, pitch } = layout;
+    const N = CHARACTERS.length;
+    const rects = rosterIconRects(N);
     for (let i = 0; i < N; i++) {
-      const cx = x0 + i * pitch;
-      if (mx >= cx && mx <= cx + cardW && my >= y0 && my <= y0 + cardH) {
+      const r = rects[i];
+      if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) {
         if (sel.p1.locked && sel.p1.cursor === i) {
           // Tap same locked card => UNLOCK
           sel.p1.locked = false;
