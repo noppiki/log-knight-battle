@@ -1116,6 +1116,7 @@ const ASSET_SRCS = {
   impactBurst:        "assets/impact_burst.png",
   winPips:            "assets/win_pips.png",
   cursorBracket:      "assets/cursor_bracket.png",
+  timerDigits:        "assets/timer_digits.png",
 };
 const IMG = {};
 let assetsLoaded = 0;
@@ -1143,6 +1144,11 @@ const BRACKET = {
   elbowFX: 0,     // elbow corner offset as fraction of cellW (≈0, content starts at pad)
   elbowFY: 0,     // elbow corner offset as fraction of cellH (≈0, content starts at pad)
 };
+
+// Carved-stone timer digit sprite layout constants.
+// timer_digits.png: 5 cols × 2 rows, row-major (digit D: row=Math.floor(D/5), col=D%5).
+// Baseline-aligned (bottom-padded) so all 10 glyphs share a common baseline within each cell.
+const TDIG = { cols: 5, rows: 2, cellW: 240, cellH: 390 };
 
 // The below-canvas hint strip reflects the current mode (P2 = CPU in 1p).
 const hintEl = document.getElementById("hint");
@@ -5709,20 +5715,58 @@ function drawRoundTimer() {
     }
   }
 
-  // numerals
+  // numerals — carved-stone pixel sprites when loaded, fallback to Trebuchet text
   ctx.save();
-  ctx.textAlign = "center";
-  ctx.font = '900 40px "Trebuchet MS", sans-serif';
-  ctx.lineWidth = 6; ctx.strokeStyle = PAL.ink;
-  const col = urgent ? (blink ? "#ff5a5a" : "#ff9090") : PAL.bone;
-  const cyT = by + h / 2 + 14;
-  ctx.strokeText(label, cx, cyT);
-  ctx.fillStyle = col;
-  ctx.fillText(label, cx, cyT);
-  // tiny "TIME" caption
-  ctx.font = '700 11px "Trebuchet MS", sans-serif';
-  ctx.fillStyle = urgent ? "#e08a8a" : PAL.steelDk;
-  ctx.fillText("TIME", cx, by + 14);
+  if (imgReady(IMG.timerDigits)) {
+    // Target glyph draw height on screen; cells are 240×390, so dw = dh*(240/390)
+    const dh = 34;
+    const dw = Math.round(dh * (TDIG.cellW / TDIG.cellH));
+    const gap = 3;  // gap between the two digit glyphs
+    const totalW = 2 * dw + gap;
+    const startX = cx - totalW / 2;
+    // Center the glyph block vertically in the plaque; bias 1px down to match Trebuchet position
+    const dy = (by + h / 2) - dh / 2 + 2;
+
+    // Urgent: soft red glow behind the numeral block (danger cue — stone digits stay neutral)
+    if (urgent) {
+      ctx.fillStyle = `rgba(255,60,40,${blink ? 0.30 : 0.16})`;
+      const glowPad = 5;
+      ctx.fillRect(startX - glowPad, dy - glowPad, totalW + glowPad * 2, dh + glowPad * 2);
+    }
+
+    // Draw each of the 2 digit glyphs
+    ctx.imageSmoothingEnabled = true;
+    for (let i = 0; i < 2; i++) {
+      const digit = label.charCodeAt(i) - 48;
+      const sRow = Math.floor(digit / 5);
+      const sCol = digit % 5;
+      const sx = sCol * TDIG.cellW;
+      const sy = sRow * TDIG.cellH;
+      const drawX = startX + i * (dw + gap);
+      ctx.drawImage(IMG.timerDigits, sx, sy, TDIG.cellW, TDIG.cellH, drawX, dy, dw, dh);
+    }
+    ctx.imageSmoothingEnabled = false;
+
+    // tiny "TIME" caption (always drawn)
+    ctx.textAlign = "center";
+    ctx.font = '700 11px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = urgent ? "#e08a8a" : PAL.steelDk;
+    ctx.fillText("TIME", cx, by + 14);
+  } else {
+    // FALLBACK: original Trebuchet MS numerals (used if sprite sheet not yet loaded)
+    ctx.textAlign = "center";
+    ctx.font = '900 40px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 6; ctx.strokeStyle = PAL.ink;
+    const col = urgent ? (blink ? "#ff5a5a" : "#ff9090") : PAL.bone;
+    const cyT = by + h / 2 + 14;
+    ctx.strokeText(label, cx, cyT);
+    ctx.fillStyle = col;
+    ctx.fillText(label, cx, cyT);
+    // tiny "TIME" caption
+    ctx.font = '700 11px "Trebuchet MS", sans-serif';
+    ctx.fillStyle = urgent ? "#e08a8a" : PAL.steelDk;
+    ctx.fillText("TIME", cx, by + 14);
+  }
   ctx.restore();
   ctx.textAlign = "left";
 }
