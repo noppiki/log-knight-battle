@@ -754,6 +754,12 @@ const CHARACTERS = [
     signatureSpecial:"anchor", archetype:"TANK",
     blurb:"鈍重だが難攻不落。踏ん張りの壁。",
     mul:{ maxSpeed:0.85, accel:0.85, swingImpulse:1.10, springK:0.95, hopV:0.85, knockScale:1.18 } },
+  { id:"vesper", name:"ヴェスパー", en:"VESPER KNIGHT", sprite:"knightVesper", portrait:"portraitVesper",
+    atlas:"knightVesperAtlas", atlasRow:0,
+    accent:"#b98cff", accentRGB:"151,114,209", badgeRGB:"114,86,158",
+    signatureSpecial:"counter", archetype:"TECHNIQUE",
+    blurb:"鋭い受けと返し。間合いの支配者。",
+    mul:{ maxSpeed:1.08, accel:1.10, swingImpulse:1.05, springK:1.15, hopV:1.05, knockScale:0.95 } },
 ];
 // charId -> character metadata (defaults to crimson on any unknown id, so a
 // stale/missing charId can never break a draw or a physics read).
@@ -1144,8 +1150,10 @@ const ASSET_SRCS = {
   knightRed:    "assets/knight_red.png",
   knightBlue:   "assets/knight_blue.png",
   knightWarden: "assets/knight_warden.png",
+  knightVesper: "assets/knight_vesper.png",
   knightAtlas:  "assets/knight_atlas.png",
   knightWardenAtlas: "assets/knight_warden_atlas.png",
+  knightVesperAtlas: "assets/knight_vesper_atlas.png",
   titleCrest:   "assets/title_crest.png",
   iconMega:     "assets/icon_mega.png",
   iconCounter:  "assets/icon_counter.png",
@@ -1169,6 +1177,7 @@ const ASSET_SRCS = {
   portraitRed:        "assets/portrait_red.png",
   portraitBlue:       "assets/portrait_blue.png",
   portraitWarden:     "assets/portrait_warden.png",
+  portraitVesper:     "assets/portrait_vesper.png",
   vsEmblem:           "assets/vs_emblem.png",
   fightEmblem:        "assets/fight_emblem.png",
   koEmblem:           "assets/ko_emblem.png",
@@ -5972,14 +5981,18 @@ function selectCardLayout(N) {
   return { gap, cardW, cardH, totalW, x0, y0, pitch: cardW + gap };
 }
 
-// Tiny labeled stat bar (0..1 fill) used on the character cards.
-function drawStatBar(label, frac, x, y, w, color) {
+// Tiny labeled stat bar (0..1 fill) used on the character cards. `sc` (card scale,
+// 1.0 at the N<=2 showcase size) shrinks the label font, label gutter and bar
+// height uniformly so a narrowed N>=4 card keeps the proven proportions and the
+// label never collides with the bar fill.
+function drawStatBar(label, frac, x, y, w, color, sc = 1) {
   ctx.save();
   ctx.textAlign = "left";
-  ctx.font = '700 11px "Trebuchet MS", sans-serif';
+  ctx.font = `700 ${Math.max(8, Math.round(11 * sc))}px "Trebuchet MS", sans-serif`;
   ctx.fillStyle = "#9aa6bd";
-  ctx.fillText(label, x, y - 3);
-  const barX = x + 34, barW = w - 34, barH = 8;
+  ctx.fillText(label, x, y - 3 * sc);
+  const lblGutter = Math.round(34 * sc);
+  const barX = x + lblGutter, barW = w - lblGutter, barH = Math.max(5, Math.round(8 * sc));
   ctx.fillStyle = "rgba(8,12,20,0.7)";
   ctx.fillRect(barX, y - barH + 1, barW, barH);
   ctx.fillStyle = color;
@@ -6068,42 +6081,48 @@ function drawSelect() {
     }
 
     // === archetype badge (top-left of card) ===
+    // Font + padding scale by `sc` so the badge shrinks with the card (a fixed-px
+    // badge would overrun a narrowed N>=4 card and crowd the bust).
     {
       ctx.save();
       ctx.textAlign = "left";
-      ctx.font = '900 13px "Trebuchet MS", sans-serif';
-      const padX = 8, badgeW = ctx.measureText(ch.archetype).width + padX * 2;
-      const bx = cx + 10, by = Y(12);
+      ctx.font = `900 ${Math.max(9, Math.round(13 * sc))}px "Trebuchet MS", sans-serif`;
+      const padX = Math.round(8 * sc), badgeW = ctx.measureText(ch.archetype).width + padX * 2;
+      const bx = cx + 10 * sc, by = Y(12), badgeH = Math.round(20 * sc);
       ctx.fillStyle = `rgba(${ch.badgeRGB},0.92)`;
-      ctx.fillRect(bx, by, badgeW, 20);
+      ctx.fillRect(bx, by, badgeW, badgeH);
       ctx.fillStyle = PAL.bone;
-      ctx.fillText(ch.archetype, bx + padX, by + 15);
+      ctx.fillText(ch.archetype, bx + padX, by + badgeH * 0.75);
       ctx.restore();
     }
 
-    // === names (JP big + EN small) ===
+    // === names (JP big + EN small) — fonts scale by `sc` ===
     ctx.textAlign = "center";
-    ctx.font = '900 27px "Trebuchet MS", sans-serif';
-    ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+    ctx.font = `900 ${Math.round(27 * sc)}px "Trebuchet MS", sans-serif`;
+    ctx.lineWidth = 4 * sc; ctx.strokeStyle = PAL.ink;
     ctx.strokeText(ch.name, ccx, Y(234));
     ctx.fillStyle = teamCol;
     ctx.fillText(ch.name, ccx, Y(234));
-    ctx.font = '800 13px "Trebuchet MS", sans-serif';
+    ctx.font = `800 ${Math.round(13 * sc)}px "Trebuchet MS", sans-serif`;
     ctx.fillStyle = PAL.skyAmber;
     ctx.fillText(ch.en, ccx, Y(252));
 
-    // === signature special (icon + name) ===
+    // === signature special (icon + name) — icon size, X-gutters and fonts scale
+    // by `sc`. At the N>=4 width the COUNTER STANCE label is the longest EN string,
+    // so scaling (not fixed px) is what keeps it from overrunning the stat block. ===
     {
       const sig = SPECIALS.find(s => s.id === ch.signatureSpecial) || SPECIALS[0];
-      const iconX = cx + 30, iconY = Y(282);
-      drawSpecialIcon(sig.id, iconX, iconY, 22);
+      const iconSz = Math.round(22 * sc);
+      const iconX = cx + 30 * sc, iconY = Y(282);
+      drawSpecialIcon(sig.id, iconX, iconY, iconSz);
       ctx.textAlign = "left";
-      ctx.font = '700 11px "Trebuchet MS", sans-serif';
+      const tx = iconX + iconSz;
+      ctx.font = `700 ${Math.max(8, Math.round(11 * sc))}px "Trebuchet MS", sans-serif`;
       ctx.fillStyle = "#9aa6bd";
-      ctx.fillText("SIGNATURE", iconX + 22, iconY - 6);
-      ctx.font = '900 15px "Trebuchet MS", sans-serif';
+      ctx.fillText("SIGNATURE", tx, iconY - 6 * sc);
+      ctx.font = `900 ${Math.max(10, Math.round(15 * sc))}px "Trebuchet MS", sans-serif`;
       ctx.fillStyle = PAL.bone;
-      ctx.fillText(sig.en, iconX + 22, iconY + 11);
+      ctx.fillText(sig.en, tx, iconY + 11 * sc);
     }
 
     // === stat bars (derived from the character's multipliers; crimson=baseline) ===
@@ -6111,12 +6130,15 @@ function drawSelect() {
     // contrast is legible. SPD=maxSpeed, PWR=swingImpulse, WT(weight)=knockScale
     // (heavier knight shoves harder => bigger knockScale => fuller WT bar). Ranges
     // span warden's TANK extremes (slow/heavy) and azure's SPEED extremes.
+    // The block's WIDTH and X-origin scale by `sc` too (a fixed 124/110px block
+    // would collide with the signature label on a narrowed N>=4 card).
     {
-      const sx = cx + cardW - 124, sw = 110;
+      const sw = Math.round(110 * sc);
+      const sx = cx + cardW - Math.round(124 * sc);
       const norm = (v, lo, hi) => (v - lo) / (hi - lo);
-      drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.85, 1.18), sx, Y(280), sw, "#6fd3ff");
-      drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.90, 1.10), sx, Y(296), sw, "#ff9b6a");
-      drawStatBar("WT",  norm(ch.mul.knockScale,   0.85, 1.18), sx, Y(312), sw, "#ffd66a");
+      drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.85, 1.18), sx, Y(280), sw, "#6fd3ff", sc);
+      drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.90, 1.10), sx, Y(296), sw, "#ff9b6a", sc);
+      drawStatBar("WT",  norm(ch.mul.knockScale,   0.85, 1.18), sx, Y(312), sw, "#ffd66a", sc);
     }
 
     // P1 / P2 cursor highlights (team-colored brackets)
