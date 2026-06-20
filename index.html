@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>LOG KNIGHT BATTLE</title>
   <meta name="google-site-verification" content="b306tn5Ygpi55O63qjlOxrVn_hs8rz2wgjdvd4FbpDE" />
   <!-- Google tag (gtag.js) — GA4 analytics -->
@@ -26,6 +26,11 @@
     overflow: hidden;
     font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
     color: #e8dcc0;
+    /* Disable double-tap-to-zoom on mobile while still allowing taps and
+       single-direction pans.  The play canvas and touchpad buttons use
+       touch-action:none (stricter); this covers everything else (title
+       screen, SELECT screen, etc.) so rapid taps never trigger zoom. */
+    touch-action: manipulation;
   }
   #stage {
     position: absolute;
@@ -2084,6 +2089,26 @@ const IS_MOBILE = ('ontouchstart' in window) ||
   // a held HIT button doesn't pop the OS "copy/paste" menu mid-fight.
   const pad = document.getElementById("touchpad");
   if (pad) pad.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // ── Mobile zoom guard (belt-and-suspenders) ──────────────────────────
+  // iOS Safari exposes non-standard gesturestart/change/end events for
+  // pinch-zoom. Preventing them blocks the gesture even on browsers that
+  // ignore user-scalable=no in the viewport meta.
+  ["gesturestart", "gesturechange", "gestureend"].forEach(function(ev) {
+    document.addEventListener(ev, function(e) { e.preventDefault(); }, { passive: false });
+  });
+
+  // Double-tap-to-zoom fallback: if a second tap lands within 300 ms of
+  // the first, preventDefault to suppress zoom.  Inputs (room-code field)
+  // are excluded so the keyboard / focus still works normally.
+  let _lastTouchEnd = 0;
+  document.addEventListener("touchend", function(e) {
+    if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+    const now = Date.now();
+    if (now - _lastTouchEnd <= 300) e.preventDefault();
+    _lastTouchEnd = now;
+  }, { passive: false });
+  // ─────────────────────────────────────────────────────────────────────
 
   // Safety: if the window loses focus mid-touch (incoming call, app switch,
   // backgrounded tab) every held-via-touch key should be released so the
