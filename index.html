@@ -1102,6 +1102,7 @@ const ASSET_SRCS = {
   modeSlab:     "assets/mode_slab.webp",
   restartBtn:   "assets/restart_btn.webp",
   gaugeFrame:   "assets/gauge_frame.webp",
+  gaugeFill:    "assets/gauge_fill.png",
   countdownMedallion: "assets/countdown_medallion.webp",
   snowLayer:          "assets/snow_layer.png",
   cloudsLayer:        "assets/clouds_layer.png",
@@ -5333,6 +5334,28 @@ function drawFloaters() {
 }
 
 // ---------------------------- UI (no shake) --------------------------
+// Glossy gauge-fill sprite layout. gauge_fill.png: 2×2 grid of horizontal
+// glossy bar fills (specular highlight upper third, saturated body).
+// cell map: life P1=[0,0], life P2=[0,1], sp charge=[1,0], sp full=[1,1].
+const GFILL = { cols: 2, rows: 2, cellW: 862, cellH: 381 };
+// Blit a textured gauge fill, revealing it by SOURCE-CROP (not stretch) so
+// the glossy texture aligns to the visible portion. P1 reveals from the left;
+// P2 reveals from the right (mirrored toward center).
+function drawGaugeFill(cellRow, cellCol, bx, by, bw, bh, fillW, sideP1) {
+  if (fillW <= 0) return;
+  const csx = cellCol * GFILL.cellW;
+  const csy = cellRow * GFILL.cellH;
+  let fracShown = bw > 0 ? fillW / bw : 0;
+  if (fracShown < 0) fracShown = 0; else if (fracShown > 1) fracShown = 1;
+  const srcW = Math.max(1, Math.round(GFILL.cellW * fracShown));
+  // P1: crop from the left edge; P2: crop from the right edge of the cell.
+  const sX = sideP1 ? csx : csx + (GFILL.cellW - srcW);
+  const destX = sideP1 ? bx : bx + (bw - fillW);
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(IMG.gaugeFill, sX, csy, srcW, GFILL.cellH, destX, by, fillW, bh);
+  ctx.restore();
+}
 function drawBalanceMeter(k, x, y, w, label, pal) {
   const h = 18;
   // life bar frame: Nordic stone sprite (with procedural fallback)
@@ -5349,14 +5372,30 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
   // fill proportional to balance
   const frac = k.balance / TUNE.balanceMax;
   const fillW = Math.max(0, Math.round(w * frac));
-  // color shifts to warning when low
-  let c = pal.body;
-  if (frac < 0.3) c = "#d44"; else if (frac < 0.55) c = pal.light;
-  // P2 fills from the right so meters mirror toward center
-  if (k.side === "p1") {
-    ctx.fillStyle = c; ctx.fillRect(x, y, fillW, h);
+  const sideP1 = k.side === "p1";
+  if (imgReady(IMG.gaugeFill)) {
+    // glossy textured fill, source-cropped so it reveals (not stretches).
+    const lifeCol = sideP1 ? 0 : 1;
+    drawGaugeFill(0, lifeCol, x, y, w, h, fillW, sideP1);
+    // low-balance danger: pulsing red wash OVER the team-colored texture
+    // (recoloring would fight the fixed texture hue), clipped to the fill rect.
+    if (frac < 0.3 && fillW > 0) {
+      const pulse = 0.20 + 0.22 * Math.sin(frameCount * 0.3);
+      const destX = sideP1 ? x : x + (w - fillW);
+      ctx.save();
+      ctx.fillStyle = "rgba(255,42,26," + Math.max(0, pulse).toFixed(3) + ")";
+      ctx.fillRect(destX, y, fillW, h);
+      ctx.restore();
+    }
   } else {
-    ctx.fillStyle = c; ctx.fillRect(x + (w - fillW), y, fillW, h);
+    // fallback: original flat-color fill (color shifts to warning when low)
+    let c = pal.body;
+    if (frac < 0.3) c = "#d44"; else if (frac < 0.55) c = pal.light;
+    if (sideP1) {
+      ctx.fillStyle = c; ctx.fillRect(x, y, fillW, h);
+    } else {
+      ctx.fillStyle = c; ctx.fillRect(x + (w - fillW), y, fillW, h);
+    }
   }
   // teetering balance marker (tilts with how off-center the knight is)
   const halfLog = logW / 2;
@@ -5387,11 +5426,17 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
   const spFrac = Math.max(0, Math.min(1, k.special / TUNE.spMax));
   const spW = Math.round(w * spFrac);
   const full = k.special >= TUNE.spMax && k.chosenSpecial;
-  // accent gradient color (distinct from the life bar): amber charging -> bright
-  let spCol = full ? PAL.sunGlow : PAL.skyAmber;
-  ctx.fillStyle = spCol;
-  if (k.side === "p1") ctx.fillRect(x, spY, spW, spH);
-  else ctx.fillRect(x + (w - spW), spY, spW, spH);
+  if (imgReady(IMG.gaugeFill)) {
+    // textured SP fill: amber while charging, gold cell when ready/full.
+    const spCol2 = full ? 1 : 0;   // col 1 = gold-ready, col 0 = amber-charge
+    drawGaugeFill(1, spCol2, x, spY, w, spH, spW, sideP1);
+  } else {
+    // fallback: original flat SP fill (amber charging -> bright when full)
+    let spCol = full ? PAL.sunGlow : PAL.skyAmber;
+    ctx.fillStyle = spCol;
+    if (sideP1) ctx.fillRect(x, spY, spW, spH);
+    else ctx.fillRect(x + (w - spW), spY, spW, spH);
+  }
   // tick at the full mark
   ctx.fillStyle = "rgba(0,0,0,0.4)";
   for (let t = 1; t < 4; t++) ctx.fillRect(x + Math.round(w * t / 4), spY, 1, spH);
