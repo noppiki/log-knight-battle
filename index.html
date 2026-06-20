@@ -713,6 +713,48 @@ const SPECIALS = [
   { id: "whirl",   name: "旋風斬り",         en: "WHIRLWIND",     fx: "Spin attack: pan multi-hits a foe in range." },
 ];
 
+// ===== PLAYABLE CHARACTERS (iter 57: CHARACTER SELECT) =====
+// Two selectable knights. crimson is the EXACT 1.0 baseline: with crimson all
+// per-knight multipliers are 1.0, so its feel is byte-identical to the pre-
+// character-select tuning. azure is the differentiated SPEED archetype (faster,
+// floatier, lighter swing + deals less knockback). Multipliers are bounded
+// dynamics-only deltas (~±20%), applied at read-time at the knight's OWN self-
+// physics sites (exactly the cpuMul() pattern). They are NEVER applied to hit
+// geometry, shared thresholds, or comeback/edge math (those stay GLOBAL).
+//   mul.maxSpeed     -> player-driven speed clamp (self)
+//   mul.accel        -> ground move acceleration (self)
+//   mul.hopV         -> hop/jump launch velocity (self)
+//   mul.swingImpulse -> per-tap angular impulse (self)
+//   mul.springK      -> pendulum torsional stiffness (self)
+//   mul.knockScale   -> ATTACKER-LOCAL seat-knock impulse base (in applyHit, on the
+//                       attacker; downstream low-balance/guard/anchor/edge mults stay
+//                       global so azure's lighter shove is still amplified normally)
+// Each character commits its signatureSpecial when picked. sprite/portrait/en
+// drive ALL appearance (f(charId), not f(side)); team COLOR stays side-based.
+const CHARACTERS = [
+  { id:"crimson", name:"クリムゾン", en:"CRIMSON KNIGHT", sprite:"knightRed",  portrait:"portraitRed",
+    signatureSpecial:"mega", archetype:"POWER",
+    blurb:"標準にして重厚。最強の一撃。",
+    mul:{ maxSpeed:1.0, accel:1.0, swingImpulse:1.0, springK:1.0, hopV:1.0, knockScale:1.0 } },
+  { id:"azure", name:"アジュール", en:"AZURE KNIGHT", sprite:"knightBlue", portrait:"portraitBlue",
+    signatureSpecial:"dash", archetype:"SPEED",
+    blurb:"俊敏・軽量。手数とフットワーク。",
+    mul:{ maxSpeed:1.18, accel:1.20, swingImpulse:0.90, springK:1.06, hopV:1.12, knockScale:0.85 } },
+];
+// charId -> character metadata (defaults to crimson on any unknown id, so a
+// stale/missing charId can never break a draw or a physics read).
+function charOf(k) { return CHARACTERS.find(c => c.id === k.charId) || CHARACTERS[0]; }
+function charById(id) { return CHARACTERS.find(c => c.id === id) || CHARACTERS[0]; }
+// Commit a character onto a knight from a SELECT cursor index. Single source of
+// truth for every lock site (keyboard / CPU / guest / mobile) so the migration
+// can never go partial: charId + cmul + chosenSpecial are always set together.
+function commitCharacter(k, cursor) {
+  const c = CHARACTERS[((cursor % CHARACTERS.length) + CHARACTERS.length) % CHARACTERS.length];
+  k.charId = c.id;
+  k.cmul = c.mul;
+  k.chosenSpecial = c.signatureSpecial;
+}
+
 // Stage variants: four Nordic-themed backgrounds randomized per match (not per
 // round, so all rounds of one match share the same scene). drawBackground reads
 // STAGES[currentStageIndex].imgKey out of IMG[]. The match-entry point
@@ -2600,9 +2642,12 @@ const ST = {
   ATTACK: "attack", GUARD: "guard", FALLING: "falling",
 };
 
-function makeKnight(side) {
+function makeKnight(side, charId) {
+  const baseChar = charById(charId);
   return {
     side,                       // "p1" | "p2"
+    charId: baseChar.id,        // selected character id (drives ALL appearance + cmul)
+    cmul: baseChar.mul,         // per-knight bounded physics multipliers (1.0 = crimson)
     x: 0, y: logTopY,           // y = seat (hips on top of log)
     vx: 0, vy: 0,
     onGround: true,
@@ -2652,8 +2697,10 @@ function makeKnight(side) {
   };
 }
 
-const p1 = makeKnight("p1");
-const p2 = makeKnight("p2");
+// Defaults give every non-SELECT path (training/attract/online-guest pre-snapshot)
+// valid character state: p1 crimson (the 1.0 baseline), p2 azure (SPEED).
+const p1 = makeKnight("p1", "crimson");
+const p2 = makeKnight("p2", "azure");
 
 function resetKnightPositions() {
   p1.x = logCenter - TUNE.spawnOffset;
@@ -3032,8 +3079,10 @@ function enterSelect() {
     specialArmed.p1 = specialArmed.p2 = false;
     held.clear();
     resetKnightPositions();
-    p1.chosenSpecial = "mega";
-    p2.chosenSpecial = "anchor";
+    // TRAINING: p1 = crimson (1.0 baseline; its signature MEGA is great for combo
+    // practice), p2 = azure dummy (inert special — the dummy gets all-false inputs).
+    commitCharacter(p1, 0);   // crimson -> mega
+    commitCharacter(p2, 1);   // azure   -> dash (inert on the dummy)
     p1.rounds = 0; p2.rounds = 0;
     matchWinner = null; roundWinner = null;
     drawBanner = false; timeUpBanner = false;
@@ -3220,11 +3269,10 @@ function enterAttractMode() {
   attractTimeoutTimer = 0;
   attractIdleTimer = 0;
   gameMode = "attract";
-  // Randomize specials for visual variety
-  if (typeof SPECIALS !== "undefined" && SPECIALS.length > 0) {
-    p1.chosenSpecial = SPECIALS[Math.floor(Math.random() * SPECIALS.length)].id;
-    p2.chosenSpecial = SPECIALS[Math.floor(Math.random() * SPECIALS.length)].id;
-  }
+  // Randomize CHARACTERS for visual variety (commits charId + cmul + signature
+  // special together so the attract demo has fully valid per-knight state).
+  commitCharacter(p1, Math.floor(Math.random() * CHARACTERS.length));
+  commitCharacter(p2, Math.floor(Math.random() * CHARACTERS.length));
   // Reset knight state and start a match directly (skip SELECT)
   fullResetKnight(p1); fullResetKnight(p2);
   resetKnightPositions();
@@ -3461,12 +3509,12 @@ function leaveOnline() {
 //   P2: ArrowLeft/Right move, Enter lock, ArrowDown un-lock.
 function handleSelectKey(code) {
   if (sel.readyTimer > 0) return;   // both locked: input frozen during READY beat
-  const N = SPECIALS.length;
+  const N = CHARACTERS.length;   // SELECT now picks a CHARACTER (2), not a special
   // ---- P1 ----
   if (!sel.p1.locked) {
     if (code === "KeyA") { sel.p1.cursor = (sel.p1.cursor + N - 1) % N; sfxSelect(); }
     else if (code === "KeyD") { sel.p1.cursor = (sel.p1.cursor + 1) % N; sfxSelect(); }
-    else if (code === "Space") { sel.p1.locked = true; p1.chosenSpecial = SPECIALS[sel.p1.cursor].id; sfxLock(); }
+    else if (code === "Space") { sel.p1.locked = true; commitCharacter(p1, sel.p1.cursor); sfxLock(); }
   } else if (code === "KeyS") {
     sel.p1.locked = false; p1.chosenSpecial = null; sfxSelect();
   }
@@ -3475,7 +3523,7 @@ function handleSelectKey(code) {
     if (!sel.p2.locked) {
       if (code === "ArrowLeft") { sel.p2.cursor = (sel.p2.cursor + N - 1) % N; sfxSelect(); }
       else if (code === "ArrowRight") { sel.p2.cursor = (sel.p2.cursor + 1) % N; sfxSelect(); }
-      else if (code === "Enter") { sel.p2.locked = true; p2.chosenSpecial = SPECIALS[sel.p2.cursor].id; sfxLock(); }
+      else if (code === "Enter") { sel.p2.locked = true; commitCharacter(p2, sel.p2.cursor); sfxLock(); }
     } else if (code === "ArrowDown") {
       sel.p2.locked = false; p2.chosenSpecial = null; sfxSelect();
     }
@@ -3523,7 +3571,7 @@ function updateKnight(k, dt, input) {
   // Cannot swing while guarding. No startup/active/recovery state anymore;
   // the "hit" is purely velocity-driven (see resolveCombat).
   if (input.attack && !guarding && k.tapCdTimer === 0) {
-    k.swingVel += TUNE.swingImpulse;     // + = toward opponent
+    k.swingVel += TUNE.swingImpulse * k.cmul.swingImpulse;  // + = toward opponent (per-character self impulse)
     k.tapCdTimer = TUNE.tapMinInterval;
     k.attackFlash = 0.16;                 // anim/SFX label only
     sfxSwing();
@@ -3532,7 +3580,9 @@ function updateKnight(k, dt, input) {
   // --- PENDULUM SPRING (rigid upper-body rotation about the seat) -------
   // Underdamped torsional spring: overshoots and oscillates. Guarding stiffens
   // it hard toward upright (brace), so a guarding knight can't wind up a swing.
-  const springK = guarding ? TUNE.springK * TUNE.guardSpringMul : TUNE.springK;
+  // per-character self stiffness; scale the BASE so guard/non-guard stay proportional
+  const baseSpringK = TUNE.springK * k.cmul.springK;
+  const springK = guarding ? baseSpringK * TUNE.guardSpringMul : baseSpringK;
   const angAccel = -springK * k.swingAngle - TUNE.springDamp * k.swingVel;
   k.swingVel += angAccel * dt;
   k.swingAngle += k.swingVel * dt;
@@ -3561,8 +3611,9 @@ function updateKnight(k, dt, input) {
   const lockMove = guarding;
   let moving = false;
   if (!lockMove) {
-    if (input.left)  { k.vx -= TUNE.accel * dt; k.facing = -1; moving = true; }
-    if (input.right) { k.vx += TUNE.accel * dt; k.facing = 1;  moving = true; }
+    const accel = TUNE.accel * k.cmul.accel;   // per-character self acceleration
+    if (input.left)  { k.vx -= accel * dt; k.facing = -1; moving = true; }
+    if (input.right) { k.vx += accel * dt; k.facing = 1;  moving = true; }
   }
   // friction when no directional input (always some friction on the log)
   if (!moving || lockMove) {
@@ -3575,14 +3626,15 @@ function updateKnight(k, dt, input) {
   // it is exempt from the clamp too (this is what lets it self-ring-out on a whiff
   // via the existing off-log check below).
   if (k.knockTimer === 0 && k.dashTimer === 0) {
-    if (k.vx >  TUNE.maxSpeed) k.vx =  TUNE.maxSpeed;
-    if (k.vx < -TUNE.maxSpeed) k.vx = -TUNE.maxSpeed;
+    const maxSpeed = TUNE.maxSpeed * k.cmul.maxSpeed;   // per-character self speed cap
+    if (k.vx >  maxSpeed) k.vx =  maxSpeed;
+    if (k.vx < -maxSpeed) k.vx = -maxSpeed;
   }
 
   // --- HOP (also lunges the seat toward the opponent: a closing move) ---
   if (input.jump && k.onGround && !guarding) {
-    k.vy = -TUNE.jumpV;
-    k.vx += k.facing * 90;       // small forward lunge on the hop
+    k.vy = -TUNE.jumpV * k.cmul.hopV;   // per-character self hop launch
+    k.vx += k.facing * 90;       // small forward lunge on the hop (GLOBAL magic number, not jumpV)
     k.onGround = false;
     k.state = ST.JUMP;
     sfxJump();
@@ -4145,7 +4197,12 @@ function applyHit(attacker, target, tip) {
 
   // force scales with pan-tip approach speed (swingVel), capped to avoid one-shots
   const speed = Math.min(TUNE.forceCap, attacker.swingVel);
-  let knock = TUNE.knockScale * speed;
+  // knockScale is ATTACKER-LOCAL: it's derived purely from the attacker's swing
+  // (speed) and TUNE.knockScale, so the per-character multiplier belongs here on
+  // the ATTACKER. Downstream low-balance/guard/anchor/edge multipliers are
+  // target/shared and stay GLOBAL — azure's lighter base shove is still amplified
+  // by them normally. balLoss/react are NOT scaled (azure chips the same life).
+  let knock = TUNE.knockScale * attacker.cmul.knockScale * speed;
   let balLoss = TUNE.balHitScale * speed;
   let react = TUNE.reaction * speed;
 
@@ -4418,6 +4475,7 @@ function snapKnight(k) {
     x: k.x, y: k.y, facing: k.facing,
     swingAngle: k.swingAngle, state: k.state,
     balance: k.balance, special: k.special, chosenSpecial: k.chosenSpecial,
+    charId: k.charId,   // appearance + cmul are derived from this on the guest
     tumble: k.tumble || 0, knockTimer: k.knockTimer, attackFlash: k.attackFlash,
     windupTimer: k.windupTimer, counterTimer: k.counterTimer,
     counterFlash: k.counterFlash, dashTimer: k.dashTimer,
@@ -4433,6 +4491,12 @@ function applyKnight(k, s) {
   k.x = s.x; k.y = s.y; k.facing = s.facing;
   k.swingAngle = s.swingAngle; k.state = s.state;
   k.balance = s.balance; k.special = s.special; k.chosenSpecial = s.chosenSpecial;
+  // Character is host-authoritative; derive appearance + cmul on the guest.
+  // Guarded for pre-character-select hosts (older snapshot has no charId).
+  if (typeof s.charId === "string") {
+    k.charId = s.charId;
+    k.cmul = charById(s.charId).mul;
+  }
   k.tumble = s.tumble; k.attackFlash = s.attackFlash;
   // knockTimer drives the HIT-RECOIL atlas frame; guard for pre-iter50 hosts.
   k.knockTimer = (typeof s.knockTimer === "number") ? s.knockTimer : 0;
@@ -4559,13 +4623,13 @@ function hostBroadcast() {
 // handleSelectKey's P2 branch but driven by the guest's stream.
 function hostSelectFromGuest() {
   if (sel.readyTimer > 0) { net.guestAttackPending = false; net.guestSpecialPending = false; return; }
-  const N = SPECIALS.length;
+  const N = CHARACTERS.length;   // SELECT picks a CHARACTER now
   const gi = net.guestInput;
   const prev = net.prevGuestLR;
   if (!sel.p2.locked) {
     if (gi.l && !prev.l) { sel.p2.cursor = (sel.p2.cursor + N - 1) % N; sfxSelect(); }
     if (gi.r && !prev.r) { sel.p2.cursor = (sel.p2.cursor + 1) % N; sfxSelect(); }
-    if (net.guestAttackPending) { sel.p2.locked = true; p2.chosenSpecial = SPECIALS[sel.p2.cursor].id; sfxLock(); }
+    if (net.guestAttackPending) { sel.p2.locked = true; commitCharacter(p2, sel.p2.cursor); sfxLock(); }
   } else {
     if (gi.g && !prev.g) { sel.p2.locked = false; p2.chosenSpecial = null; sfxSelect(); }
   }
@@ -4625,24 +4689,24 @@ function update(dt) {
       // entry), then visibly step the cursor toward it during the pick delay so
       // the card cursor is seen moving, and LOCK on the target when the timer
       // elapses. cpuPickTarget<0 means "not chosen yet this SELECT".
-      if (cpuPickTarget < 0) cpuPickTarget = Math.floor(Math.random() * SPECIALS.length);
+      if (cpuPickTarget < 0) cpuPickTarget = Math.floor(Math.random() * CHARACTERS.length);
       if (cpuPickTimer > 0) {
         cpuPickTimer = Math.max(0, cpuPickTimer - dt);
         // step the cursor one card toward the target every ~0.18s of the delay
         cpuStepTimer -= dt;
         if (cpuStepTimer <= 0 && sel.p2.cursor !== cpuPickTarget) {
-          const dir = (cpuPickTarget - sel.p2.cursor + SPECIALS.length) % SPECIALS.length;
+          const dir = (cpuPickTarget - sel.p2.cursor + CHARACTERS.length) % CHARACTERS.length;
           // shortest visual walk (left or right) toward the target
-          sel.p2.cursor = (dir <= SPECIALS.length / 2)
-            ? (sel.p2.cursor + 1) % SPECIALS.length
-            : (sel.p2.cursor + SPECIALS.length - 1) % SPECIALS.length;
+          sel.p2.cursor = (dir <= CHARACTERS.length / 2)
+            ? (sel.p2.cursor + 1) % CHARACTERS.length
+            : (sel.p2.cursor + CHARACTERS.length - 1) % CHARACTERS.length;
           cpuStepTimer = 0.18;
           sfxSelect();
         }
         if (cpuPickTimer === 0) {
           sel.p2.cursor = cpuPickTarget;     // settle on the chosen card
           sel.p2.locked = true;
-          p2.chosenSpecial = SPECIALS[sel.p2.cursor].id;
+          commitCharacter(p2, sel.p2.cursor);
           sfxLock();
         }
       }
@@ -5108,6 +5172,26 @@ function idleBob(k) {
 // grips the log for balance. No sword, no shield. k.y is the seat reference
 // (top of the log); the whole figure fills the [k.y-H .. k.y] hitbox so the
 // combat boxes stay honest. Legs are drawn BELOW k.y, over the log front.
+// Render-only mirror-match marker: a small bobbing team-colored ▼ above a
+// knight's head so two identical-character knights stay distinguishable. Drawn
+// inside the world (shake) transform so it tracks the knight.
+function drawMirrorMarker(k, color) {
+  const mx = k.x;
+  const my = k.y - TUNE.knightH - 18 + Math.sin(k.bob * 0.5) * 2;
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = PAL.ink;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(mx - 8, my);
+  ctx.lineTo(mx + 8, my);
+  ctx.lineTo(mx, my + 11);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawKnight(k) {
   const bob = idleBob(k);
   const drawY = k.y + bob.dy;
@@ -5173,7 +5257,9 @@ function drawKnight(k) {
     // source of pan excursion (no double-counting vs panTip). HIT/GUARD/FALL are
     // posed frames that are NOT swing-rotated (a victim/bracing/falling knight
     // isn't mid-swing; FALL uses tumble only).
-    const row = (k.side === "p1") ? 0 : 1;
+    // Atlas row is the CHARACTER's sprite row (crimson=row0/red, azure=row1/blue),
+    // NOT the side — so the chosen character's art is drawn regardless of slot.
+    const row = (charOf(k).sprite === "knightRed") ? 0 : 1;
     const pose = (k.state === ST.FALLING) ? POSE.FALL
                : (k.knockTimer > 0)       ? POSE.HIT
                : (k.state === ST.GUARD)   ? POSE.GUARD
@@ -5200,7 +5286,8 @@ function drawKnight(k) {
 
   // ===== FALLBACK: single posed sprite (atlas missing) =====
   // Pre-iter45 clean path: rigid pendulum swing about the seat, no shear.
-  const sprite = (k.side === "p1") ? IMG.knightRed : IMG.knightBlue;
+  // Sprite is the CHOSEN character's, not the side's.
+  const sprite = IMG[charOf(k).sprite];
   if (imgReady(sprite)) {
     const sw = sprite.naturalWidth, sh = sprite.naturalHeight;
     const dw = sw * SPRITE_S, dh = sh * SPRITE_S;
@@ -5610,12 +5697,16 @@ function drawHUD() {
   const palR = { dark: PAL.redDark, body: PAL.redBody, light: PAL.redLight, trim: PAL.redTrim };
   const palB = { dark: PAL.bluDark, body: PAL.bluBody, light: PAL.bluLight, trim: PAL.bluTrim };
   const mw = 320;
-  const p1Label = (gameMode === "attract") ? "CRIMSON  CPU"
-               : (gameMode === "online" && net.mode === "guest") ? "CRIMSON  HOST" : "P1  CRIMSON";
-  const p2Label = (gameMode === "attract") ? "AZURE  CPU"
-                : (gameMode === "training") ? "AZURE  DUMMY"
-                : (gameMode === "1p") ? "AZURE  CPU"
-                : (gameMode === "online") ? ((net.mode === "guest") ? "AZURE  YOU" : "AZURE  P2") : "AZURE  P2";
+  // Character name prefix tracks the CHOSEN character (not the side); the role
+  // suffix (P1/CPU/YOU/HOST/DUMMY) stays side/mode based.
+  const nm1 = charOf(p1).en.split(" ")[0];   // "CRIMSON" | "AZURE"
+  const nm2 = charOf(p2).en.split(" ")[0];
+  const p1Label = (gameMode === "attract") ? nm1 + "  CPU"
+               : (gameMode === "online" && net.mode === "guest") ? nm1 + "  HOST" : "P1  " + nm1;
+  const p2Label = (gameMode === "attract") ? nm2 + "  CPU"
+                : (gameMode === "training") ? nm2 + "  DUMMY"
+                : (gameMode === "1p") ? nm2 + "  CPU"
+                : (gameMode === "online") ? ((net.mode === "guest") ? nm2 + "  YOU" : nm2 + "  P2") : nm2 + "  P2";
   drawBalanceMeter(p1, 30, 40, mw, p1Label, palR);
   drawBalanceMeter(p2, VW - 30 - mw, 40, mw, p2Label, palB);
   // Iter 48 HUD PORTRAIT ICONS — small head-crop avatar next to each life bar
@@ -5693,10 +5784,11 @@ function drawHUD() {
         ctx.restore();
       }
     }
-    // P1 icon: left of the P1 balance meter (which starts at x=30)
-    drawHudIcon(IMG.portraitRed,  p1, 30 + mw + iconSize / 2 + 4, iconY + iconSize / 2, PAL.redLight);
+    // P1 icon: left of the P1 balance meter (which starts at x=30). Portrait is
+    // the CHOSEN character's; the ring color stays side-based (team color).
+    drawHudIcon(IMG[charOf(p1).portrait],  p1, 30 + mw + iconSize / 2 + 4, iconY + iconSize / 2, PAL.redLight);
     // P2 icon: right of the P2 balance meter (which ends at VW-30)
-    drawHudIcon(IMG.portraitBlue, p2, VW - 30 - mw - iconSize / 2 - 4, iconY + iconSize / 2, PAL.bluLight);
+    drawHudIcon(IMG[charOf(p2).portrait], p2, VW - 30 - mw - iconSize / 2 - 4, iconY + iconSize / 2, PAL.bluLight);
   }
   // TRAINING: replace the round timer with a small "TRAINING — press R to exit"
   // label in the same screen real estate. Balance meters + win pips stay (pips
@@ -5835,190 +5927,168 @@ function drawCenterText(text, sub, big) {
 }
 
 // ===== SELECT screen: pick one special per player, Nordic chunky-pixel HUD =====
+// Shared card geometry for the CHARACTER SELECT grid. drawSelect() and the
+// mobile tap hit-test both read this so a card's drawn rect EXACTLY matches its
+// tap target. With N=2 the cards are wide showcase panels (not the old narrow
+// 6-special strip). pitch = cardW + gap (step between card left edges).
+function selectCardLayout(N) {
+  const gap = 40, cardW = 300, cardH = 300;
+  const totalW = N * cardW + (N - 1) * gap;
+  const x0 = (VW - totalW) / 2, y0 = 150;
+  return { gap, cardW, cardH, totalW, x0, y0, pitch: cardW + gap };
+}
+
+// Tiny labeled stat bar (0..1 fill) used on the character cards.
+function drawStatBar(label, frac, x, y, w, color) {
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.font = '700 11px "Trebuchet MS", sans-serif';
+  ctx.fillStyle = "#9aa6bd";
+  ctx.fillText(label, x, y - 3);
+  const barX = x + 34, barW = w - 34, barH = 8;
+  ctx.fillStyle = "rgba(8,12,20,0.7)";
+  ctx.fillRect(barX, y - barH + 1, barW, barH);
+  ctx.fillStyle = color;
+  ctx.fillRect(barX, y - barH + 1, barW * Math.max(0.04, Math.min(1, frac)), barH);
+  ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX + 0.5, y - barH + 1.5, barW - 1, barH - 1);
+  ctx.restore();
+}
+
 function drawSelect() {
   // dim overlay (match the title's mood)
   ctx.fillStyle = "rgba(8,12,20,0.62)";
   ctx.fillRect(0, 0, VW, VH);
 
-  // === ITER 38 + 39: SELECT screen portrait avatars ===
-  // Cropped busts in top corners; locked players get amber halo. Iter 39 fixes
-  // aspect distortion by picking a source-crop that matches the dest aspect
-  // (130x165 / 0.787 → sw=550, sh=700 centered horizontally on the 1151-wide
-  // portrait), and moves CRIMSON/AZURE + LOCKED labels INTO semi-trans bands
-  // ON the avatar so nothing overflows into the card grid at y>=158.
-  {
-    const avatarW = 130, avatarH = 165;
-    const leftX  = 14;
-    const rightX = VW - avatarW - 14; // 816
-    const avY    = 14;
-    // Source crop: aspect-matched bust. Portrait natives are 1151x1367 → take
-    // a 550x700 window centered horizontally from the top so head+shoulders fill
-    // the 130x165 dest without horizontal compression.
-    const SX = 300, SY = 0, SW = 550, SH = 700;
-
-    // Locked halos (drawn BEHIND the portraits)
-    if (sel.p1.locked) {
-      ctx.save();
-      ctx.fillStyle = "rgba(216, 164, 90, 0.30)";
-      ctx.beginPath();
-      ctx.ellipse(leftX + avatarW / 2, avY + avatarH / 2 + 10, avatarW * 0.55, avatarH * 0.5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-    if (sel.p2.locked) {
-      ctx.save();
-      ctx.fillStyle = "rgba(216, 164, 90, 0.30)";
-      ctx.beginPath();
-      ctx.ellipse(rightX + avatarW / 2, avY + avatarH / 2 + 10, avatarW * 0.55, avatarH * 0.5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // Aspect-preserved portrait drawImage (bust crop)
-    if (imgReady(IMG.portraitRed)) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(IMG.portraitRed, SX, SY, SW, SH, leftX, avY, avatarW, avatarH);
-      ctx.imageSmoothingEnabled = false;
-    }
-    if (imgReady(IMG.portraitBlue)) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(IMG.portraitBlue, SX, SY, SW, SH, rightX, avY, avatarW, avatarH);
-      ctx.imageSmoothingEnabled = false;
-    }
-
-    // TOP band: team name baked INTO the avatar so nothing overflows.
-    ctx.save();
-    ctx.textAlign = "center";
-    ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
-    ctx.fillRect(leftX,  avY, avatarW, 22);
-    ctx.fillRect(rightX, avY, avatarW, 22);
-    ctx.font = '900 14px "Trebuchet MS", sans-serif';
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = PAL.ink;
-    ctx.strokeText("CRIMSON", leftX  + avatarW / 2, avY + 15);
-    ctx.fillStyle = PAL.redLight;
-    ctx.fillText  ("CRIMSON", leftX  + avatarW / 2, avY + 15);
-    ctx.strokeText("AZURE",   rightX + avatarW / 2, avY + 15);
-    ctx.fillStyle = PAL.bluLight;
-    ctx.fillText  ("AZURE",   rightX + avatarW / 2, avY + 15);
-
-    // BOTTOM band: LOCKED stamp baked INTO the avatar (only when locked).
-    // y in [avY+avatarH-26, avY+avatarH-4] — entirely inside the avatar
-    // (avY=14, avatarH=165 → 153..175), well above the card grid at y>=158
-    // because cards are pushed below by their own y0=158 backplate top.
-    if (sel.p1.locked) {
-      ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
-      ctx.fillRect(leftX, avY + avatarH - 26, avatarW, 22);
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = PAL.ink;
-      ctx.strokeText("LOCKED", leftX + avatarW / 2, avY + avatarH - 11);
-      ctx.fillStyle = PAL.skyAmber;
-      ctx.fillText  ("LOCKED", leftX + avatarW / 2, avY + avatarH - 11);
-    }
-    if (sel.p2.locked) {
-      ctx.fillStyle = "rgba(8, 12, 20, 0.78)";
-      ctx.fillRect(rightX, avY + avatarH - 26, avatarW, 22);
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = PAL.ink;
-      ctx.strokeText("LOCKED", rightX + avatarW / 2, avY + avatarH - 11);
-      ctx.fillStyle = PAL.skyAmber;
-      ctx.fillText  ("LOCKED", rightX + avatarW / 2, avY + avatarH - 11);
-    }
-    ctx.restore();
-  }
-
+  // === TITLE ===
   ctx.textAlign = "center";
-  ctx.font = '900 52px "Trebuchet MS", sans-serif';
+  ctx.font = '900 50px "Trebuchet MS", sans-serif';
   ctx.lineWidth = 9; ctx.strokeStyle = PAL.ink;
-  ctx.strokeText("CHOOSE YOUR SPECIAL", VW / 2, 86);
+  ctx.strokeText("CHOOSE YOUR KNIGHT", VW / 2, 70);
   ctx.fillStyle = PAL.bone;
-  ctx.fillText("CHOOSE YOUR SPECIAL", VW / 2, 86);
+  ctx.fillText("CHOOSE YOUR KNIGHT", VW / 2, 70);
 
-  // player banners (crimson left / azure right) with their special key binding —
-  // on two separate lines so the long hint strings never overlap in the middle.
-  ctx.font = '800 17px "Trebuchet MS", sans-serif';
+  // player control banners (team-colored; left = P1, right = P2/CPU). Controls
+  // hint unchanged — only the two-character pick replaces the special pick.
+  ctx.font = '800 16px "Trebuchet MS", sans-serif';
   ctx.textAlign = "left";
   ctx.fillStyle = PAL.redLight;
-  ctx.fillText("P1 CRIMSON  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", 40, 116);
+  ctx.fillText("P1  ·  A/D move · SPACE lock · S un-lock", 40, 104);
   ctx.textAlign = "right";
   ctx.fillStyle = PAL.bluLight;
   if (gameMode === "1p") {
-    ctx.fillText("AZURE  —  CPU  (auto)", VW - 40, 116);
+    ctx.fillText("P2  —  CPU  (auto)", VW - 40, 104);
   } else if (gameMode === "online") {
-    // both peers use the same comfortable A/D/SPACE/S scheme on their OWN machine.
-    ctx.fillText("AZURE (online)  ·  A/D move · SPACE lock · S un-lock · SPECIAL: F", VW - 40, 140);
+    ctx.fillText("P2 (online)  ·  A/D move · SPACE lock · S un-lock", VW - 40, 104);
   } else {
-    ctx.fillText("AZURE P2  ·  ◄► move · ENTER lock · ▼ un-lock · SPECIAL: /", VW - 40, 140);
+    ctx.fillText("P2  ·  ◄► move · ENTER lock · ▼ un-lock", VW - 40, 104);
   }
   ctx.textAlign = "left";
 
-  // ---- card grid ----
-  // 6 cards fit at gap=15, cardW=135: 6*135 + 5*15 = 885 (margin 37.5 each side
-  // within the 960 viewport). Was gap=18,cardW=160 for 5 cards (totalW=872);
-  // tightened so the 6th (WHIRLWIND) fits without overflow. card_frame.webp
-  // scales fine at the slightly narrower width.
-  const N = SPECIALS.length;
-  const gap = 15, cardW = 135, cardH = 240;
-  const totalW = N * cardW + (N - 1) * gap;
-  const x0 = (VW - totalW) / 2, y0 = 158;
+  // ---- 2-character card grid ----
+  const N = CHARACTERS.length;
+  const { cardW, cardH, x0, y0, pitch } = selectCardLayout(N);
 
   for (let i = 0; i < N; i++) {
-    const sp = SPECIALS[i];
-    const cx = x0 + i * (cardW + gap);
+    const ch = CHARACTERS[i];
+    const cx = x0 + i * pitch;
+    const ccx = cx + cardW / 2;
     const p1Here = sel.p1.cursor === i;
     const p2Here = sel.p2.cursor === i;
+    const teamCol = ch.id === "crimson" ? PAL.redLight : PAL.bluLight;
 
-    // card backplate: Nordic carved-stone tablet sprite (with procedural fallback)
+    // card backplate: reuse the Nordic carved-stone tablet sprite (procedural fallback)
     if (imgReady(IMG.cardFrame)) {
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(IMG.cardFrame, cx - 4, y0 - 4, cardW + 8, cardH + 8);
       ctx.imageSmoothingEnabled = false;
     } else {
-      // ---- fallback: procedural backplate ----
       ctx.fillStyle = PAL.ink;
       ctx.fillRect(cx - 4, y0 - 4, cardW + 8, cardH + 8);
       ctx.fillStyle = "#202a40";
       ctx.fillRect(cx, y0, cardW, cardH);
       ctx.fillStyle = "#2e3a56";
-      ctx.fillRect(cx, y0, cardW, 6);   // top bevel
-      // corner rivets
-      ctx.fillStyle = PAL.steelDk;
-      for (const [rx, ry] of [[cx + 7, y0 + 9], [cx + cardW - 10, y0 + 9],
-                              [cx + 7, y0 + cardH - 12], [cx + cardW - 10, y0 + cardH - 12]]) {
-        ctx.fillRect(rx, ry, 3, 3);
-      }
+      ctx.fillRect(cx, y0, cardW, 6);
     }
 
-    // emblem-ish icon plate per special
-    drawSpecialIcon(sp.id, cx + cardW / 2, y0 + 64);
+    // === character bust (aspect-matched crop, head+shoulders) ===
+    const portrait = IMG[ch.portrait];
+    const busW = 150, busH = 192;
+    const busX = ccx - busW / 2, busY = y0 + 18;
+    if (imgReady(portrait)) {
+      ctx.save();
+      // soft team-colored backing glow so the bust reads against the tablet
+      ctx.fillStyle = ch.id === "crimson" ? "rgba(180,60,55,0.16)" : "rgba(60,110,200,0.16)";
+      ctx.fillRect(busX - 6, busY - 4, busW + 12, busH + 4);
+      ctx.imageSmoothingEnabled = true;
+      // portrait natives ~1151x1367; take a 620x794 window from the top centered
+      ctx.drawImage(portrait, 270, 0, 620, 794, busX, busY, busW, busH);
+      ctx.imageSmoothingEnabled = false;
+      ctx.restore();
+    }
 
-    // names
+    // === archetype badge (top-left of card) ===
+    {
+      ctx.save();
+      ctx.textAlign = "left";
+      ctx.font = '900 13px "Trebuchet MS", sans-serif';
+      const padX = 8, badgeW = ctx.measureText(ch.archetype).width + padX * 2;
+      const bx = cx + 10, by = y0 + 12;
+      ctx.fillStyle = ch.id === "crimson" ? "rgba(150,40,38,0.92)" : "rgba(40,80,170,0.92)";
+      ctx.fillRect(bx, by, badgeW, 20);
+      ctx.fillStyle = PAL.bone;
+      ctx.fillText(ch.archetype, bx + padX, by + 15);
+      ctx.restore();
+    }
+
+    // === names (JP big + EN small) ===
     ctx.textAlign = "center";
-    ctx.font = '900 24px "Trebuchet MS", sans-serif';
-    ctx.fillStyle = PAL.bone;
-    ctx.fillText(sp.name, cx + cardW / 2, y0 + 134);
-    ctx.font = '800 15px "Trebuchet MS", sans-serif';
+    ctx.font = '900 27px "Trebuchet MS", sans-serif';
+    ctx.lineWidth = 4; ctx.strokeStyle = PAL.ink;
+    ctx.strokeText(ch.name, ccx, y0 + 234);
+    ctx.fillStyle = teamCol;
+    ctx.fillText(ch.name, ccx, y0 + 234);
+    ctx.font = '800 13px "Trebuchet MS", sans-serif';
     ctx.fillStyle = PAL.skyAmber;
-    ctx.fillText(sp.en, cx + cardW / 2, y0 + 156);
+    ctx.fillText(ch.en, ccx, y0 + 252);
 
-    // one-line effect (wraps to 2-3 lines at the narrower 5-card width). Start
-    // y nudged up + tighter lineH so 3 lines never reach the LOCKED stamp at
-    // y0+cardH-30=368: lines land at 178/192/206 with cardW-24=136 wrap width.
-    ctx.font = '500 12px "Trebuchet MS", sans-serif';
-    ctx.fillStyle = "#b9c2d6";
-    wrapText(sp.fx, cx + cardW / 2, y0 + 178, cardW - 24, 14);
+    // === signature special (icon + name) ===
+    {
+      const sig = SPECIALS.find(s => s.id === ch.signatureSpecial) || SPECIALS[0];
+      const iconX = cx + 30, iconY = y0 + 282;
+      drawSpecialIcon(sig.id, iconX, iconY, 22);
+      ctx.textAlign = "left";
+      ctx.font = '700 11px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = "#9aa6bd";
+      ctx.fillText("SIGNATURE", iconX + 22, iconY - 6);
+      ctx.font = '900 15px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = PAL.bone;
+      ctx.fillText(sig.en, iconX + 22, iconY + 11);
+    }
 
-    // P1 / P2 cursor highlights (crimson / azure outlines)
+    // === stat bars (derived from the character's multipliers; crimson=baseline) ===
+    // Normalize each mul into a 0..1 fill across the two characters' range so the
+    // contrast is legible. SPD=maxSpeed, PWR=swingImpulse, WT(weight)=knockScale
+    // (heavier knight shoves harder => bigger knockScale => fuller WT bar).
+    {
+      const sx = cx + cardW - 124, sw = 110;
+      const norm = (v, lo, hi) => (v - lo) / (hi - lo);
+      drawStatBar("SPD", norm(ch.mul.maxSpeed,     0.95, 1.20), sx, y0 + 280, sw, "#6fd3ff");
+      drawStatBar("PWR", norm(ch.mul.swingImpulse, 0.88, 1.02), sx, y0 + 296, sw, "#ff9b6a");
+      drawStatBar("WT",  norm(ch.mul.knockScale,   0.83, 1.02), sx, y0 + 312, sw, "#ffd66a");
+    }
+
+    // P1 / P2 cursor highlights (team-colored brackets)
     if (p1Here) drawCardOutline(cx, y0, cardW, cardH, PAL.redLight, sel.p1.locked, -3);
     if (p2Here) drawCardOutline(cx, y0, cardW, cardH, PAL.bluLight, sel.p2.locked, 3);
 
-    // "CPU" badge INSIDE the top of the azure-picked card (1p) — clear of the
-    // header hint lines so nothing overlaps.
+    // "CPU" badge on the P2-hovered card (1p)
     if (p2Here && gameMode === "1p") {
       ctx.save();
       ctx.textAlign = "center";
       ctx.font = '900 13px "Trebuchet MS", sans-serif';
-      const bcx = cx + cardW / 2, bby = y0 + 6, bbw = 46, bbh = 18;
+      const bcx = cx + cardW - 34, bby = y0 + 6, bbw = 46, bbh = 18;
       ctx.fillStyle = PAL.ink;
       ctx.fillRect(bcx - bbw / 2, bby, bbw, bbh);
       ctx.fillStyle = PAL.bluLight;
@@ -6026,9 +6096,9 @@ function drawSelect() {
       ctx.restore();
     }
 
-    // LOCKED stamps (offset so both can sit on one card)
-    if (p1Here && sel.p1.locked) drawLockStamp(cx + cardW / 2 - 34, y0 + cardH - 30, PAL.redLight);
-    if (p2Here && sel.p2.locked) drawLockStamp(cx + cardW / 2 + 34, y0 + cardH - 30, PAL.bluLight);
+    // LOCKED stamps (offset so both can stack on one card in a mirror pick)
+    if (p1Here && sel.p1.locked) drawLockStamp(ccx - 40, y0 + cardH - 28, PAL.redLight);
+    if (p2Here && sel.p2.locked) drawLockStamp(ccx + 40, y0 + cardH - 28, PAL.bluLight);
   }
 
   // footer / prompt
@@ -6123,10 +6193,10 @@ function drawLockStamp(cx, cy, color) {
 // chunky little icon per special (on-theme, not generic clip-art).
 // Prefers the painted 96x96 round medallion PNG; falls back to the procedural
 // vector glyph if the image isn't decoded yet (guarded, never throws).
-function drawSpecialIcon(id, cx, cy) {
+function drawSpecialIcon(id, cx, cy, size) {
   const iconImg = IMG[SPECIAL_ICON[id]];
   if (imgReady(iconImg)) {
-    const sz = 84;   // medallion render size on the card
+    const sz = size || 84;   // medallion render size (default = special card)
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(iconImg, cx - sz / 2, cy - sz / 2, sz, sz);
     ctx.imageSmoothingEnabled = false;
@@ -6134,6 +6204,8 @@ function drawSpecialIcon(id, cx, cy) {
   }
   ctx.save();
   ctx.translate(cx, cy);
+  // procedural fallback is authored at ~84px; scale uniformly to the requested size
+  if (size) ctx.scale(size / 84, size / 84);
   if (id === "mega") {
     // big pan cocked back with motion arc
     ctx.strokeStyle = PAL.steelDk; ctx.lineWidth = 4;
@@ -6285,7 +6357,9 @@ function drawKoBanner() {
   // Subtitle: name the winner (the faller's foe) in the WINNER's color.
   if (koFaller && (koFaller.side === "p1" || koFaller.side === "p2")) {
     const fallerIsP1 = koFaller.side === "p1";
-    const subtitle = fallerIsP1 ? "AZURE LANDS THE BLOW" : "CRIMSON LANDS THE BLOW";
+    // Winner is the faller's foe; name the WINNER's chosen character.
+    const winnerK = fallerIsP1 ? p2 : p1;
+    const subtitle = charOf(winnerK).en.split(" ")[0] + " LANDS THE BLOW";
     ctx.font = '800 22px "Trebuchet MS", sans-serif';
     ctx.lineWidth = 5;
     ctx.strokeStyle = PAL.ink;
@@ -6426,14 +6500,17 @@ function drawVsSplash() {
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  if (imgReady(IMG.portraitRed)) {
-    ctx.drawImage(IMG.portraitRed, leftX, portraitY, portraitW, portraitH);
+  // Portraits + names are the CHOSEN characters (left = p1's, right = p2's).
+  const vsImgL = IMG[charOf(p1).portrait];
+  const vsImgR = IMG[charOf(p2).portrait];
+  if (imgReady(vsImgL)) {
+    ctx.drawImage(vsImgL, leftX, portraitY, portraitW, portraitH);
   } else {
     ctx.fillStyle = "#8a2a2e";
     ctx.fillRect(leftX, portraitY, portraitW, portraitH);
   }
-  if (imgReady(IMG.portraitBlue)) {
-    ctx.drawImage(IMG.portraitBlue, rightX, portraitY, portraitW, portraitH);
+  if (imgReady(vsImgR)) {
+    ctx.drawImage(vsImgR, rightX, portraitY, portraitW, portraitH);
   } else {
     ctx.fillStyle = "#2a4a8a";
     ctx.fillRect(rightX, portraitY, portraitW, portraitH);
@@ -6468,10 +6545,11 @@ function drawVsSplash() {
   ctx.lineWidth = 5;
   ctx.strokeStyle = "#11151f";
   ctx.fillStyle = "#f0d9a8";
-  ctx.strokeText("CRIMSON KNIGHT", leftX  + portraitW / 2, portraitY + portraitH + 28);
-  ctx.fillText  ("CRIMSON KNIGHT", leftX  + portraitW / 2, portraitY + portraitH + 28);
-  ctx.strokeText("AZURE KNIGHT",   rightX + portraitW / 2, portraitY + portraitH + 28);
-  ctx.fillText  ("AZURE KNIGHT",   rightX + portraitW / 2, portraitY + portraitH + 28);
+  const vsNameL = charOf(p1).en, vsNameR = charOf(p2).en;
+  ctx.strokeText(vsNameL, leftX  + portraitW / 2, portraitY + portraitH + 28);
+  ctx.fillText  (vsNameL, leftX  + portraitW / 2, portraitY + portraitH + 28);
+  ctx.strokeText(vsNameR, rightX + portraitW / 2, portraitY + portraitH + 28);
+  ctx.fillText  (vsNameR, rightX + portraitW / 2, portraitY + portraitH + 28);
 
   ctx.restore();
 }
@@ -6495,9 +6573,11 @@ function drawSpecialCutin() {
   const fadeOut   = Math.min(1, cutinTimer / 0.20);
   const alpha     = Math.min(1, slideT * 1.5) * fadeOut;
 
+  // Team COLOR stays side-based; the LABEL + PORTRAIT are the chosen character's.
+  const cutinKnight = (cutinSide === "p1") ? p1 : p2;
   const sideColor = (cutinSide === "p1") ? PAL.redLight : PAL.bluLight;
-  const knightLabel = (cutinSide === "p1") ? "CRIMSON KNIGHT" : "AZURE KNIGHT";
-  const portraitImg = (cutinSide === "p1") ? IMG.portraitRed : IMG.portraitBlue;
+  const knightLabel = charOf(cutinKnight).en;
+  const portraitImg = IMG[charOf(cutinKnight).portrait];
 
   ctx.save();
 
@@ -6926,7 +7006,7 @@ function drawRoundOver() {
     txt = "DRAW — REPLAY!"; col = PAL.bone;
   } else if (roundWinner) {
     const isRed = roundWinner.side === "p1";
-    txt = isRed ? "CRIMSON WINS THE ROUND!" : "AZURE WINS THE ROUND!";
+    txt = charOf(roundWinner).en.split(" ")[0] + " WINS THE ROUND!";
     col = isRed ? PAL.redLight : PAL.bluLight;
   } else {
     ctx.textAlign = "left";
@@ -6950,9 +7030,11 @@ function drawMatchResultReveal() {
   const alpha = Math.min(1, slideT * 1.5) * fadeOut;
 
   const isRed = matchWinner.side === "p1";
-  const portrait = isRed ? IMG.portraitRed : IMG.portraitBlue;
+  // Portrait + name are the winner's CHOSEN character; the slide side + team
+  // color stay side-based.
+  const portrait = IMG[charOf(matchWinner).portrait];
   const winnerColor = isRed ? PAL.redLight : PAL.bluLight;
-  const winnerName  = isRed ? "CRIMSON KNIGHT" : "AZURE KNIGHT";
+  const winnerName  = charOf(matchWinner).en;
 
   const portraitW = 400, portraitH = 480;
   const targetX = isRed ? 80 : VW - portraitW - 80;
@@ -7018,7 +7100,7 @@ function drawMatchOver() {
   }
 
   const isRed = matchWinner && matchWinner.side === "p1";
-  const txt = isRed ? "CRIMSON IS VICTORIOUS" : "AZURE IS VICTORIOUS";
+  const txt = (matchWinner ? charOf(matchWinner).en.split(" ")[0] : "CRIMSON") + " IS VICTORIOUS";
   ctx.textAlign = "center";
   ctx.font = '900 60px "Trebuchet MS", sans-serif';
   ctx.lineWidth = 10; ctx.strokeStyle = PAL.ink;
@@ -7110,12 +7192,11 @@ canvas.addEventListener("click", (e) => {
   // Guard: if readyTimer > 0 both players are locked and countdown is running — ignore tap.
   if (gameState === GS.SELECT) {
     if (sel.readyTimer > 0) return;   // READY beat in progress: freeze input
-    const N = SPECIALS.length;
-    const gap = 15, cardW = 135, cardH = 240;
-    const totalW = N * cardW + (N - 1) * gap;
-    const x0 = (VW - totalW) / 2, y0 = 158;
+    const N = CHARACTERS.length;   // 2 CHARACTER cards now
+    const layout = selectCardLayout(N);
+    const { cardW, cardH, x0, y0, pitch } = layout;
     for (let i = 0; i < N; i++) {
-      const cx = x0 + i * (cardW + gap);
+      const cx = x0 + i * pitch;
       if (mx >= cx && mx <= cx + cardW && my >= y0 && my <= y0 + cardH) {
         if (sel.p1.locked && sel.p1.cursor === i) {
           // Tap same locked card => UNLOCK
@@ -7134,7 +7215,7 @@ canvas.addEventListener("click", (e) => {
             sfxSelect();
           }
           sel.p1.locked = true;
-          p1.chosenSpecial = SPECIALS[sel.p1.cursor].id;
+          commitCharacter(p1, sel.p1.cursor);
           sfxLock();
         }
         return;
@@ -7231,6 +7312,15 @@ function render() {
   for (const k of order) {
     drawPanTrail(k);
     drawKnight(k);
+  }
+
+  // MIRROR MATCH discriminator: when both players picked the SAME character their
+  // sprites/portraits are identical, so render-only team-colored ▼ markers float
+  // over each knight (p1 red, p2 blue) so players can tell themselves apart. Only
+  // when mirrored — a normal crimson-vs-azure match never shows them.
+  if (p1.charId === p2.charId) {
+    drawMirrorMarker(p1, PAL.redLight);
+    drawMirrorMarker(p2, PAL.bluLight);
   }
 
   drawParticles();
