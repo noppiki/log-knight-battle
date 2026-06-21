@@ -440,6 +440,8 @@
                 <li><b>W</b> &nbsp; hop forward</li>
                 <li><b>S</b> &nbsp; guard (raise pan)</li>
                 <li><b>SPACE</b> &nbsp; swing pan (tap rapidly)</li>
+                <li><b>W + SPACE</b> &nbsp; aimed HIGH swing (anti-air pop)</li>
+                <li><b>S + SPACE</b> &nbsp; aimed LOW swing (big shove)</li>
                 <li><b>F</b> &nbsp; special move</li>
               </ul>
             </div>
@@ -450,11 +452,13 @@
                 <li><b>&#9650;</b> &nbsp; hop forward</li>
                 <li><b>&#9660;</b> &nbsp; guard</li>
                 <li><b>ENTER</b> &nbsp; swing pan</li>
+                <li><b>&#9650; + ENTER</b> &nbsp; aimed HIGH swing</li>
+                <li><b>&#9660; + ENTER</b> &nbsp; aimed LOW swing</li>
                 <li><b>/</b> &nbsp; special move</li>
               </ul>
             </div>
           </div>
-          <p class="help-note">Mobile: on-screen buttons appear during play.</p>
+          <p class="help-note">Mobile: on-screen buttons appear during play. HOP+HIT = aimed HIGH, GUARD+HIT = aimed LOW.</p>
         </section>
         <section>
           <h3>BALANCE = LIFE</h3>
@@ -488,7 +492,7 @@
       </div>
     </div>
   </div>
-  <div id="hint">P1: A/D scoot · W hop · S guard · SPACE swing · SPECIAL: F &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · SPECIAL: /</div>
+  <div id="hint">P1: A/D scoot · W hop · S guard · SPACE swing · ↑/↓+swing = aimed HIGH/LOW · SPECIAL: F &nbsp;&nbsp;|&nbsp;&nbsp; P2: ◄ ► scoot · ▲ hop · ▼ guard · ENTER swing · ↑/↓+swing aimed · SPECIAL: /</div>
 
 <script>
 "use strict";
@@ -603,6 +607,14 @@ const TUNE = {
   clashReflect: 0.55,        // swingVel retained (reversed) on a clash
   guardMul:    0.50,         // guard halves incoming seat-knock & reaction
   guardSpringMul: 4.5,       // guard stiffens the spring toward upright
+
+  // AIMED ATTACKS (↑+attack = HIGH anti-air, ↓+attack = LOW grounded opener).
+  // These are PAYOFF OVERLAYS layered onto an otherwise-normal hit in applyHit;
+  // they do NOT gate whether a hit can land (panTip/bodyBox math untouched).
+  aimHighPop:      220,      // upward vy pop on the victim for a HIGH hit (< jumpV 620
+                            //   so the foe visibly rises but cannot air-KO / fly off)
+  aimHighHorizMul: 0.80,    // HIGH trades horizontal ring-out pressure for the pop
+  aimLowHorizMul:  1.25,    // LOW = extra horizontal shove / destabilization (no pop)
 
   // hit-stop (impact freeze)
   hitStopMin:  0.040,        // light hit freeze (s)
@@ -2750,6 +2762,9 @@ function makeKnight(side, charId) {
     comboBig: 0,               // biggest combo this round (end-of-round bragging)
     knockTimer: 0,             // window where vx is NOT clamped (knockback in flight)
     attackFlash: 0,            // brief ATTACK label timer (for SFX/anim only)
+    attackAim: 0,              // aimed-attack enum: 0=normal 1=high 2=low.
+                               // Sampled on the swing edge from held dir; drives the
+                               // applyHit payoff overlay; cleared when attackFlash ends.
     // falling bookkeeping
     fellAtFrame: -1,
     // visual
@@ -2795,7 +2810,7 @@ function resetKnightPositions() {
     k.balance = TUNE.balanceMax;
     k.state = ST.IDLE;
     k.swingAngle = 0; k.swingVel = 0;
-    k.tapCdTimer = 0; k.hitCdTimer = 0; k.knockTimer = 0; k.attackFlash = 0;
+    k.tapCdTimer = 0; k.hitCdTimer = 0; k.knockTimer = 0; k.attackFlash = 0; k.attackAim = 0;
     k.comboCount = 0; k.comboTimer = 0; k.comboBig = 0;
     k.fellAtFrame = -1; k.landDust = 0;
     // SP gauge + all transient special states reset each round.
@@ -3641,13 +3656,37 @@ function updateKnight(k, dt, input) {
   if (k.tapCdTimer  > 0) k.tapCdTimer  = Math.max(0, k.tapCdTimer  - dt);
   if (k.hitCdTimer  > 0) k.hitCdTimer  = Math.max(0, k.hitCdTimer  - dt);
   if (k.knockTimer  > 0) k.knockTimer  = Math.max(0, k.knockTimer  - dt);
-  if (k.attackFlash > 0) k.attackFlash = Math.max(0, k.attackFlash - dt);
+  if (k.attackFlash > 0) {
+    k.attackFlash = Math.max(0, k.attackFlash - dt);
+    // The aimed-swing window is the attackFlash label window. When it elapses the
+    // aim is spent — reset to NORMAL so it never leaks into a later hop/guard hit
+    // (nagare-pan gray zone stays clean). No separate float timer is serialized.
+    if (k.attackFlash === 0) k.attackAim = 0;
+  }
   if (k.comboTimer  > 0) {
     k.comboTimer = Math.max(0, k.comboTimer - dt);
     if (k.comboTimer === 0) k.comboCount = 0;  // chain expired
   }
 
-  const guarding = input.guard && k.onGround;
+  // --- AIMED ATTACK: sample the held direction on the swing edge ---------
+  // An attack with a held UP (jump) = HIGH (anti-air); held DOWN (guard) = LOW
+  // (grounded opener). Both/neither held = NORMAL. The aim is sampled HERE,
+  // BEFORE `guarding`, because it must adjust precedence this frame:
+  //   - LOW (guard+attack) must SUPPRESS entering guard so the swing fires.
+  //   - HIGH (jump+attack) must SUPPRESS the hop so it's an aimed swing, not a
+  //     jump-attack (the hop block below is gated on !highAttack).
+  // Only a genuine, off-cooldown attack edge counts; plain hop/guard untouched.
+  let aim = 0;
+  if (input.attack && k.tapCdTimer === 0) {
+    if      (input.jump  && !input.guard) aim = 1;   // HIGH
+    else if (input.guard && !input.jump)  aim = 2;   // LOW
+  }
+  const lowAttack  = (aim === 2);
+  const highAttack = (aim === 1);
+
+  // LOW suppresses guard for this frame so the swing can fire (and so the
+  // guard brace/spring/lockMove below all behave as "not guarding").
+  const guarding = input.guard && k.onGround && !lowAttack;
 
   // --- ATTACK = TAP-TO-SWING -------------------------------------------
   // Each genuine keypress (input.attack is already edge-triggered + repeat
@@ -3659,7 +3698,17 @@ function updateKnight(k, dt, input) {
     k.swingVel += TUNE.swingImpulse * k.cmul.swingImpulse;  // + = toward opponent (per-character self impulse)
     k.tapCdTimer = TUNE.tapMinInterval;
     k.attackFlash = 0.16;                 // anim/SFX label only
+    k.attackAim = aim;                    // 0 normal / 1 high / 2 low — payoff in applyHit
     sfxSwing();
+    // READABILITY FX: distinct floater so the player (and verification) can SEE
+    // which aim fired. Routed through the netted spawnFloater so online guests
+    // see it too. Pan anchor math is untouched (this is a cosmetic overlay).
+    if (highAttack) {
+      spawnFloater(k.x, k.y - TUNE.knightH - 30, "HIGH!", PAL.skyAmber, 1.5);
+    } else if (lowAttack) {
+      spawnFloater(k.x, k.y - TUNE.knightH - 4, "LOW!",
+                   k.side === "p1" ? PAL.redLight : PAL.bluLight, 1.5);
+    }
   }
 
   // --- PENDULUM SPRING (rigid upper-body rotation about the seat) -------
@@ -3717,7 +3766,10 @@ function updateKnight(k, dt, input) {
   }
 
   // --- HOP (also lunges the seat toward the opponent: a closing move) ---
-  if (input.jump && k.onGround && !guarding) {
+  // A HIGH aimed attack (jump+attack this frame) SUPPRESSES the hop so it reads
+  // as an overhead swing, not an accidental jump-attack. Plain hop (W alone) and
+  // a hop while also swinging NORMAL are unaffected.
+  if (input.jump && k.onGround && !guarding && !highAttack) {
     k.vy = -TUNE.jumpV * k.cmul.hopV;   // per-character self hop launch
     k.vx += k.facing * 90;       // small forward lunge on the hop (GLOBAL magic number, not jumpV)
     k.onGround = false;
@@ -4323,10 +4375,33 @@ function applyHit(attacker, target, tip) {
     knock *= 1 + (TUNE.edgeKnockMul - 1) * Math.min(1, Math.max(0, e));
   }
 
+  // AIMED-ATTACK PAYOFF OVERLAY: layered onto the otherwise-normal hit AFTER all
+  // the normal knock/balance scaling. This is a pure payoff modifier — it does NOT
+  // gate whether the hit landed (that was decided geometrically upstream). Cleared
+  // when the attacker's swing window (attackFlash) elapses, so it can't leak.
+  //   HIGH (1): modest upward pop on the victim + reduced horizontal shove
+  //             (anti-air / overhead; LOWER ring-out pressure by design).
+  //   LOW  (2): NO pop; extra horizontal shove (grounded opener / anti-advance,
+  //             STRONGER ring-out pressure). Stacks after edge amplification.
+  let aimPop = 0;
+  if (attacker.attackAim === 1) {        // HIGH
+    knock *= TUNE.aimHighHorizMul;
+    aimPop = TUNE.aimHighPop;
+  } else if (attacker.attackAim === 2) { // LOW
+    knock *= TUNE.aimLowHorizMul;
+  }
+
   // seat knockback away from me (this is what shoves them toward the edge)
   const dir = (target.x >= attacker.x) ? 1 : -1;
   target.vx += knock * dir;
   target.knockTimer = 0.30;                  // let the shove exceed maxSpeed briefly
+  // HIGH pop: vy is only integrated while airborne, so we mirror the hop and flip
+  // onGround=false — otherwise the pop is invisible (vy sits stale on a grounded
+  // foe). The pop is well under jumpV so it lifts the foe without an air-KO.
+  if (aimPop > 0 && target.state !== ST.FALLING) {
+    target.vy -= aimPop;
+    target.onGround = false;
+  }
   target.balance = Math.max(0, target.balance - balLoss);
   // rock the opponent backward: a swing AWAY from me = negative swingVel for them
   target.swingVel -= react;
@@ -4544,6 +4619,12 @@ function aiInputs(self, foe, dt) {
       self.swingVel < TUNE.hitSpeed && !specialActive(self)) {
     out.attack = true;
     out.left = out.right = false;   // plant for the swing
+    // Mix in AIMED swings (~30% of attacks) so the variation is visible hands-off
+    // in the attract demo. HIGH holds jump+attack, LOW holds guard+attack; the
+    // same one-frame suppression in updateKnight keeps it from hopping/guarding.
+    const r = Math.random();
+    if      (r < 0.15) out.jump  = true;   // -> HIGH aimed attack
+    else if (r < 0.30) out.guard = true;   // -> LOW aimed attack
     self.aiSwingCd = (TUNE.aiSwingCdMin + Math.random() * (TUNE.aiSwingCdMax - TUNE.aiSwingCdMin)) * mul.swingCd;
     self.aiReactTimer = Math.max(0, TUNE.aiReactDelay * mul.react);
   }
@@ -4562,6 +4643,7 @@ function snapKnight(k) {
     balance: k.balance, special: k.special, chosenSpecial: k.chosenSpecial,
     charId: k.charId,   // appearance + cmul are derived from this on the guest
     tumble: k.tumble || 0, knockTimer: k.knockTimer, attackFlash: k.attackFlash,
+    attackAim: k.attackAim,   // aimed-attack enum (host-authoritative payoff)
     windupTimer: k.windupTimer, counterTimer: k.counterTimer,
     counterFlash: k.counterFlash, dashTimer: k.dashTimer,
     anchorTimer: k.anchorTimer, onGround: k.onGround,
@@ -4585,6 +4667,8 @@ function applyKnight(k, s) {
   k.tumble = s.tumble; k.attackFlash = s.attackFlash;
   // knockTimer drives the HIT-RECOIL atlas frame; guard for pre-iter50 hosts.
   k.knockTimer = (typeof s.knockTimer === "number") ? s.knockTimer : 0;
+  // attackAim is a plain enum; guard for pre-aimed-attack hosts (defaults NORMAL).
+  k.attackAim = (typeof s.attackAim === "number") ? s.attackAim : 0;
   k.windupTimer = s.windupTimer; k.counterTimer = s.counterTimer;
   k.counterFlash = s.counterFlash; k.dashTimer = s.dashTimer;
   k.anchorTimer = s.anchorTimer; k.onGround = s.onGround;
