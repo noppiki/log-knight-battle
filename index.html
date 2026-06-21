@@ -3171,6 +3171,8 @@ function currentRoundLabel() {
 // specials. This is the single entry point for title-Enter, R (any state),
 // MATCH_OVER-Enter, and the restart button — so players always re-pick.
 function enterSelect() {
+  // Belt-and-suspenders: clear any lingering match-point detune when (re)entering SELECT.
+  if (typeof bgm.setMatchPointActive === "function") bgm.setMatchPointActive(false);
   // ===== TRAINING: skip the SELECT screen entirely =====
   // Auto-lock both specials, fully reset the knights, and jump straight to the
   // countdown. P1 gets MEGA (clearly useful for combo practice); P2 (dummy) gets
@@ -3296,6 +3298,8 @@ function beginPlaying() {
 function enterMatchOver() {
   matchResultRevealTimer = MATCH_RESULT_REVEAL_DURATION;
   gameState = GS.MATCH_OVER;
+  // Release the match-point tension detune so it doesn't linger into the result/menu BGM.
+  if (typeof bgm.setMatchPointActive === "function") bgm.setMatchPointActive(false);
   sfxHorn();
 }
 function awardRound(winnerKnight) {
