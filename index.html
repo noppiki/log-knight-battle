@@ -787,6 +787,12 @@ const CHARACTERS = [
     signatureSpecial:"quake", archetype:"BERSERKER",
     blurb:"高火力・高速だが隙も大きい。攻めの化身。",
     mul:{ maxSpeed:1.10, accel:1.12, swingImpulse:1.18, springK:0.82, hopV:1.0, knockScale:1.12 } },
+  { id:"gale", name:"ゲイル", en:"GALE KNIGHT", sprite:"knightGale", portrait:"portraitGale",
+    atlas:"knightGaleAtlas", atlasRow:0,
+    accent:"#3fd6e8", accentRGB:"50,171,186", badgeRGB:"40,137,148",
+    signatureSpecial:"whirl", archetype:"SKIRMISHER",
+    blurb:"疾風の手数。回転斬りで圧倒する。",
+    mul:{ maxSpeed:1.12, accel:1.15, swingImpulse:0.95, springK:1.10, hopV:1.10, knockScale:0.90 } },
 ];
 // charId -> character metadata (defaults to crimson on any unknown id, so a
 // stale/missing charId can never break a draw or a physics read).
@@ -1179,10 +1185,12 @@ const ASSET_SRCS = {
   knightWarden: "assets/knight_warden.png",
   knightVesper: "assets/knight_vesper.png",
   knightEmber:  "assets/knight_ember.png",
+  knightGale:   "assets/knight_gale.png",
   knightAtlas:  "assets/knight_atlas.png",
   knightWardenAtlas: "assets/knight_warden_atlas.png",
   knightVesperAtlas: "assets/knight_vesper_atlas.png",
   knightEmberAtlas:  "assets/knight_ember_atlas.png",
+  knightGaleAtlas:   "assets/knight_gale_atlas.png",
   titleCrest:   "assets/title_crest.png",
   iconMega:     "assets/icon_mega.png",
   iconCounter:  "assets/icon_counter.png",
@@ -1208,6 +1216,7 @@ const ASSET_SRCS = {
   portraitWarden:     "assets/portrait_warden.png",
   portraitVesper:     "assets/portrait_vesper.png",
   portraitEmber:      "assets/portrait_ember.png",
+  portraitGale:       "assets/portrait_gale.png",
   vsEmblem:           "assets/vs_emblem.png",
   fightEmblem:        "assets/fight_emblem.png",
   koEmblem:           "assets/ko_emblem.png",
@@ -6021,7 +6030,7 @@ function drawCenterText(text, sub, big) {
 // with drawHeroPreview so the strip is clamped to the clear band BETWEEN them.
 const HERO_PANEL_X = 24, HERO_PANEL_W = 300;
 function rosterIconRects(N) {
-  const gap = 14;                                  // horizontal gap between emblems
+  const gap = 10;                                  // horizontal gap between emblems
   // Clear band between the two hero panels (derived, not magic) + a small inset
   // so an emblem (and its outset P1 bracket) never overlaps a preview panel.
   const bandL = HERO_PANEL_X + HERO_PANEL_W + 10;        // 334
@@ -6029,7 +6038,10 @@ function rosterIconRects(N) {
   const bandW = bandR - bandL;                            // ~292
   const ideal = 96;                                // preferred emblem edge
   const fitW = (bandW - (N - 1) * gap) / N;
-  const size = Math.max(44, Math.min(ideal, Math.floor(fitW)));
+  // min=40 + gap=10 self-fits N=6: 6*40+5*10=290 <= 292 band (no panel collision);
+  // N=5 -> 50px emblems (290), N<=2 still hits the 96 ideal cap. Pure formula, no
+  // N-specific branch, so the strip stays clean as the roster grows.
+  const size = Math.max(40, Math.min(ideal, Math.floor(fitW)));
   const totalW = N * size + (N - 1) * gap;
   const x0 = bandL + (bandW - totalW) / 2;         // center within the band
   const y = 250;                                   // top of the emblem band (center-ish)
