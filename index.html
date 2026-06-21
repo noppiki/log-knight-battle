@@ -582,6 +582,9 @@ const TUNE = {
   swingReflect: 0.45,        // velocity retained (reversed) when hitting the angle clamp
   swingConsume: 0.40,        // fraction of MY swingVel kept after I land a hit (energy spent)
   tapMinInterval: 0.06,      // min seconds between taps (auto-repeat guard backstop)
+  // RENDER-ONLY swing-phase animation thresholds (drawKnight frame pick; NOT physics):
+  strikeFrameVel: 3.0,       // swingVel above this -> show STRIKE follow-through frame
+  windupFrameAng: 0.40,      // swingAngle below -this (cocked/recoiled back) -> WINDUP frame
 
   // physics-driven hit
   hitSpeed:    2.25,         // min |swingVel| (rad/s) toward foe for the pan to "bite"
@@ -772,7 +775,7 @@ const CHARACTERS = [
   { id:"crimson", name:"クリムゾン", en:"CRIMSON KNIGHT", sprite:"knightRed",  portrait:"portraitRed",
     atlas:"knightAtlas", atlasRow:0,
     accent:"#ff6b5e", accentRGB:"180,60,55", badgeRGB:"150,40,38",
-    signatureSpecial:"mega", archetype:"POWER",
+    signatureSpecial:"mega", archetype:"POWER", swingFrames:true,
     blurb:"標準にして重厚。最強の一撃。",
     mul:{ maxSpeed:1.0, accel:1.0, swingImpulse:1.0, springK:1.0, hopV:1.0, knockScale:1.0 } },
   { id:"azure", name:"アジュール", en:"AZURE KNIGHT", sprite:"knightBlue", portrait:"portraitBlue",
@@ -4188,9 +4191,10 @@ const KNIGHT_SEAT_TO_TOP = SEAT_FY * SPRITE_H * SPRITE_S; // ~101.6px seat->helm
 // from /tmp/atlas_pack.py's stdout. This block is PURE render metadata; it does
 // NOT touch panTip/bodyBox/SEAT_*/PAN_*/SPRITE_* hit geometry above.
 const ATLAS = { cols: 6, rows: 2, cellW: 315, cellH: 350, anchorFX: 0.5, anchorFY: 0.66 };
-// pose -> column. WINDUP/STRIKE exist in the sheet but are never drawn (the
-// swing is the rotating IDLE base; see drawKnight) so they get no enum here.
-const POSE = { IDLE: 0, HIT: 3, GUARD: 4, FALL: 5 };
+// pose -> column. WINDUP/STRIKE are drawn for characters flagged swingFrames
+// (drawKnight's swing-phase animation selects them off swingVel/swingAngle);
+// other characters fall back to the rotating IDLE base. RENDER-ONLY (no hit geom).
+const POSE = { IDLE: 0, WINDUP: 1, STRIKE: 2, HIT: 3, GUARD: 4, FALL: 5 };
 // On-screen draw scale for the atlas: match the proven sprite envelope. The
 // median USED figure is ~312px tall in-cell; KNIGHT_DRAW_H (~158.7px) is the
 // established on-screen height, so atlasScale = KNIGHT_DRAW_H / 312 ~= 0.51.
@@ -5436,10 +5440,21 @@ function drawKnight(k) {
     // sheet; warden=row0 of its own sheet), NOT the side — so the chosen
     // character's art is drawn regardless of slot.
     const row = ch.atlasRow || 0;
-    const pose = (k.state === ST.FALLING) ? POSE.FALL
-               : (k.knockTimer > 0)       ? POSE.HIT
-               : (k.state === ST.GUARD)   ? POSE.GUARD
-               :                            POSE.IDLE;
+    // Pose pick. FALL/HIT/GUARD are state-driven posed frames. Otherwise, for a
+    // character with its own WINDUP/STRIKE astride cells (swingFrames), animate the
+    // swing PHASE off the already-synced swingVel/swingAngle (RENDER-ONLY — the hit
+    // geometry is panTip/swingAngle and is untouched; these frames still rotate by
+    // drawSwing about the seat exactly like IDLE, the body just leans into the swing).
+    let pose;
+    if (k.state === ST.FALLING)      pose = POSE.FALL;
+    else if (k.knockTimer > 0)       pose = POSE.HIT;
+    else if (k.state === ST.GUARD)   pose = POSE.GUARD;
+    else if (ch.swingFrames) {
+      if (k.swingVel > TUNE.strikeFrameVel)          pose = POSE.STRIKE;  // fast forward swing -> follow-through
+      else if (k.swingVel < -TUNE.strikeFrameVel ||
+               k.swingAngle < -TUNE.windupFrameAng)  pose = POSE.WINDUP;  // fast backswing OR cocked back
+      else                                           pose = POSE.IDLE;
+    } else pose = POSE.IDLE;
     const sx = pose * ATLAS.cellW, sy = row * ATLAS.cellH;
     const sw = ATLAS.cellW, sh = ATLAS.cellH;
     const dw = ATLAS.cellW * ATLAS_SCALE, dh = ATLAS.cellH * ATLAS_SCALE;
@@ -5449,8 +5464,8 @@ function drawKnight(k) {
     ctx.scale(k.facing, 1);                 // mirror P2 to face left
     if (pose === POSE.FALL) {
       ctx.rotate(k.tumble || 0);            // tumble off the log
-    } else if (pose === POSE.IDLE) {
-      ctx.rotate(drawSwing);                // proven hit-coupled pendulum swing
+    } else if (pose === POSE.IDLE || pose === POSE.WINDUP || pose === POSE.STRIKE) {
+      ctx.rotate(drawSwing);                // proven hit-coupled pendulum swing (body frame only adds lean)
     }
     ctx.imageSmoothingEnabled = false;      // crisp pixel-art scaling
     // place the shared seat anchor at the origin (= seat pivot at k.x,k.y)
