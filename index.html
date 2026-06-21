@@ -7618,6 +7618,42 @@ function render() {
   drawAmbientParticles();   // mid-depth: behind log/knights, in front of parallax bg
   drawLog();
 
+  // Contact shadows on the log (grounding / ambient occlusion). Drawn AFTER the
+  // log and BEFORE the knights so both shadows sit on the bark under every
+  // knight. RENDER-ONLY: reads k.x / k.y / k.state only — no panTip/bodyBox/
+  // physics/online state is touched. The shadow shrinks and fades as a knight
+  // hops (a grounding cue) and tracks the log's earthquake horizontal offset so
+  // it never separates from the bark during a quake.
+  (function drawContactShadows() {
+    let qx = 0;
+    if ((p1 && p1.quakeActive) || (p2 && p2.quakeActive)) {
+      qx = Math.sin(frameCount * (TUNE.quakeShakeHz / 60) * Math.PI * 2) * TUNE.quakeShakeAmp;
+    }
+    for (const k of [p1, p2]) {
+      if (!k || k.state === ST.FALLING) continue;   // a rung-out knight casts no log shadow
+      const hop  = Math.max(0, logTopY - k.y);       // px above the seat baseline
+      const t    = Math.min(1, hop / 130);           // 0 = grounded .. 1 = high hop
+      const halfW = BODY_HALF_W * 1.18 * (1 - 0.45 * t);     // a touch wider than the body
+      const halfH = TUNE.logThickness * 0.30 * (1 - 0.30 * t);
+      const a    = 0.34 * (1 - 0.72 * t);            // fade with height
+      if (a <= 0.01 || halfW <= 1) continue;
+      const cx = k.x + qx;
+      const cy = logTopY + TUNE.logThickness * 0.34; // sit on the rounded log top
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(halfW, halfH);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      g.addColorStop(0,    "rgba(8,10,14," + a.toFixed(3) + ")");
+      g.addColorStop(0.6,  "rgba(8,10,14," + (a * 0.55).toFixed(3) + ")");
+      g.addColorStop(1,    "rgba(8,10,14,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(0, 0, 1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  })();
+
   // draw knights (back-most by x for slight depth: draw farther first)
   const order = [p1, p2];
   for (const k of order) {
