@@ -7195,13 +7195,36 @@ function drawTitle() {
   }
 
   ctx.textAlign = "center";
-  // title (just below the crest)
-  ctx.font = '900 64px "Trebuchet MS", sans-serif';
-  ctx.lineWidth = 10; ctx.strokeStyle = PAL.ink;
-  ctx.strokeText("LOG KNIGHT", VW / 2, 216);
-  ctx.fillStyle = PAL.redLight;  ctx.fillText("LOG KNIGHT", VW / 2, 216);
-  ctx.strokeText("BATTLE", VW / 2, 276);
-  ctx.fillStyle = PAL.bluLight;  ctx.fillText("BATTLE", VW / 2, 276);
+  // title (just below the crest) — engraved-metal wordmark: cast shadow for depth,
+  // a dark engraved base outline, a brushed-metal vertical gradient fill, a thin
+  // gold rim, and a clipped top sheen. Keeps the red(P1)/blue(P2) duel motif.
+  const TITLE_WORDS = [
+    { t: "LOG KNIGHT", y: 216, top: "#ff9a86", mid: PAL.redLight, bot: "#7e1c18" },
+    { t: "BATTLE",     y: 276, top: "#9ec0ff", mid: PAL.bluLight, bot: "#1c2f7e" },
+  ];
+  ctx.font = '900 66px "Trebuchet MS", sans-serif';
+  ctx.lineJoin = "round";
+  for (const w of TITLE_WORDS) {
+    // cast shadow (depth under the metal)
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,0.55)"; ctx.shadowBlur = 12; ctx.shadowOffsetY = 6;
+    ctx.fillStyle = "#000"; ctx.fillText(w.t, VW / 2, w.y);
+    ctx.restore();
+    // dark engraved base outline
+    ctx.lineWidth = 12; ctx.strokeStyle = PAL.ink; ctx.strokeText(w.t, VW / 2, w.y);
+    // brushed-metal vertical gradient fill (bright sheen top -> base -> shadowed bottom)
+    const g = ctx.createLinearGradient(0, w.y - 52, 0, w.y + 12);
+    g.addColorStop(0, w.top); g.addColorStop(0.5, w.mid); g.addColorStop(1, w.bot);
+    ctx.fillStyle = g; ctx.fillText(w.t, VW / 2, w.y);
+    // thin gold rim
+    ctx.lineWidth = 2.5; ctx.strokeStyle = PAL.skyAmber; ctx.strokeText(w.t, VW / 2, w.y);
+    // top sheen highlight clipped to the upper band of the glyphs
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, w.y - 54, VW, 24); ctx.clip();
+    ctx.fillStyle = "rgba(255,255,255,0.28)"; ctx.fillText(w.t, VW / 2, w.y);
+    ctx.restore();
+  }
+  ctx.lineJoin = "miter";
 
   ctx.font = 'italic 600 18px "Trebuchet MS", sans-serif';
   ctx.fillStyle = PAL.bone;
