@@ -5643,6 +5643,31 @@ function drawGaugeFill(cellRow, cellCol, bx, by, bw, bh, fillW, sideP1) {
   ctx.drawImage(IMG.gaugeFill, sX, csy, srcW, GFILL.cellH, destX, by, fillW, bh);
   ctx.restore();
 }
+// Iter 65: 5-layer engraved-metal HUD player label, matching iter62's title
+// wordmark recipe at HUD scale (16px). Sided palette tints the gradient so
+// the red/blue duel motif carries into the label. RENDER-ONLY.
+function drawEngravedHUDLabel(text, lx, ly, sidePal) {
+  ctx.save();
+  ctx.font = '900 16px "Trebuchet MS", sans-serif';
+  ctx.lineJoin = "round";
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.55)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = "#000"; ctx.fillText(text, lx, ly);
+  ctx.restore();
+  ctx.lineWidth = 5; ctx.strokeStyle = PAL.ink; ctx.strokeText(text, lx, ly);
+  const g = ctx.createLinearGradient(0, ly - 14, 0, ly + 3);
+  g.addColorStop(0, sidePal.light);
+  g.addColorStop(0.55, sidePal.body);
+  g.addColorStop(1, sidePal.dark);
+  ctx.fillStyle = g; ctx.fillText(text, lx, ly);
+  ctx.lineWidth = 1.2; ctx.strokeStyle = PAL.skyAmber; ctx.strokeText(text, lx, ly);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, ly - 15, VW, 7); ctx.clip();
+  ctx.fillStyle = "rgba(255,255,255,0.28)"; ctx.fillText(text, lx, ly);
+  ctx.restore();
+  ctx.restore();
+}
+
 function drawBalanceMeter(k, x, y, w, label, pal) {
   const h = 18;
   // life bar frame: Nordic stone sprite (with procedural fallback)
@@ -5749,12 +5774,10 @@ function drawBalanceMeter(k, x, y, w, label, pal) {
     ctx.fillText("SP · " + (spInfo ? spInfo.en : ""), rx, spY + spH + 13);
   }
 
-  // label + win pips
-  ctx.fillStyle = PAL.bone;
-  ctx.font = '700 16px "Trebuchet MS", sans-serif';
+  // label — iter 65 engraved-metal treatment (replaces flat Trebuchet)
   ctx.textAlign = k.side === "p1" ? "left" : "right";
   const lx = k.side === "p1" ? x : x + w;
-  ctx.fillText(label, lx, y - 8);
+  drawEngravedHUDLabel(label, lx, y - 8, pal);
 
   // pips — emblem sprites (empty socket / red gem / blue gem)
   const WINPIP = { cols: 3, cellW: 496, cellH: 496 };
