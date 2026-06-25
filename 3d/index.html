@@ -6572,6 +6572,32 @@
       camera.updateProjectionMatrix();
     }
 
+    // ── r97: updateBreatheFov ────────────────────────────────────────────
+    // Subtle 8s-period sin-wave FOV breathe in FP mode — ±0.5° amplitude.
+    // Creates a "living" viewpoint feel standard in AAA FP shooters.
+    // Guards:
+    //   • FP mode only — skips on cinematic / manual / 3rd-person.
+    //   • Skips when fovPunch is active (punch is authoritative for its ~0.26s).
+    //   • Skips when finisher-cam or match-intro hijack the camera.
+    // Base FOV source: FP_SHOT.fov — stays in sync with the r90 FOV slider
+    // (slider writes FP_SHOT.fov so breath auto-follows the user's preference).
+    const BREATHE_FOV_PERIOD_MS = 8000;
+    const BREATHE_FOV_AMP       = 0.5; // degrees — below motion-sickness threshold
+    function updateBreatheFov() {
+      if (!camera) return;
+      if (cameraDirector.viewMode !== 'fp') return;
+      // Other override states that own camera FOV — skip cleanly.
+      if (window._finisherCamActive)  return;
+      if (window._matchIntroActive)   return;
+      // fovPunch is authoritative for its short burst (~0.26s); breathe yields.
+      if (FpPolish.fovPunch.active)   return;
+      const base   = FP_SHOT.fov;                              // user-set baseline
+      const t      = performance.now() / BREATHE_FOV_PERIOD_MS;
+      const offset = Math.sin(t * Math.PI * 2) * BREATHE_FOV_AMP;
+      camera.fov   = base + offset;
+      camera.updateProjectionMatrix();
+    }
+
     // ── r61: triggerParryKick ────────────────────────────────────────────
     // Arms a 5° upward pitch kick on a successful parry. The per-frame
     // decay runs inside animate() via updateParryKick(delta), which is
@@ -12877,6 +12903,9 @@
       // updateFovPunch() bails out cheaply when the punch isn't active
       // or when viewMode !== 'fp'.
       updateFovPunch(delta);
+      // r97: breathe FOV micro-zoom — 8s sin-wave ±0.5° in FP mode.
+      // Called AFTER fovPunch so punch wins when both could fire.
+      updateBreatheFov();
       // FP lock-on bracket — world→screen projection of azure's AABB.
       // Runs after camera ownership so the projection uses the final
       // camera pose for this frame. Bails cheaply when not in FP mode.
