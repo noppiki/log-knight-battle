@@ -6266,6 +6266,9 @@
         if (_azHpBar) _azHpBar.classList.remove('desperate-pulse');
       } catch (e) {}
 
+      // r115: stop flame stream immediately on deactivation (particles finish naturally)
+      try { if (typeof desperateFlameSystem !== 'undefined') desperateFlameSystem.clearAll(); } catch (e) {}
+
       console.log('[lkb-3d] r73 azure desperate → INACTIVE');
     }
 
@@ -8602,6 +8605,117 @@
 
     const ambientGustSystem = new AmbientGustSystem(scene, camera);
 
+    /* ── DesperateFlameSystem (r115) ─────────────────────────────────────
+       Red-orange additive flame particles rising from azure's feet while
+       desperate mode is active (HP ≤ 25%).  Spawns 4–6 billboard planes
+       every 600 ms; each rises ~0.8–1.2 m over 500–700 ms then fades out.
+       Uses AdditiveBlending so overlapping particles brighten toward white,
+       giving a genuine fire feel.  Tagged name='desperate_flame' for cleanup.
+       resetMatch() and deactivateAzureDesperate() both call clearAll() so
+       particles never leak between rounds.
+    ──────────────────────────────────────────────────────────────────────── */
+    class DesperateFlameSystem {
+      constructor(scene, camera) {
+        this.scene    = scene;
+        this.camera   = camera;
+        this.particles = [];
+        this.lastSpawnMs = 0;
+        this.spawnIntervalMs = 600;
+      }
+
+      _spawnBurst(worldPos) {
+        const count = 4 + Math.floor(Math.random() * 3); // 4–6
+        for (let i = 0; i < count; i++) {
+          const offsetX = (Math.random() - 0.5) * 0.5;
+          const offsetZ = (Math.random() - 0.5) * 0.5;
+          const size    = 0.15 + Math.random() * 0.10; // 0.15–0.25 m
+          const speedY  = 1.0  + Math.random() * 0.50; // 1.0–1.5 m/s
+          const lifeMs  = 500  + Math.random() * 200;  // 500–700 ms
+
+          const geo = new THREE.PlaneGeometry(size, size);
+          const mat = new THREE.MeshBasicMaterial({
+            color:     0xff5520,   // red-orange
+            transparent: true,
+            opacity:   0.55,
+            depthWrite: false,
+            blending:  THREE.AdditiveBlending,
+            side:      THREE.DoubleSide,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(
+            worldPos.x + offsetX,
+            worldPos.y + 0.05,  // just above ground
+            worldPos.z + offsetZ
+          );
+          // Billboard toward camera at spawn (cheap; no per-frame cost)
+          mesh.lookAt(this.camera.position);
+          mesh.userData = {
+            speedY,
+            lifeMs,
+            startMs:     performance.now(),
+            baseOpacity: mat.opacity,
+          };
+          mesh.name = 'desperate_flame';
+          mesh.frustumCulled = false;
+          this.scene.add(mesh);
+          this.particles.push(mesh);
+        }
+      }
+
+      update(delta) {
+        const ad = window._azureDesperate;
+        if (!ad) return;
+        const now = performance.now();
+
+        // Spawn new burst while desperate active and azure is alive
+        if (ad.active) {
+          const azRoot = (typeof combatants !== 'undefined' && combatants && combatants.azure)
+                         ? combatants.azure.root : null;
+          if (azRoot && now - this.lastSpawnMs > this.spawnIntervalMs) {
+            this.lastSpawnMs = now;
+            this._spawnBurst(azRoot.position);
+          }
+        }
+
+        // Animate existing particles (runs even after deactivate so they gracefully finish)
+        const toRemove = [];
+        for (const p of this.particles) {
+          const ud      = p.userData;
+          const elapsed = now - ud.startMs;
+          const t       = elapsed / ud.lifeMs;
+          if (t >= 1) { toRemove.push(p); continue; }
+
+          // Rise
+          p.position.y += ud.speedY * delta;
+          // Slight lateral drift for organic feel
+          p.position.x += (p.userData.driftX || (p.userData.driftX = (Math.random() - 0.5) * 0.3)) * delta;
+
+          // Fade out linearly
+          p.material.opacity = ud.baseOpacity * (1.0 - t);
+        }
+        for (const p of toRemove) {
+          this.scene.remove(p);
+          p.geometry.dispose();
+          p.material.dispose();
+          const idx = this.particles.indexOf(p);
+          if (idx !== -1) this.particles.splice(idx, 1);
+        }
+      }
+
+      clearAll() {
+        for (const p of this.particles) {
+          this.scene.remove(p);
+          p.geometry.dispose();
+          p.material.dispose();
+        }
+        this.particles.length = 0;
+        this.lastSpawnMs = 0;
+      }
+    }
+
+    const desperateFlameSystem = new DesperateFlameSystem(scene, camera);
+    window.desperateFlameSystem = desperateFlameSystem;
+
     // r68: count/velScale optional — legacy callers (no args) keep old behaviour.
     window.spawnGroundDust = function spawnGroundDust(worldPos, count, velScale) {
       try {
@@ -9444,6 +9558,8 @@
       try { groundDustSystem.clearAll(); } catch (e) {}
       // r67: clear ambient gust particles between rounds
       try { ambientGustSystem.clearAll(); } catch (e) {}
+      // r115: clear desperate flame particles between rounds
+      try { desperateFlameSystem.clearAll(); } catch (e) {}
       try {
         const flashLights = scene.children.filter((o) => o.name === 'tier2_flash');
         flashLights.forEach((l) => scene.remove(l));
@@ -13357,6 +13473,7 @@
       try { snowPuffSystem.update(delta); } catch (e) {}
       try { groundDustSystem.update(delta); } catch (e) {} // r60: tier2 ground dust
       try { ambientGustSystem.update(delta); } catch (e) {} // r67: ambient dust gusts
+      try { desperateFlameSystem.update(delta); } catch (e) {} // r115: azure desperate flame stream
       try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
