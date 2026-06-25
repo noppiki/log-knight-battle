@@ -1641,14 +1641,24 @@
           }
           this.active = true;
           this.controls.enabled = false;
+          // Hide crimson's own meshes (helm/body) so the camera looking
+          // out of the head doesn't see the inside of its own helm, and
+          // attach a sword viewmodel parented to the camera.
+          setCrimsonSelfVisible(false);
+          attachFpSword();
           return;
         }
 
         // Leaving FP (or arriving from any other state) — restore fov if
-        // we'd switched to FP fov previously.
-        if (prev === 'fp' && this.camera.fov !== this.originalFov) {
-          this.camera.fov = this.originalFov;
-          this.camera.updateProjectionMatrix();
+        // we'd switched to FP fov previously, and undo the FP self-rig
+        // tweaks (re-show crimson meshes, drop the viewmodel sword).
+        if (prev === 'fp') {
+          if (this.camera.fov !== this.originalFov) {
+            this.camera.fov = this.originalFov;
+            this.camera.updateProjectionMatrix();
+          }
+          setCrimsonSelfVisible(true);
+          detachFpSword();
         }
 
         if (mode === 'cinematic') {
@@ -1710,6 +1720,102 @@
           this.elapsed = 0;
         }
       }
+    }
+
+    // ── FP self-rig helpers ────────────────────────────────────
+    // In FP view the camera lives INSIDE crimson's head; without these
+    // tweaks the camera sees the inside of its own helm and no weapon.
+    // We:
+    //   1) Hide every mesh under crimson's rig so the helm/body don't
+    //      occlude the lens (animations keep ticking; only visibility flips).
+    //   2) Clone crimson's sword mesh into a Three.Object3D parented to
+    //      `camera` so it travels with the view (and ignores the world rig
+    //      pose) — classic FPS weapon-viewmodel pattern.
+    // State is intentionally module-scoped (not on the director) because
+    // it ties together the camera and the loaded GLB, both of which live
+    // at this scope.
+    let fpSwordClone = null;
+    let fpPendingAttach = false; // retry flag for boot-restore-before-load
+
+    function setCrimsonSelfVisible(visible) {
+      // TDZ guard: `combatants` is a `const` declared further down. If this
+      // runs during the boot-restore path (saved viewMode === 'fp') BEFORE
+      // the const initializer executes, plain access throws a TDZ
+      // ReferenceError that kills the whole module. `typeof` does NOT
+      // exempt TDZ either — so we have to try/catch the read itself and
+      // defer the visibility flip until the crimson loader can re-apply it.
+      let root = null;
+      try { root = combatants?.crimson?.root; } catch (e) { /* TDZ — combatants not yet declared */ }
+      if (!root) { fpPendingAttach = true; return; }
+      root.traverse((obj) => {
+        if (obj.isMesh) obj.visible = visible;
+      });
+    }
+
+    function attachFpSword() {
+      if (fpSwordClone) return; // already attached
+      // TDZ guard mirrors setCrimsonSelfVisible — see comment there.
+      let root = null;
+      try { root = combatants?.crimson?.root; } catch (e) { /* TDZ — combatants not yet declared */ }
+      if (!root) {
+        // crimson.glb hasn't finished loading yet (boot restore path).
+        // Re-arm a single deferred attempt; once the GLB resolves we'll
+        // pick it up. Idempotent — multiple flag flips collapse to one
+        // pending retry chain.
+        if (fpPendingAttach) return;
+        fpPendingAttach = true;
+        const tryLater = () => {
+          if (!fpPendingAttach) return; // user left FP before load finished
+          if (!combatants.crimson?.root) {
+            setTimeout(tryLater, 150);
+            return;
+          }
+          fpPendingAttach = false;
+          // Re-apply both sides (visibility + sword) now that the rig exists.
+          setCrimsonSelfVisible(false);
+          attachFpSword();
+        };
+        setTimeout(tryLater, 150);
+        return;
+      }
+      // Find the first sword mesh by name (case-insensitive substring match).
+      let swordSrc = null;
+      root.traverse((o) => {
+        if (!swordSrc && o.isMesh && /sword/i.test(o.name)) swordSrc = o;
+      });
+      if (!swordSrc) {
+        console.warn('[fp] no Sword mesh found in crimson rig');
+        return;
+      }
+      const clone = swordSrc.clone();
+      // Reset to a camera-local rest pose (right-hand grip, blade out & up).
+      clone.position.set(0.3, -0.35, -0.7);
+      clone.rotation.set(-Math.PI / 6, -Math.PI / 8, -Math.PI / 4);
+      clone.scale.set(1.0, 1.0, 1.0);
+      clone.visible = true;
+      // Suppress self-shadowing of the world by the viewmodel.
+      clone.castShadow = false;
+      clone.receiveShadow = false;
+      // Render late so the blade isn't clipped by world geometry behind it.
+      // Keep depthTest=true (default) — turning it off causes the blade to
+      // punch through HUD/overlays.
+      clone.renderOrder = 9999;
+      camera.add(clone);
+      // Three.js only renders Object3D children if their parent chain
+      // ultimately reaches `scene`. The camera is typically not added
+      // (it just gets read by the renderer), so ensure it is now.
+      if (!camera.parent) scene.add(camera);
+      fpSwordClone = clone;
+    }
+
+    function detachFpSword() {
+      // Cancel any pending boot-restore retry — user has left FP.
+      fpPendingAttach = false;
+      if (!fpSwordClone) return;
+      camera.remove(fpSwordClone);
+      try { fpSwordClone.geometry?.dispose?.(); } catch (e) {}
+      try { fpSwordClone.material?.dispose?.(); } catch (e) {}
+      fpSwordClone = null;
     }
 
     // Cycle order: A → B → A → C → A → D (loops back to A).
@@ -2664,6 +2770,15 @@
         scene.add(root);
         outlinePass.selectedObjects.push(root);
         setupMixerFor(gltf, 'crimson');
+        // FP boot-restore replay: if the user's saved viewMode was 'fp',
+        // the early setCrimsonSelfVisible/attachFpSword calls hit the TDZ
+        // guard and set fpPendingAttach = true without doing anything.
+        // Now that combatants.crimson exists, replay the deferred state.
+        if (fpPendingAttach && cameraDirector?.viewMode === 'fp') {
+          fpPendingAttach = false;
+          setCrimsonSelfVisible(false);
+          attachFpSword();
+        }
         markLoaded();
       },
       undefined,
