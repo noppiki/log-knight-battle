@@ -5790,6 +5790,19 @@
     // JS owns only the .active toggle; CSS @keyframes drives the 1.5s opacity pulse.
     const STM_WARN_THRESHOLD = 15;
     const _staminaWarnEl = document.getElementById('fp-stamina-warn');
+    // r101: edge-crossing flag — tracks whether the low-stamina audio cue has fired
+    // for the current "below-threshold" crossing so the tone plays exactly once per dip.
+    let _stamLowActive = false;
+
+    // r101: playLowStamCue — sharp descending triangle tone signalling stamina danger.
+    // Lower frequencies (800→400 Hz) than the r90 low-HP cue (1000→500 Hz) to reflect
+    // that stamina is less critical than HP. Routed through sfxGain → globalGain so
+    // the master-mute toggle silences it correctly.
+    function playLowStamCue() {
+      try {
+        tone({ freq: 800, freq2: 400, dur: 0.12, type: 'triangle', vol: 0.08, attack: 0.02 });
+      } catch (e) {}
+    }
 
     function updateStaminaWarn() {
       if (!_staminaWarnEl) return;
@@ -5798,6 +5811,14 @@
       // full exhaustion; we deactivate warn so the two states don't compete visually.
       const active = stm <= STM_WARN_THRESHOLD && stm > 0;
       _staminaWarnEl.classList.toggle('active', active);
+      // r101: edge-crossing detection — fire audio cue once on the first frame stamina
+      // drops into the warning band; reset the flag when stamina recovers above threshold.
+      if (active && !_stamLowActive) {
+        _stamLowActive = true;
+        playLowStamCue();
+      } else if (!active && _stamLowActive) {
+        _stamLowActive = false;
+      }
     }
 
     // Lerp helper for 0-255 integer channel
@@ -9209,6 +9230,9 @@
       // the round banner fires).
       try { if (typeof deactivateDanger === 'function' && window._dangerState && window._dangerState.active) deactivateDanger(); } catch (e) {}
       try { if (typeof _stopDangerRumble === 'function') _stopDangerRumble(); } catch (e) {}
+      // r101: reset low-stamina cue edge-crossing flag so the next round can re-fire
+      // the cue if stamina drops below threshold again.
+      try { _stamLowActive = false; } catch (e) {}
       // r82: also stop sub-bass tension layer (safety — triggerDeath normally
       // handles this, but resetMatch is the idempotent backstop).
       try { stopBgmTension(); } catch (e) {}
