@@ -6495,6 +6495,16 @@
         try { window._koReplayRestoreFn(); } catch (e) {}
         window._koReplayRestoreFn = null;
       }
+      // r56: also cancel any in-flight hit-stop so mixers don't stay at 0
+      // when a round resets mid-freeze.
+      if (window._hitLagHandle) {
+        clearTimeout(window._hitLagHandle);
+        window._hitLagHandle = null;
+      }
+      if (window._hitLagRestoreFn) {
+        try { window._hitLagRestoreFn(); } catch (e) {}
+        window._hitLagRestoreFn = null;
+      }
       for (const id of ['crimson', 'azure']) {
         const s = window.gameState[id];
         s.hp      = HP_MAX;
@@ -6854,7 +6864,7 @@
     // meta object from earlier phases (in which case we default to the
     // midpoint of the two knights at (0, 1.3, 0)). This is the single
     // entry point the combat loop calls on each contact frame.
-    window.triggerImpact = function triggerImpact(hitPos) {
+    window.triggerImpact = function triggerImpact(hitPos, chargeTier) {
       let pos;
       if (hitPos && typeof hitPos.x === 'number' && typeof hitPos.y === 'number' && typeof hitPos.z === 'number') {
         pos = hitPos;
@@ -6871,23 +6881,51 @@
       //    feature-detect so an audio init failure can't break combat.
       try { if (window.sfxHit) window.sfxHit(); } catch (e) {}
 
-      // ── HIT LAG (meaty-hit freeze frame). Snap all skeletal mixers to
-      //    timeScale=0 for ~100 ms, then restore. impactSystem.update
-      //    reads its own wall-clock delta so particles / shake / bloom
-      //    keep playing — only character animation freezes. WeaponTrail
-      //    is paused via a `frozen` flag the trail's update() honors.
+      // ── r56: HIT-STOP (meaty-hit freeze frame). Snap all skeletal mixers
+      //    to timeScale=0 then restore after a charge-tier-scaled delay.
+      //    Duration: tier0=80ms, tier1=120ms, tier2=180ms (caller passes
+      //    chargeTier; legacy callers omit it → defaults to 0 → 80ms).
+      //
+      //    Re-entry / double-fire fix: cancel any pending restore before
+      //    capturing `saved`. This ensures we never snapshot timeScale=0
+      //    (the "ghost timer" freeze bug where a rapid second hit would
+      //    capture the already-zeroed scales and restore to 0 permanently).
+      //    Mirrors the _koReplayHandle/RestoreFn pattern from KO_REPLAY
+      //    (distinct saved-scale buffer — no cross-contamination).
+      //
+      //    impactSystem.update reads wall-clock delta independently, so
+      //    particles / shake / bloom keep playing during the freeze.
+      //    WeaponTrail is paused via the `frozen` flag its update() honors.
       try {
         if (mixers && mixers.length > 0) {
-          const HIT_LAG_MS = 100;
+          const tier = (chargeTier != null) ? chargeTier : 0;
+          const HIT_STOP_MS = tier >= 2 ? 180 : (tier >= 1 ? 120 : 80);
+
+          // Cancel any in-flight restore so we don't snapshot zeroed scales.
+          if (window._hitLagHandle) {
+            clearTimeout(window._hitLagHandle);
+            window._hitLagHandle = null;
+          }
+          if (window._hitLagRestoreFn) {
+            // Previous hit-stop was still active — restore first so the
+            // saved[] below captures genuine pre-freeze values (all 1s).
+            try { window._hitLagRestoreFn(); } catch (_) {}
+            window._hitLagRestoreFn = null;
+          }
+
           const saved = mixers.map(m => m.timeScale);
           mixers.forEach(m => { m.timeScale = 0; });
           if (weaponTrail) weaponTrail.frozen = true;
-          setTimeout(() => {
+
+          window._hitLagRestoreFn = function () {
             for (let i = 0; i < mixers.length; i++) {
               mixers[i].timeScale = (saved[i] != null) ? saved[i] : 1;
             }
             if (weaponTrail) weaponTrail.frozen = false;
-          }, HIT_LAG_MS);
+            window._hitLagHandle    = null;
+            window._hitLagRestoreFn = null;
+          };
+          window._hitLagHandle = setTimeout(window._hitLagRestoreFn, HIT_STOP_MS);
         }
       } catch (e) { console.warn('[lkb-3d] hitLag threw', e); }
     };
@@ -7774,7 +7812,7 @@
         const hitPos = defenderRoot
           ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
           : { x: 0, y: 1.0, z: 0 };
-        try { window.triggerImpact(hitPos); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
+        try { window.triggerImpact(hitPos, myChargeTier); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
         // r55: tier2 — screen edge cyan flash on impact
         if (myChargeTier >= 2) {
           const flashEl = FpPolish.chargeImpactEl;
