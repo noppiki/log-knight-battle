@@ -5410,6 +5410,117 @@
       }, 600);
     }
 
+    // ── r75: azure attack-range visualizer ──────────────────────────
+    // During azure's telegraph window (FP mode only), a thin amber ring
+    // is drawn on the ground centred on azure's feet, showing the reach
+    // of the incoming sword strike (~2.0m radius). The ring fades out as
+    // the actual swing fires so it reads as a danger-zone cue rather than
+    // a permanent UI element.
+    //
+    // State: window._azureRangeRing = { mesh, fadeTick, gen }
+    //   mesh     — THREE.Mesh in scene, or null
+    //   fadeTick — rAF token for the fade loop, or 0
+    //   gen      — generation counter; incremented on each hide() call
+    //              so stale fade loops self-cancel (same pattern as _swingId)
+    //
+    // Public API (called by triggerEnemyTelegraph + resetMatch):
+    //   _showAzureRangeRing()    — create/show ring at azure's position
+    //   _hideAzureRangeRing(ms)  — fade out over <ms> then dispose
+    //   _removeAzureRangeRingNow() — instant teardown (reset / safety)
+    const RANGE_RING_RADIUS = 2.0;   // metres — sword reach estimate
+    const RANGE_RING_OPACITY = 0.38; // ambient opacity at full show
+
+    window._azureRangeRing = { mesh: null, fadeTick: 0, gen: 0 };
+
+    function _removeAzureRangeRingNow() {
+      const rr = window._azureRangeRing;
+      rr.gen++;                         // cancel any running fade loop
+      if (rr.fadeTick) { cancelAnimationFrame(rr.fadeTick); rr.fadeTick = 0; }
+      if (rr.mesh) {
+        try { scene.remove(rr.mesh); } catch (e) {}
+        try { rr.mesh.geometry.dispose(); } catch (e) {}
+        try {
+          const mats = Array.isArray(rr.mesh.material) ? rr.mesh.material : [rr.mesh.material];
+          mats.forEach((m) => m.dispose());
+        } catch (e) {}
+        rr.mesh = null;
+      }
+    }
+
+    function _showAzureRangeRing() {
+      // Teardown any leftover ring from a previous telegraph first.
+      _removeAzureRangeRingNow();
+      const az = combatants && combatants.azure;
+      if (!az || !az.root) return;
+      try {
+        // Position: azure root x/z, y just above ground to avoid z-fight.
+        const cx = az.root.position.x;
+        const cz = az.root.position.z;
+        const geo = new THREE.RingGeometry(
+          RANGE_RING_RADIUS - 0.05,  // innerRadius
+          RANGE_RING_RADIUS + 0.05,  // outerRadius — 10cm band
+          64,                        // segments
+        );
+        const mat = new THREE.MeshBasicMaterial({
+          color:       0xffb840,   // amber-orange
+          transparent: true,
+          opacity:     0,          // start invisible; animate to RANGE_RING_OPACITY
+          depthWrite:  false,
+          side:        THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.name     = 'azure_range_ring';
+        mesh.rotation.x = -Math.PI / 2;  // lie flat on ground
+        mesh.position.set(cx, 0.02, cz);
+        scene.add(mesh);
+        window._azureRangeRing.mesh = mesh;
+
+        // Fade-in to RANGE_RING_OPACITY over ~120ms using rAF.
+        const myGen      = window._azureRangeRing.gen;
+        const startMs    = performance.now();
+        const FADE_IN_MS = 120;
+        const fadeIn = () => {
+          if (window._azureRangeRing.gen !== myGen) return; // stale
+          const t    = Math.min((performance.now() - startMs) / FADE_IN_MS, 1);
+          mat.opacity = t * RANGE_RING_OPACITY;
+          if (t < 1) {
+            window._azureRangeRing.fadeTick = requestAnimationFrame(fadeIn);
+          } else {
+            window._azureRangeRing.fadeTick = 0;
+          }
+        };
+        window._azureRangeRing.fadeTick = requestAnimationFrame(fadeIn);
+      } catch (e) {
+        console.warn('[lkb-3d] _showAzureRangeRing threw', e);
+      }
+    }
+
+    function _hideAzureRangeRing(fadeMs) {
+      const rr = window._azureRangeRing;
+      if (!rr.mesh) return;
+      rr.gen++;                 // invalidate any running fade-in loop
+      if (rr.fadeTick) { cancelAnimationFrame(rr.fadeTick); rr.fadeTick = 0; }
+      const myGen   = rr.gen;
+      const mesh    = rr.mesh;
+      const mat     = mesh.material;
+      const startOp = (mat && mat.opacity) || 0;
+      if (!fadeMs || startOp <= 0) { _removeAzureRangeRingNow(); return; }
+      const startMs = performance.now();
+      const fadeOut = () => {
+        if (window._azureRangeRing.gen !== myGen) return; // stale
+        const t    = Math.min((performance.now() - startMs) / fadeMs, 1);
+        const ease = 1 - t * t;  // quadratic ease-out feel
+        try { mat.opacity = startOp * ease; } catch (e) {}
+        if (t < 1) {
+          rr.fadeTick = requestAnimationFrame(fadeOut);
+        } else {
+          rr.fadeTick = 0;
+          _removeAzureRangeRingNow();
+        }
+      };
+      rr.fadeTick = requestAnimationFrame(fadeOut);
+    }
+
     // ── r51: triggerEnemyTelegraph ──────────────────────────────────
     // Pre-attack warning system for FP mode. Called from combatTick
     // immediately when azure is chosen as attacker. Flow:
@@ -5450,6 +5561,15 @@
       // ── Audio: low horn warning cue ───────────────────────────────
       try { if (window.sfxHorn) window.sfxHorn(); } catch (e) {}
 
+      // ── r75: range ring — show sword-reach danger zone on ground ───
+      // Only in FP mode when azure is the attacker (same condition as
+      // the telegraph vignette). The ring fades out as the swing fires.
+      const isFpTelegraph = (cameraDirector && cameraDirector.viewMode === 'fp') &&
+                            (attackerLabel === 'azure');
+      if (isFpTelegraph) {
+        try { _showAzureRangeRing(); } catch (e) {}
+      }
+
       // ── Delayed attack launch ─────────────────────────────────────
       setTimeout(() => {
         // Clear telegraph overlays.
@@ -5458,6 +5578,9 @@
         FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
         // r52: clear parry window timestamp — attack is now launching.
         attacker._telegraphAt = 0;
+
+        // r75: hide range ring — fade out over 200ms as the sword swings.
+        if (isFpTelegraph) { try { _hideAzureRangeRing(200); } catch (e) {} }
 
         // Safety checks before committing to the swing.
         if (attacker._swingId !== mySwing) return; // superseded
@@ -5526,6 +5649,8 @@
         if (warnEl)  warnEl.classList.remove('active');
         if (alertEl) alertEl.classList.remove('active');
         if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+        // r75: hide range ring on feint-parry path.
+        try { _hideAzureRangeRing(180); } catch (e) {}
         // Reset azure to idle — critical: prevents permanent windup-stuck state.
         attacker.state = 'idle';
         try { playClip(attacker, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true }); } catch (e) {}
@@ -5551,6 +5676,8 @@
       if (warnEl)  warnEl.classList.remove('active');
       if (alertEl) alertEl.classList.remove('active');
       if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+      // r75: hide range ring on successful parry.
+      try { _hideAzureRangeRing(180); } catch (e) {}
 
       // ── 3) Reset attacker (azure) to idle ───────────────────────────
       attacker.state = 'idle';
@@ -8018,6 +8145,8 @@
       // we force-stop here to guarantee emissive and interval are restored
       // before the round banner fires).
       try { if (typeof deactivateAzureDesperate === 'function' && window._azureDesperate && window._azureDesperate.active) deactivateAzureDesperate(); } catch (e) {}
+      // r75: force-remove range ring so it never leaks into the next round.
+      try { if (typeof _removeAzureRangeRingNow === 'function') _removeAzureRangeRingNow(); } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
