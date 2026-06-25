@@ -7069,6 +7069,53 @@
       fpSwordClone.position.z = base.z + offsetZ;
     }
 
+    // ── r134: updateSwordThrust ───────────────────────────────────────────
+    // Tier-2 charge release — forward thrust offset on fpSwordClone.
+    // On tier-2 release the sword punches -0.3 m forward (camera -z) with an
+    // ease-out curve over 80 ms to peak, then ease-in back to base over 200 ms.
+    // Tier 0/1 never fire this; tier-2 block calls triggerSwordThrust().
+    //
+    // Interaction with r116 (position breath):
+    //   breath early-returns during crimson.state==='attack' (see r116 guard),
+    //   so breath and thrust are never simultaneously active. We write z absolutely
+    //   (base.z + offset) each frame — no risk of per-frame accumulation.
+    // Ordering: called AFTER updateWeaponPositionBreath in animate() by convention,
+    //   but the exclusivity means ordering is not critical.
+    const _thrustState = {
+      active:     false,
+      startMs:    0,
+      peakOffset: -0.3, // forward (-z in camera/Three.js space)
+      peakAtMs:   80,   // ms until peak
+      totalMs:    280,  // 80 peak + 200 ease-out
+    };
+    function triggerSwordThrust() {
+      _thrustState.active  = true;
+      _thrustState.startMs = performance.now();
+    }
+    function updateSwordThrust() {
+      if (!_thrustState.active) return;
+      const t = performance.now() - _thrustState.startMs;
+      if (t >= _thrustState.totalMs) {
+        _thrustState.active = false;
+        return;
+      }
+      if (!fpSwordClone) return;
+      const base = fpSwordClone._basePosition;
+      if (!base) return;
+      let offset;
+      if (t <= _thrustState.peakAtMs) {
+        // ease-out quad to peak
+        const norm = t / _thrustState.peakAtMs;
+        offset = _thrustState.peakOffset * (1 - (1 - norm) * (1 - norm));
+      } else {
+        // ease-in quad back to 0
+        const norm = (t - _thrustState.peakAtMs) / (_thrustState.totalMs - _thrustState.peakAtMs);
+        offset = _thrustState.peakOffset * (1 - norm * norm);
+      }
+      // Absolute write — breath is suppressed during attack state so no base drift.
+      fpSwordClone.position.z = base.z + offset;
+    }
+
     // ── r111: updateWeaponGlint ──────────────────────────────────────────
     // Idle weapon glint — subtle warm-white emissive flash on fpSwordClone,
     // Sekiro/MK style "blade life". Fires every 10s ± 2s (random per cycle),
@@ -12316,6 +12363,11 @@
       if (myChargeTier >= 2) {
         try { triggerEdgeBlur(); } catch (e) {}
       }
+      // r134: tier-2 sword forward thrust — punch blade -0.3 m forward at release.
+      // Visual only, no hit-detection impact; self-cancels at 280ms via per-frame decay.
+      if (myChargeTier === 2) {
+        try { triggerSwordThrust(); } catch (e) {}
+      }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
       // Impact at ~70% through the swing — matches combatTick timing.
@@ -14122,6 +14174,9 @@
       // r116: idle weapon position breath — 8s sin-wave ±0.005/0.003 unit Y/Z.
       // Phase-locked with r97/r98; additive onto _basePosition captured at attach.
       updateWeaponPositionBreath();
+      // r134: tier-2 sword forward thrust — 80ms peak / 200ms ease-out (-0.3m z).
+      // Breath is suppressed during attack state so these are mutually exclusive.
+      updateSwordThrust();
       // r111: idle weapon glint — warm-white emissive flash every ~10s when idle.
       updateWeaponGlint();
       // FP lock-on bracket — world→screen projection of azure's AABB.
