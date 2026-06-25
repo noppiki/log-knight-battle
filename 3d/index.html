@@ -7426,6 +7426,61 @@
       fpSwordClone.rotation.z = base.z + swayZ;
     }
 
+    // ── r154: updateAzureWeaponSway ─────────────────────────────────────
+    // Mirrors r98 updateWeaponSway for the azure (enemy) sword mesh so the
+    // opponent reads as alive during idle / guard, not a frozen statue.
+    //   Y-axis (yaw):  ±0.5° primary pendulum drift
+    //   Z-axis (roll): ±0.3° secondary roll wobble at 75% freq (asymmetric)
+    // Period is the same 8s as r97/r98 so both fighters breathe at the same
+    // pace without feeling copy-pasted (phase offset comes from the two
+    // separate time divisors and cosine vs sine mixing).
+    // Guards:
+    //   • Active only in idle / guard states.
+    //   • Restores _baseRotation when state leaves idle/guard (attack, hit,
+    //     desperate, moving, dead) so swing animation owns rotation cleanly.
+    //   • _azureSwordRef cached lazily; nulled in resetMatch() for roster-swap safety.
+    //   • Trail system (r119) uses a separate geometry/material — no conflict.
+    let _azureSwordRef = null;
+    function updateAzureWeaponSway() {
+      const az = combatants && combatants.azure;
+      if (!az) return;
+      // Lazy-resolve the sword mesh once per round.
+      if (!_azureSwordRef) {
+        const azRoot = az.root;
+        if (!azRoot) return;
+        let found = null;
+        azRoot.traverse(function (o) {
+          if (!found && o.isMesh && o.name === 'Azure_1H_Sword') found = o;
+        });
+        if (!found) {
+          azRoot.traverse(function (o) {
+            if (!found && o.isMesh && /sword/i.test(o.name)) found = o;
+          });
+        }
+        if (!found) return; // GLB has no sword mesh — silent skip
+        _azureSwordRef = found;
+        _azureSwordRef._baseRotation = _azureSwordRef.rotation.clone();
+      }
+      const state = az.state;
+      // Only sway during idle / guard; restore baseline for all other states.
+      if (state !== 'idle' && state !== 'guard') {
+        const base = _azureSwordRef._baseRotation;
+        if (base) {
+          _azureSwordRef.rotation.x = base.x;
+          _azureSwordRef.rotation.y = base.y;
+          _azureSwordRef.rotation.z = base.z;
+        }
+        return;
+      }
+      const t     = performance.now() / WEAPON_SWAY_PERIOD_MS;
+      const swayY = Math.sin(t * Math.PI * 2) * THREE.MathUtils.degToRad(WEAPON_SWAY_Y_DEG);
+      const swayZ = Math.cos(t * Math.PI * 2 * 0.75) * THREE.MathUtils.degToRad(WEAPON_SWAY_Z_DEG);
+      const base  = _azureSwordRef._baseRotation || { x: 0, y: 0, z: 0 };
+      _azureSwordRef.rotation.x = base.x;
+      _azureSwordRef.rotation.y = base.y + swayY;
+      _azureSwordRef.rotation.z = base.z + swayZ;
+    }
+
     // ── r116: updateWeaponPositionBreath ────────────────────────────────
     // Additive idle position micro-sway on fpSwordClone, phase-locked with
     // r97 updateBreatheFov (same 8s period / same performance.now() time base).
@@ -10650,6 +10705,9 @@
       // from the freshly-loaded GLB (roster-swap safe; per-frame lerp will restart
       // from whatever intensity the material currently has).
       try { _azureShieldMat = null; } catch (e) {}
+      // r154: null the cached azure sword ref so the next round re-resolves the mesh
+      // from the freshly-loaded GLB (roster-swap safe).
+      try { _azureSwordRef = null; } catch (e) {}
       // r139: null the envMap baseline array so next round re-captures from the
       // fresh scene at full HP. HP resets to HP_MAX above so ratio → 1.0 immediately.
       try { _azureEnvBase = null; } catch (e) {}
@@ -14851,6 +14909,9 @@
       // r98: idle weapon micro-sway — 8s sin-wave ±0.5°/0.3° on Y/Z axes.
       // Phase-locked with updateBreatheFov so sword and FOV breathe together.
       updateWeaponSway();
+      // r154: azure idle weapon sway — same 8s period as r98; active in idle/guard only.
+      // Mirrors the player sway pattern so the opponent reads as alive, not a statue.
+      updateAzureWeaponSway();
       // r116: idle weapon position breath — 8s sin-wave ±0.005/0.003 unit Y/Z.
       // Phase-locked with r97/r98; additive onto _basePosition captured at attach.
       updateWeaponPositionBreath();
