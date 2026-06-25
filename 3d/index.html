@@ -1047,6 +1047,68 @@
       animation: finisherPop 0.75s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
     }
 
+    /* ── r93: defeat banner — shown when azure wins the match (player loss) ── */
+    /* z-index 27 — same layer as finisher-text; pointer-events: none.
+       Independent element so it never co-displays with #match-won-overlay's
+       celebratory "MATCH WON" label. The overlay itself still shows for
+       machinery (record-tracking, rematch hotkeys) but mw-label is hidden
+       via .player-defeated on the overlay. */
+    #defeat-banner {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 27;
+      opacity: 0;
+      transform: scale(0.82);
+      transition: none;
+    }
+    #defeat-banner.show {
+      animation: defeatReveal 0.7s cubic-bezier(0.15, 0.7, 0.35, 1.05) forwards;
+    }
+    @keyframes defeatReveal {
+      0%   { opacity: 0;   transform: scale(0.82); }
+      40%  { opacity: 1;   transform: scale(1.04); }
+      65%  { opacity: 1;   transform: scale(0.97); }
+      100% { opacity: 1;   transform: scale(1.0);  }
+    }
+    #defeat-banner .db-text {
+      font-family: 'Cinzel', 'Trajan Pro', 'Trebuchet MS', serif;
+      font-size: 88px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: linear-gradient(180deg, #9b1010 0%, #5a0606 45%, #1e0202 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: transparent;
+      filter:
+        drop-shadow(0 0 18px rgba(160, 20, 20, 0.65))
+        drop-shadow(0 4px 32px rgba(80, 0, 0, 0.8));
+      user-select: none;
+    }
+    /* Hide the celebratory "MATCH WON" headline when player loses —
+       overlay stays live for rematch / record machinery. */
+    #match-won-overlay.player-defeated .mw-label { visibility: hidden; }
+
+    /* ── r93: pip color-coding by side (enhancement) ──────────────── */
+    /* Override gold default: crimson = deep red, azure = steel blue */
+    #pips-crimson .win-pip { border-color: rgba(180, 60, 60, 0.8); }
+    #pips-crimson .win-pip.filled {
+      background: #c03030;
+      border-color: #c03030;
+      box-shadow: 0 0 6px rgba(192, 48, 48, 0.75), 0 1px 3px rgba(0,0,0,0.7);
+    }
+    #pips-azure .win-pip { border-color: rgba(60, 140, 180, 0.8); }
+    #pips-azure .win-pip.filled {
+      background: #3a9abf;
+      border-color: #3a9abf;
+      box-shadow: 0 0 6px rgba(58, 154, 191, 0.75), 0 1px 3px rgba(0,0,0,0.7);
+    }
+
     /* ── r65: match-start cinematic intro text ─────────────────── */
     /* READY... and FIGHT! overlays. z-index 30 — above all HUD and
        letterbox bars (24), below settings panel (95/100). */
@@ -2432,6 +2494,9 @@
       <div class="streak-cta">NEXT BATTLE <span class="streak-arrows">›››</span></div>
     </div>
   </div>
+  <!-- r93: defeat banner — shown when azure wins the match (player loss).
+       Independent of match-won-overlay; overlay still fires for rematch/record machinery. -->
+  <div id="defeat-banner" aria-live="assertive"><span class="db-text">DEFEATED</span></div>
   <!-- r70: rematch hotkey hint — shown when match-won-overlay is active -->
   <div id="match-hotkey-hint" aria-hidden="true">
     <kbd>R</kbd> Rematch &nbsp;&nbsp; <kbd>Esc</kbd> Menu
@@ -8892,7 +8957,13 @@
       }
       updateGaugeDOM();
       if (koOverlay) koOverlay.classList.remove('visible');
-      if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
+      if (matchWonOverlay) {
+        matchWonOverlay.classList.remove('visible');
+        // r93: clear defeat-mode state so next match starts clean.
+        matchWonOverlay.classList.remove('player-defeated');
+        const _defeatBannerReset = document.getElementById('defeat-banner');
+        if (_defeatBannerReset) _defeatBannerReset.classList.remove('show');
+      }
       // r84: hide streak preview so it never bleeds into next round display
       try {
         var _sp = document.getElementById('streak-preview');
@@ -9209,6 +9280,12 @@
           if (matchWonOverlay) {
             if (mwWinnerText) mwWinnerText.textContent = winnerId.toUpperCase() + ' WINS THE MATCH';
             matchWonOverlay.classList.add('visible');
+            // r93: player loss — hide celebratory mw-label; show defeat banner instead.
+            if (winnerId === 'azure') {
+              matchWonOverlay.classList.add('player-defeated');
+              const _defeatBanner = document.getElementById('defeat-banner');
+              if (_defeatBanner) _defeatBanner.classList.add('show');
+            }
           }
           // r83: victory fanfare — crimson = P1 (player win only)
           if (winnerId === 'crimson') {
