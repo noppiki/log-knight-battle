@@ -6536,6 +6536,116 @@
     const groundDustSystem = new GroundDustSystem(scene);
     window.groundDustSystem = groundDustSystem;
 
+    /* ── AmbientGustSystem (r67) ──────────────────────────────────────
+       Periodic horizontal dust gusts that cross the arena every 15-25s.
+       Cluster of 6-12 plane particles billoarding toward camera, warm
+       dust-beige color, no gravity, fade-in/out bell envelope.
+       Fires only during active combat (both knights alive, round >= 1).
+       resetMatch() calls clearAll() to avoid inter-round leaks.
+    ────────────────────────────────────────────────────────────────── */
+    class AmbientGustSystem {
+      constructor(scene, camera) {
+        this.scene    = scene;
+        this.camera   = camera;
+        this.particles = [];
+        // Delay first gust ~8s so it doesn't fire during the round banner
+        this.nextGustMs = performance.now() + 8000;
+      }
+
+      spawnGust() {
+        const fromWest  = Math.random() < 0.5;
+        const startX    = fromWest ? -7  : 7;
+        const endX      = fromWest ?  9  : -9;
+        const centerZ   = (Math.random() - 0.5) * 3.0; // arena depth spread
+        const baseY     = 1.5 + Math.random() * 1.0;   // 1.5 – 2.5 m
+        const lifeMs    = 2200 + Math.random() * 400;   // 2.2 – 2.6 s
+        const speedX    = (endX - startX) / (lifeMs / 1000); // ~4-6 m/s
+        const count     = 6 + Math.floor(Math.random() * 7); // 6 – 12
+
+        for (let i = 0; i < count; i++) {
+          const offX  = (Math.random() - 0.5) * 1.2;
+          const offY  = (Math.random() - 0.5) * 0.6;
+          const offZ  = (Math.random() - 0.5) * 1.0;
+          const size  = 0.25 + Math.random() * 0.25;   // 0.25 – 0.5 m
+          const geo   = new THREE.PlaneGeometry(size, size);
+          const mat   = new THREE.MeshBasicMaterial({
+            color:      0xb8987a,
+            transparent: true,
+            opacity:    0.35 + Math.random() * 0.12,
+            depthWrite: false,
+            blending:   THREE.NormalBlending,
+            side:       THREE.DoubleSide,
+          });
+          const mesh  = new THREE.Mesh(geo, mat);
+          mesh.position.set(startX + offX, baseY + offY, centerZ + offZ);
+          // Snapshot billboard toward camera at spawn (cheap, no per-frame cost)
+          mesh.lookAt(this.camera.position);
+          mesh.userData = {
+            speedX,
+            lifeMs,
+            startMs:     performance.now(),
+            baseOpacity: mat.opacity,
+          };
+          mesh.name = 'ambient_gust';
+          this.scene.add(mesh);
+          this.particles.push(mesh);
+        }
+      }
+
+      update(delta) {
+        // Only fire during active in-play combat (both knights alive)
+        const gs = window.gameState;
+        const inPlay = gs && gs.round >= 1
+          && !gs.crimson.dead && !gs.azure.dead
+          && !window._gamePaused;
+
+        const now = performance.now();
+        if (inPlay && now > this.nextGustMs) {
+          this.spawnGust();
+          // 15 – 25s random interval until next gust
+          this.nextGustMs = now + 15000 + Math.random() * 10000;
+        }
+
+        // Update / fade existing particles regardless of in-play state
+        // so particles spawned just before death gracefully finish
+        const toRemove = [];
+        for (const p of this.particles) {
+          const ud      = p.userData;
+          const elapsed = now - ud.startMs;
+          const t       = elapsed / ud.lifeMs;
+          if (t >= 1) { toRemove.push(p); continue; }
+
+          // Horizontal drift (no gravity)
+          p.position.x += ud.speedX * delta;
+
+          // Bell-curve opacity envelope: ramps up to t≈0.3, ramps down to t=1
+          // env = 1 - (2t - 0.6)^2  →  peak at t=0.3, zero cross at ~t=-0.1 and t=1.1
+          const env = 1 - Math.pow(2 * t - 0.6, 2);
+          p.material.opacity = ud.baseOpacity * Math.max(0, env);
+        }
+        for (const p of toRemove) {
+          this.scene.remove(p);
+          p.geometry.dispose();
+          p.material.dispose();
+          const idx = this.particles.indexOf(p);
+          if (idx !== -1) this.particles.splice(idx, 1);
+        }
+      }
+
+      clearAll() {
+        for (const p of this.particles) {
+          this.scene.remove(p);
+          p.geometry.dispose();
+          p.material.dispose();
+        }
+        this.particles.length = 0;
+        // Reset timer so first gust in new round doesn't fire immediately
+        this.nextGustMs = performance.now() + 8000;
+      }
+    }
+
+    const ambientGustSystem = new AmbientGustSystem(scene, camera);
+
     window.spawnGroundDust = function spawnGroundDust(worldPos) {
       try {
         groundDustSystem.spawn(worldPos);
@@ -7253,6 +7363,8 @@
       } catch (e) {}
       // r60: clear any in-flight tier2 ground dust bursts and point light flashes
       try { groundDustSystem.clearAll(); } catch (e) {}
+      // r67: clear ambient gust particles between rounds
+      try { ambientGustSystem.clearAll(); } catch (e) {}
       try {
         const flashLights = scene.children.filter((o) => o.name === 'tier2_flash');
         flashLights.forEach((l) => scene.remove(l));
@@ -10284,6 +10396,7 @@
       try { updateWeather(delta); } catch (e) { /* never break the loop */ }
       try { snowPuffSystem.update(delta); } catch (e) {}
       try { groundDustSystem.update(delta); } catch (e) {} // r60: tier2 ground dust
+      try { ambientGustSystem.update(delta); } catch (e) {} // r67: ambient dust gusts
       try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
