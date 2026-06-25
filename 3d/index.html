@@ -1548,6 +1548,132 @@
       }
     }
 
+    /* ── arena torches (sentinel torches flanking the log ends) ────
+     *
+     * Two procedural torches stand at the far-end flanks of the log
+     * (-4.5, 0, 0.5) and (4.5, 0, 0.5), reinforcing the duel-arena
+     * feel established by the campfires. Each torch is built from
+     * primitive geometry (no GLB): a slim wooden pole + an iron
+     * bowl, lit by a flickering warm-orange PointLight at the bowl,
+     * with a small rising ember particle system. Wrapped in
+     * try/catch so a single torch failure doesn't break the scene.
+     */
+    const TORCH_BASE_INTENSITY = 3.0;
+    const TORCH_EMBER_COUNT    = 24;
+    const TORCH_POSITIONS = [
+      { x: -4.5, z: 0.5, phase: 0.7 }, // left  torch — flanks far end of log
+      { x:  4.5, z: 0.5, phase: 3.1 }, // right torch — flanks far end of log
+    ];
+    const torches = []; // { light, base, phase, embers }
+
+    function createTorch(opts) {
+      const { x, z, phase } = opts;
+      const group = new THREE.Group();
+      group.position.set(x, 0, z);
+
+      // Pole — slim vertical wood, base at y=0, top at y=2.0
+      const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, 2.0, 8);
+      const poleMat = new THREE.MeshStandardMaterial({ color: 0x3a2818, roughness: 0.95, metalness: 0.0 });
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.y = 1.0; // center of 2.0-tall cylinder
+      pole.castShadow    = false;
+      pole.receiveShadow = true;
+      group.add(pole);
+
+      // Bowl — dark iron fire bowl seated on top of the pole at y=2.0
+      const bowlGeo = new THREE.CylinderGeometry(0.18, 0.12, 0.12, 12);
+      const bowlMat = new THREE.MeshStandardMaterial({ color: 0x191512, roughness: 0.85, metalness: 0.4 });
+      const bowl = new THREE.Mesh(bowlGeo, bowlMat);
+      bowl.position.y = 2.06; // bowl sits ON TOP of pole (pole top at y=2.0)
+      bowl.castShadow    = true;
+      bowl.receiveShadow = false;
+      group.add(bowl);
+
+      scene.add(group);
+
+      // PointLight at bowl world position + (0, 0.3, 0) — flame core
+      const light = new THREE.PointLight(0xff8848, TORCH_BASE_INTENSITY, 6, 2);
+      light.position.set(x, 2.06 + 0.3, z);
+      light.castShadow = false; // cheap; flicker via intensity modulation
+      scene.add(light);
+
+      // Ember particle system — 24 rising points from bowl center
+      let embers = null;
+      try {
+        const geo = new THREE.BufferGeometry();
+        const positions  = new Float32Array(TORCH_EMBER_COUNT * 3);
+        const velocities = new Float32Array(TORCH_EMBER_COUNT * 3);
+        const bowlY = 2.06;
+        for (let i = 0; i < TORCH_EMBER_COUNT; i++) {
+          positions[i * 3 + 0] = x + (Math.random() - 0.5) * 0.12;
+          positions[i * 3 + 1] = bowlY + Math.random() * 1.4;
+          positions[i * 3 + 2] = z + (Math.random() - 0.5) * 0.12;
+          velocities[i * 3 + 0] = (Math.random() - 0.5) * 0.10; // slight horizontal wobble
+          velocities[i * 3 + 1] = 0.4 + Math.random() * 0.4;    // 0.4-0.8 m/s upward
+          velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.10;
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const mat = new THREE.PointsMaterial({
+          color:           0xffaa55, // orange-yellow
+          size:            0.06,
+          sizeAttenuation: true,
+          transparent:     true,
+          opacity:         0.9,
+          depthWrite:      false,
+          blending:        THREE.AdditiveBlending,
+        });
+        const pts = new THREE.Points(geo, mat);
+        pts.frustumCulled = false;
+        scene.add(pts);
+        embers = { points: pts, baseX: x, baseZ: z, bowlY, velocities };
+      } catch (eErr) {
+        console.warn('[lkb-3d] torch embers skipped', eErr);
+      }
+
+      return { light, base: TORCH_BASE_INTENSITY, phase, embers };
+    }
+
+    for (const opts of TORCH_POSITIONS) {
+      try {
+        torches.push(createTorch(opts));
+      } catch (tErr) {
+        console.warn('[lkb-3d] torch creation skipped', opts, tErr);
+      }
+    }
+
+    function updateTorches(delta, time) {
+      if (!torches.length) return;
+      for (const t of torches) {
+        // Flicker: base * (0.8 + 0.30*sin(t*9 + phase) + 0.12*sin(t*15 + phase*1.6))
+        t.light.intensity = t.base * (
+          0.8
+          + 0.30 * Math.sin(time *  9 + t.phase)
+          + 0.12 * Math.sin(time * 15 + t.phase * 1.6)
+        );
+        // Ember rise + wrap-around (reset when y > bowl + 1.5)
+        if (!t.embers) continue;
+        const pos = t.embers.points.geometry.attributes.position;
+        const arr = pos.array;
+        const vel = t.embers.velocities;
+        const bowlY = t.embers.bowlY;
+        for (let i = 0; i < TORCH_EMBER_COUNT; i++) {
+          const xi = i * 3 + 0, yi = i * 3 + 1, zi = i * 3 + 2;
+          arr[xi] += (vel[xi] + 0.03 * Math.sin(time * 3.3 + i * 1.9)) * delta;
+          arr[yi] += vel[yi] * delta;
+          arr[zi] += (vel[zi] + 0.03 * Math.cos(time * 2.9 + i * 2.1)) * delta;
+          if (arr[yi] > bowlY + 1.5) {
+            arr[xi] = t.embers.baseX + (Math.random() - 0.5) * 0.10;
+            arr[yi] = bowlY + Math.random() * 0.15;
+            arr[zi] = t.embers.baseZ + (Math.random() - 0.5) * 0.10;
+            vel[xi] = (Math.random() - 0.5) * 0.10;
+            vel[yi] = 0.4 + Math.random() * 0.4;
+            vel[zi] = (Math.random() - 0.5) * 0.10;
+          }
+        }
+        pos.needsUpdate = true;
+      }
+    }
+
     /* ── ground ────────────────────────────────────────────────── */
     const groundGeo = new THREE.PlaneGeometry(40, 40);
     const texLoader = new THREE.TextureLoader();
@@ -2349,6 +2475,15 @@
     ];
     function pickAttackClip() {
       return ATTACK_CLIPS[Math.floor(Math.random() * ATTACK_CLIPS.length)];
+    }
+
+    // Hit-reaction variety pool. Block_Hit is reserved for guard state;
+    // unguarded hits alternate between Hit_A and Hit_B.
+    const HIT_CLIPS = ['Hit_A', 'Hit_B', 'Block_Hit'];
+    function pickHitClip(defenderState) {
+      if (defenderState === 'guard') return 'Block_Hit';
+      const pool = ['Hit_A', 'Hit_B'];
+      return pool[Math.floor(Math.random() * pool.length)];
     }
 
     // Combatant registry — populated as each knight GLB loads. Each
@@ -3157,10 +3292,12 @@
         if (attacker.state !== 'attack') return; // got interrupted
         attacker.impactScheduled = true;
 
-        // Crossfade defender from BLOCK → Hit_A reaction (LoopOnce).
+        // Crossfade defender to a hit-reaction clip (LoopOnce).
+        // Block_Hit when guarding; Hit_A or Hit_B at random otherwise.
         if (defender && !window.gameState[defenderLabel].dead) {
+          const hitClip = pickHitClip(defender.state);
           defender.state = 'hit';
-          playClip(defender, CLIP_NAMES.HIT, { fadeIn: 0.1, loop: false, weight: 1.0 });
+          playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
         }
 
         // Hit position: defender chest height for VFX / camera shake.
@@ -3279,8 +3416,9 @@
         // or actively guarding (guard frame should hold its BLOCK pose so
         // applyDamage's chip-damage path reads right).
         if (defender && !window.gameState.azure.dead && defender.state !== 'guard' && defender.state !== 'attack') {
+          const hitClip = pickHitClip(defender.state);
           defender.state = 'hit';
-          playClip(defender, CLIP_NAMES.HIT, { fadeIn: 0.1, loop: false, weight: 1.0 });
+          playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
         }
 
         const defenderRoot = defender && defender.root;
@@ -3555,6 +3693,7 @@
       }
       updateDust(delta);
       updateEmbers(delta, time);
+      updateTorches(delta, time);
 
       // ── CINEMA: combat sync ─────────────────────────────────────
       // Poll combat state and translate edges into director overrides:
