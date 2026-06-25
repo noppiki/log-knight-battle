@@ -7069,11 +7069,60 @@
       fpSwordClone.position.z = base.z + offsetZ;
     }
 
+    // ── r135: updateSwordPullBack ─────────────────────────────────────────
+    // Charge tier 1+ release — windup pull-back before the thrust.
+    // On release the sword pulls +0.10 m backward (camera +z) with an ease-out
+    // curve over 30 ms to peak, then ease-in back to base over 20 ms (50 ms total).
+    // triggerSwordThrust() is deferred 50 ms so thrust fires just as pull-back ends,
+    // giving the "引いて押す" (pull-then-push) physical feel.
+    // Tier 0 skips this entirely (normal attack — no pull-back, no thrust).
+    //
+    // Interaction with r116 (position breath) and r134 (thrust):
+    //   breath early-returns during attack state — mutually exclusive with both.
+    //   pull-back and thrust are time-disjoint (pull-back 0–50 ms, thrust 50 ms+);
+    //   both write z absolutely (base.z + offset) so no accumulation risk.
+    // Ordering: updateSwordPullBack() runs BEFORE updateSwordThrust() in animate().
+    const _pullBackState = {
+      active:     false,
+      startMs:    0,
+      peakOffset: 0.10, // backward (+z in camera/Three.js space)
+      peakAtMs:   30,   // ms until peak
+      totalMs:    50,   // 30 peak + 20 ease-back
+    };
+    function triggerSwordPullBack() {
+      _pullBackState.active  = true;
+      _pullBackState.startMs = performance.now();
+    }
+    function updateSwordPullBack() {
+      if (!_pullBackState.active) return;
+      const t = performance.now() - _pullBackState.startMs;
+      if (t >= _pullBackState.totalMs) {
+        _pullBackState.active = false;
+        return;
+      }
+      if (!fpSwordClone) return;
+      const base = fpSwordClone._basePosition;
+      if (!base) return;
+      let offset;
+      if (t <= _pullBackState.peakAtMs) {
+        // ease-out quad to peak
+        const norm = t / _pullBackState.peakAtMs;
+        offset = _pullBackState.peakOffset * (1 - (1 - norm) * (1 - norm));
+      } else {
+        // ease-in quad back to 0
+        const norm = (t - _pullBackState.peakAtMs) / (_pullBackState.totalMs - _pullBackState.peakAtMs);
+        offset = _pullBackState.peakOffset * (1 - norm * norm);
+      }
+      // Absolute write — breath is suppressed during attack state so no base drift.
+      fpSwordClone.position.z = base.z + offset;
+    }
+
     // ── r134: updateSwordThrust ───────────────────────────────────────────
-    // Tier-2 charge release — forward thrust offset on fpSwordClone.
-    // On tier-2 release the sword punches -0.3 m forward (camera -z) with an
+    // Tier 1+ charge release — forward thrust offset on fpSwordClone.
+    // On tier 1+ release the sword punches -0.3 m forward (camera -z) with an
     // ease-out curve over 80 ms to peak, then ease-in back to base over 200 ms.
-    // Tier 0/1 never fire this; tier-2 block calls triggerSwordThrust().
+    // r135 pull-back fires first (0–50 ms), thrust fires at +50 ms offset;
+    // tier-2 block calls triggerSwordThrust() after pull-back delay.
     //
     // Interaction with r116 (position breath):
     //   breath early-returns during crimson.state==='attack' (see r116 guard),
@@ -12363,10 +12412,12 @@
       if (myChargeTier >= 2) {
         try { triggerEdgeBlur(); } catch (e) {}
       }
-      // r134: tier-2 sword forward thrust — punch blade -0.3 m forward at release.
-      // Visual only, no hit-detection impact; self-cancels at 280ms via per-frame decay.
-      if (myChargeTier === 2) {
-        try { triggerSwordThrust(); } catch (e) {}
+      // r135+r134: tier 1+ — pull-back first (+0.10 m, 50 ms), then thrust (-0.3 m, 280 ms).
+      // Both visual only; pull-back gives "引いて押す" feel before the forward lunge.
+      // Tier 0 skips entirely. Tier 2 gets the same pull-back → thrust sequence.
+      if (myChargeTier >= 1) {
+        try { triggerSwordPullBack(); } catch (e) {}
+        setTimeout(() => { try { triggerSwordThrust(); } catch (e) {} }, 50);
       }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
@@ -14174,7 +14225,10 @@
       // r116: idle weapon position breath — 8s sin-wave ±0.005/0.003 unit Y/Z.
       // Phase-locked with r97/r98; additive onto _basePosition captured at attach.
       updateWeaponPositionBreath();
-      // r134: tier-2 sword forward thrust — 80ms peak / 200ms ease-out (-0.3m z).
+      // r135: tier 1+ windup pull-back — 30ms peak / 20ms ease-back (+0.10m z).
+      // Fires before thrust; time-disjoint so both write z absolutely without conflict.
+      updateSwordPullBack();
+      // r134: tier 1+ sword forward thrust — 80ms peak / 200ms ease-out (-0.3m z).
       // Breath is suppressed during attack state so these are mutually exclusive.
       updateSwordThrust();
       // r111: idle weapon glint — warm-white emissive flash every ~10s when idle.
