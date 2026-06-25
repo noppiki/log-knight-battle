@@ -5415,6 +5415,52 @@
       } catch (e) {}
     }
 
+    // ── r82: BGM combat tension sub layer ──────────────────────────────
+    // Two sine oscillators at 60Hz and 90Hz (perfect fifth interval) fade
+    // in at combat start (FIGHT! banner) and fade out on KO / round reset.
+    // Completely independent of the procedural BGM system (no detune nodes
+    // touched — r63/r64 fix preserved). Connected through globalGain so the
+    // mute button silences it. Peak gain 0.025 (2.5%) — sub-bass texture
+    // only, well below the BGM's frequency range.
+    const _bgmTension = { active: false, oscNodes: [] };
+
+    function startBgmTension() {
+      if (!actx || !globalGain) return;
+      if (_bgmTension.active) return; // idempotency guard
+      try {
+        if (actx.state === 'suspended') actx.resume();
+        _bgmTension.active = true;
+        [60, 90].forEach(function (freq) {
+          const osc  = actx.createOscillator();
+          const gain = actx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, actx.currentTime);
+          gain.gain.setValueAtTime(0, actx.currentTime);
+          gain.gain.linearRampToValueAtTime(0.025, actx.currentTime + 2.0);
+          osc.connect(gain);
+          gain.connect(globalGain);
+          osc.start();
+          _bgmTension.oscNodes.push({ osc, gain });
+        });
+      } catch (e) { /* audio not critical */ }
+    }
+
+    function stopBgmTension() {
+      if (!_bgmTension.active) return; // idempotent
+      _bgmTension.active = false;
+      const nodes = _bgmTension.oscNodes.splice(0);
+      nodes.forEach(function ({ osc, gain }) {
+        try {
+          if (actx) gain.gain.linearRampToValueAtTime(0, actx.currentTime + 0.5);
+          setTimeout(function () {
+            try { osc.stop(); } catch (_) {}
+            try { osc.disconnect(); } catch (_) {}
+            try { gain.disconnect(); } catch (_) {}
+          }, 600);
+        } catch (e) {}
+      });
+    }
+
     // updateDangerState — called once per frame from animate().
     // Reads gameState.crimson.hp, manages activate/deactivate edge,
     // and lerps reticle color from amber #d8a45a → danger red #ff3030.
@@ -8534,6 +8580,9 @@
       // the round banner fires).
       try { if (typeof deactivateDanger === 'function' && window._dangerState && window._dangerState.active) deactivateDanger(); } catch (e) {}
       try { if (typeof _stopDangerRumble === 'function') _stopDangerRumble(); } catch (e) {}
+      // r82: also stop sub-bass tension layer (safety — triggerDeath normally
+      // handles this, but resetMatch is the idempotent backstop).
+      try { stopBgmTension(); } catch (e) {}
       // r73: force-clear azure desperate state so interval and emissive don't
       // leak into the next round (HP was just reset to HP_MAX above, so
       // updateAzureDesperateState would self-deactivate on the next frame, but
@@ -8627,6 +8676,9 @@
       const c = combatants[defenderId];
       if (!c) return;
       window.gameState[defenderId].dead = true;
+      // r82: fade out sub-bass tension layer on KO so it doesn't underpin the
+      // death cinematic (silence reads more dramatic than lingering rumble).
+      try { stopBgmTension(); } catch (e) {}
       // r73: if azure dies while desperate, deactivate immediately so the
       // emissive red and short interval don't linger into the death pose /
       // KO cinematic. deactivateAzureDesperate() is idempotent.
@@ -9943,6 +9995,8 @@
       window._matchIntroTimers.push(setTimeout(() => {
         _mitHide();
         window._matchIntroActive = false;
+        // r82: arm the sub-bass tension layer as combat opens
+        try { startBgmTension(); } catch (e) {}
       }, 3200));
 
       console.log('[lkb-3d] r65 match intro started');
