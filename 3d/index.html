@@ -3284,6 +3284,24 @@
         tone({ freq: 1760, dur: 0.16, type: "triangle", vol: 0.06, attack: 0.001, release: 0.16, send: 0.45 });
         noise({ dur: 0.04, vol: 0.06, type: "bandpass", freqStart: 6000, freqEnd: 3000, q: 2, send: 0.40 });
       }
+      // ── r127: parry metallic clang layer ─────────────────────────────
+      // Layered on top of sfxCounter ("ting") in triggerPerfectParry.
+      // Delivers the hard metallic contact feel absent from the bright ting:
+      //   - 1200Hz triangle 50ms  → high-ring "clank" body
+      //   - 800Hz sine 30ms @15ms delay → sub-resonance "bong" tail
+      // Both use short attack (2ms) for transient onset. Routes via
+      // existing tone() → sfxGain → globalGain for master-mute safety.
+      function playParryClang() {
+        if (!actx) return;
+        try {
+          tone({ freq: 1200, dur: 0.05, type: "triangle", vol: 0.10, attack: 0.002, send: 0.35 });
+          setTimeout(function () {
+            try { tone({ freq: 800, dur: 0.03, type: "sine", vol: 0.08, attack: 0.002, send: 0.30 }); } catch (e) {}
+          }, 15);
+        } catch (e) {}
+      }
+      // ─────────────────────────────────────────────────────────────────
+
       function _sfxDash() {
         noise({ dur: 0.18, vol: 0.08, type: "bandpass", freqStart: 2400, freqEnd: 400, q: 1.0, send: 0.30 });
         tone({ freq: 130, freq2: 80, dur: 0.18, type: "sawtooth", vol: 0.08, attack: 0.002, release: 0.18, send: 0.30 });
@@ -6843,6 +6861,8 @@
 
       // ── 8) SFX: sfxCounter — bright metallic "ting" ──────────────────
       try { if (window.sfxCounter) window.sfxCounter(); } catch (e) {}
+      // ── r127: metallic clang layer — "clank" body over the ting ─────
+      try { playParryClang(); } catch (e) {}
 
       // ── 9) r53: SP gauge cyan flash on parry success (crimson = player) ─
       try {
