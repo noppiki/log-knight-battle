@@ -6263,6 +6263,53 @@
       }
     }
 
+    // ── r147: azure idle armor scratch sfx ─────────────────────────────
+    // Subtle armor plate friction sound fired at 8–10s random intervals while
+    // azure is idle or guarding. Two-layer texture:
+    //   • 60Hz triangle, 60ms — low body thud (armor weight shifting)
+    //   • 1.5kHz highpass noise, 80ms — metal plate friction scrape
+    // Vol 0.02–0.03 — barely audible, pure presence polish.
+    // Distinct from r137 azure breath (150Hz, 4–6s) and r103 idle wind
+    // (continuous oscillator). Routes through tone()/noise() → sfxGain →
+    // globalGain so master-mute silences it. Skips attack/hit/desperate states.
+    const _armorScratch = { active: false, timerId: null };
+
+    function _playArmorScratch() {
+      const az = combatants && combatants.azure;
+      if (!az) return;
+      if (az.state !== 'idle' && az.state !== 'guard') return;
+      if (window._azureDesperate && window._azureDesperate.active) return;
+      try {
+        // low body thud — armor weight settling
+        tone({ freq: 60, dur: 0.06, type: 'triangle', vol: 0.02, attack: 0.005 });
+        // metal plate friction — short highpass noise burst
+        noise({ dur: 0.08, vol: 0.03, type: 'highpass', freqStart: 1500, freqEnd: 1200, attack: 0.01 });
+      } catch (e) {}
+    }
+
+    function _scheduleNextArmorScratch() {
+      if (!_armorScratch.active) return;
+      const delay = 8000 + Math.random() * 2000; // 8000–10000ms
+      _armorScratch.timerId = setTimeout(function () {
+        _playArmorScratch();
+        _scheduleNextArmorScratch();
+      }, delay);
+    }
+
+    function startArmorScratch() {
+      if (!actx || _armorScratch.active) return;
+      _armorScratch.active = true;
+      _scheduleNextArmorScratch();
+    }
+
+    function stopArmorScratch() {
+      _armorScratch.active = false;
+      if (_armorScratch.timerId) {
+        clearTimeout(_armorScratch.timerId);
+        _armorScratch.timerId = null;
+      }
+    }
+
     // ── r82: BGM combat tension sub layer ──────────────────────────────
     // Two sine oscillators at 60Hz and 90Hz (perfect fifth interval) fade
     // in at combat start (FIGHT! banner) and fade out on KO / round reset.
@@ -10408,6 +10455,8 @@
       try { stopIdleWind(); } catch (e) {}
       // r137: stop azure idle breath sfx on round reset.
       try { stopAzureBreath(); } catch (e) {}
+      // r147: stop azure armor scratch sfx on round reset.
+      try { stopArmorScratch(); } catch (e) {}
       // r73: force-clear azure desperate state so interval and emissive don't
       // leak into the next round (HP was just reset to HP_MAX above, so
       // updateAzureDesperateState would self-deactivate on the next frame, but
@@ -10574,6 +10623,8 @@
       try { stopIdleWind(); } catch (e) {}
       // r137: stop azure idle breath sfx on KO.
       try { stopAzureBreath(); } catch (e) {}
+      // r147: stop azure armor scratch sfx on KO.
+      try { stopArmorScratch(); } catch (e) {}
       // r73: if azure dies while desperate, deactivate immediately so the
       // emissive red and short interval don't linger into the death pose /
       // KO cinematic. deactivateAzureDesperate() is idempotent.
@@ -12255,6 +12306,8 @@
         try { startIdleWind(); } catch (e) {}
         // r137: arm azure idle breath sfx
         try { startAzureBreath(); } catch (e) {}
+        // r147: arm azure armor scratch sfx (8–10s interval, idle/guard only)
+        try { startArmorScratch(); } catch (e) {}
         // r91: start round timer when FIGHT! resolves (hook A — match-start / full-reset)
         try { startRoundTimer(); } catch (e) {}
       }, 3200));
