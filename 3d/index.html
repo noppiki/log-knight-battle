@@ -3187,13 +3187,18 @@
         tone({ freq: 659, dur: 0.08, type: "square", vol: 0.07, attack: 0.001, release: 0.08 });
         tone({ freq: 988, dur: 0.10, type: "triangle", vol: 0.05, attack: 0.001, release: 0.10 });
       }
-      function sfxHorn() {
+      // r104: pitchRatio param added (default 1.0 = unchanged).
+      // Pass Math.pow(2, -1/12) ≈ 0.944 for feint telegraph — 1 semitone
+      // lower so skilled players can distinguish feint from real attack by ear.
+      // All existing callers omit the arg → backward-compatible (ratio = 1).
+      function sfxHorn(pitchRatio) {
         if (!actx) return;
         if (actx.state === "suspended") actx.resume();
-        tone({ freq: 196, freq2: 185, dur: 0.50, type: "sawtooth", vol: 0.10, attack: 0.015, release: 0.48 });
-        tone({ freq: 392, freq2: 370, dur: 0.42, type: "sawtooth", vol: 0.06, attack: 0.012, release: 0.40 });
-        tone({ freq: 588, freq2: 555, dur: 0.35, type: "triangle", vol: 0.03, attack: 0.010, release: 0.33 });
-        noise({ dur: 0.08, vol: 0.04, type: "bandpass", freqStart: 800, freqEnd: 300, q: 1.5 });
+        const p = (typeof pitchRatio === 'number' && pitchRatio > 0) ? pitchRatio : 1.0;
+        tone({ freq: 196 * p, freq2: 185 * p, dur: 0.50, type: "sawtooth", vol: 0.10, attack: 0.015, release: 0.48 });
+        tone({ freq: 392 * p, freq2: 370 * p, dur: 0.42, type: "sawtooth", vol: 0.06, attack: 0.012, release: 0.40 });
+        tone({ freq: 588 * p, freq2: 555 * p, dur: 0.35, type: "triangle", vol: 0.03, attack: 0.010, release: 0.33 });
+        noise({ dur: 0.08, vol: 0.04, type: "bandpass", freqStart: 800 * p, freqEnd: 300 * p, q: 1.5 });
       }
       // r83: playVictoryFanfare — C major arpeggio (C5 E5 G5 C6) fired when
       // crimson wins the match (player victory). 4 notes × 100ms step via
@@ -6444,7 +6449,17 @@
                      alertEl.style.transition = ''; alertEl.classList.add('active'); }
 
       // ── Audio: low horn warning cue ───────────────────────────────
-      try { if (window.sfxHorn) window.sfxHorn(); } catch (e) {}
+      // r104: feint telegraph plays horn 1 semitone lower (ratio ≈ 0.944).
+      // Skilled players learn to recognise the flatter pitch and hold guard
+      // instead of burning stamina on a parry. Visual cue is unchanged.
+      try {
+        if (window.sfxHorn) {
+          const _feintPitch = (attacker._aiPattern === 'feint')
+            ? Math.pow(2, -1 / 12)   // ≈ 0.944 — 1 semitone down
+            : 1.0;
+          window.sfxHorn(_feintPitch);
+        }
+      } catch (e) {}
 
       // ── r75: range ring — show sword-reach danger zone on ground ───
       // Only in FP mode when azure is the attacker (same condition as
