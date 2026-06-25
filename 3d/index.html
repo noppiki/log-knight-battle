@@ -6330,6 +6330,16 @@
         if (_azHpBar) _azHpBar.classList.add('desperate-pulse');
       } catch (e) {}
 
+      // 5) r132: entrance dust burst at azure feet — one-shot on activation.
+      try {
+        const _azRootR132 = (typeof combatants !== 'undefined' && combatants && combatants.azure)
+                            ? combatants.azure.root : null;
+        if (_azRootR132 && typeof spawnGroundDust === 'function') {
+          const _azDustPosR132 = _azRootR132.position.clone();
+          spawnGroundDust(_azDustPosR132, 12, 1.2);
+        }
+      } catch (_eR132) {}
+
       console.log('[lkb-3d] r73 azure desperate → ACTIVE (interval ×' + DESPERATE_INTERVAL_FACTOR + ', tg ' + DESPERATE_TELEGRAPH_MS + 'ms)');
     }
 
