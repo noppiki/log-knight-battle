@@ -1887,6 +1887,21 @@
       background: rgba(150, 150, 150, 0.6);
     }
 
+    /* r149: reticle lock-on pulse — subtle scale breathe while lock bracket
+       is visible. 0.6s ease-in-out at 1.0↔1.05 amplitude: noticeable enough
+       to reinforce "you have a lock" without distracting the aim.
+       translate(-50%,-50%) preserved in both keyframe stops so the crosshair
+       stays centered — overwriting transform without it would shift the element
+       to the origin. The .lock-pulse class is added/removed inside
+       updateLockBracket() in sync with bracket .visible transitions. */
+    @keyframes retLockPulse {
+      0%, 100% { transform: translate(-50%, -50%) scale(1.0); }
+      50%      { transform: translate(-50%, -50%) scale(1.05); }
+    }
+    #fp-reticle.lock-pulse {
+      animation: retLockPulse 0.6s ease-in-out infinite;
+    }
+
     /* r142: aim deadzone indicator — subtle dotted circle showing the
        ~5px dead-zone radius around the exact aim point. Gives precision
        shooters a tactile "zero-movement zone" cue without cluttering the
@@ -7778,6 +7793,8 @@
       // Hide when not in FP+locked, or when azure is missing / dead.
       if (!isFp || !locked || !azRoot || azure.state === 'dead') {
         el.classList.remove('visible', 'danger');
+        // r149: kill lock pulse when bracket is hidden
+        if (FpPolish.reticleEl) FpPolish.reticleEl.classList.remove('lock-pulse');
         return;
       }
 
@@ -7789,7 +7806,7 @@
       proj.copy(azRoot.position);
       proj.project(camera);
       // Behind-camera guard: NDC z > 1 means the point is behind the near plane.
-      if (proj.z > 1.0) { el.classList.remove('visible', 'danger'); return; }
+      if (proj.z > 1.0) { el.classList.remove('visible', 'danger'); if (FpPolish.reticleEl) FpPolish.reticleEl.classList.remove('lock-pulse'); return; }
       const feetX = ( proj.x * 0.5 + 0.5) * W;
       const feetY = (-proj.y * 0.5 + 0.5) * H;
 
@@ -7799,7 +7816,7 @@
       proj.project(camera);
       // Also guard on the head — if it's exactly on the clip edge the bracket
       // can flicker; clamp rather than hide (head is rarely behind camera).
-      if (proj.z > 1.0) { el.classList.remove('visible', 'danger'); return; }
+      if (proj.z > 1.0) { el.classList.remove('visible', 'danger'); if (FpPolish.reticleEl) FpPolish.reticleEl.classList.remove('lock-pulse'); return; }
       const headX = ( proj.x * 0.5 + 0.5) * W;
       const headY = (-proj.y * 0.5 + 0.5) * H;
 
@@ -7813,7 +7830,9 @@
 
       // Off-screen guard — hide if center is well outside viewport.
       if (left + boxW < -40 || left > W + 40 || top + boxH < -40 || top > H + 40) {
-        el.classList.remove('visible', 'danger'); return;
+        el.classList.remove('visible', 'danger');
+        if (FpPolish.reticleEl) FpPolish.reticleEl.classList.remove('lock-pulse');
+        return;
       }
 
       // ── Apply geometry ────────────────────────────────────────────
@@ -7825,6 +7844,8 @@
       // ── Visibility + danger state ─────────────────────────────────
       el.classList.add('visible');
       el.classList.toggle('danger', azure.state === 'attack');
+      // r149: pulse reticle while bracket is on-screen (lock confirmed)
+      if (FpPolish.reticleEl) FpPolish.reticleEl.classList.add('lock-pulse');
     }
 
     document.addEventListener('pointerlockchange', () => {
