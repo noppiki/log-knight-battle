@@ -8687,7 +8687,9 @@
     // the next combat tick has clean state to drive.
     // NOTE: mutates fields in place so `wins` is preserved across rounds.
     let resetTimerHandle = null;
-    function resetMatch() {
+    // r89: partialHeal=true → between-round HP carry-over (+30, capped at HP_MAX).
+    //      partialHeal=false (default) → full HP_MAX heal (used by resetFullMatch).
+    function resetMatch(partialHeal) {
       // r78: if a finisher cinematic is still running on reset (R hotkey mid-cinematic),
       // cancel and restore cleanly so mixers don't stay at 0.2× and the
       // finisher text isn't left hanging.
@@ -8754,7 +8756,8 @@
       }
       for (const id of ['crimson', 'azure']) {
         const s = window.gameState[id];
-        s.hp      = HP_MAX;
+        // r89: between-round → partial heal (+30 carry-over); match-start → full heal.
+        s.hp      = partialHeal ? Math.min(HP_MAX, (s.hp ?? 0) + 30) : HP_MAX;
         s.sp      = 0;
         s.stamina = STM_MAX;  // iter-66: refill stamina between rounds
         s.dead    = false;
@@ -9187,9 +9190,10 @@
           resetTimerHandle = setTimeout(resetFullMatch, 6000);
         }
       } else {
-        // Round over — normal KO overlay, then round reset (wins preserved)
+        // Round over — normal KO overlay, then round reset (wins preserved).
+        // r89: pass partialHeal=true so both fighters carry HP into next round (+30).
         if (koOverlay) koOverlay.classList.add('visible');
-        resetTimerHandle = setTimeout(resetMatch, 6000);
+        resetTimerHandle = setTimeout(() => resetMatch(true), 6000);
       }
       // Store cheer handle so resetMatch can cancel it if needed (defensive).
       window._pendingCheerHandle = cheerHandle;
