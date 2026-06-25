@@ -2061,6 +2061,11 @@
       transition: opacity 120ms ease-in;
     }
     #fp-tg-warn.active { opacity: 1; }
+    /* r117: feint telegraph dim — subtle opacity drop; skilled players notice,
+       casual players don't. Compound selector requires .active, so removing
+       .active on any path automatically neutralises the dim (no leak risk). */
+    #fp-tg-warn.active.feint  { opacity: 0.35; }
+    #fp-tg-alert.active.feint { opacity: 0.70; }
 
     /* r51: "⚠ GUARD" HUD alert — flashes above reticle during telegraph. */
     #fp-tg-alert {
@@ -6558,10 +6563,17 @@
       const warnEl  = FpPolish.tgWarnEl;
       const alertEl = FpPolish.tgAlertEl;
       if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+      // r117: feint telegraph dim — add .feint class for subtly lower opacity.
+      // Compound CSS (.active.feint) prevents stuck-vignette leaks on any .active removal.
+      const _isTgFeint = (attacker._aiPattern === 'feint');
       if (warnEl)  { warnEl.style.transition  = 'none'; void warnEl.offsetWidth;
-                     warnEl.style.transition  = ''; warnEl.classList.add('active'); }
+                     warnEl.style.transition  = '';
+                     warnEl.classList.toggle('feint', _isTgFeint);
+                     warnEl.classList.add('active'); }
       if (alertEl) { alertEl.style.transition = 'none'; void alertEl.offsetWidth;
-                     alertEl.style.transition = ''; alertEl.classList.add('active'); }
+                     alertEl.style.transition = '';
+                     alertEl.classList.toggle('feint', _isTgFeint);
+                     alertEl.classList.add('active'); }
 
       // ── Audio: low horn warning cue ───────────────────────────────
       // r104: feint telegraph plays horn 1 semitone lower (ratio ≈ 0.944).
@@ -6587,9 +6599,9 @@
 
       // ── Delayed attack launch ─────────────────────────────────────
       setTimeout(() => {
-        // Clear telegraph overlays.
-        if (warnEl)  { warnEl.classList.remove('active'); }
-        if (alertEl) { alertEl.classList.remove('active'); }
+        // Clear telegraph overlays (r117: also remove .feint to avoid residual dim).
+        if (warnEl)  { warnEl.classList.remove('active', 'feint'); }
+        if (alertEl) { alertEl.classList.remove('active', 'feint'); }
         FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
         // r52: clear parry window timestamp — attack is now launching.
         attacker._telegraphAt = 0;
@@ -6658,11 +6670,11 @@
         attacker._swingId = (attacker._swingId || 0) + 1;
         attacker._telegraphAt = 0;
         attacker._aiPattern = 'normal'; // consume flag
-        // Clear telegraph overlays.
+        // Clear telegraph overlays (r117: also remove .feint).
         const warnEl  = FpPolish.tgWarnEl;
         const alertEl = FpPolish.tgAlertEl;
-        if (warnEl)  warnEl.classList.remove('active');
-        if (alertEl) alertEl.classList.remove('active');
+        if (warnEl)  warnEl.classList.remove('active', 'feint');
+        if (alertEl) alertEl.classList.remove('active', 'feint');
         if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
         // r75: hide range ring on feint-parry path.
         try { _hideAzureRangeRing(180); } catch (e) {}
@@ -6688,8 +6700,8 @@
       // ── 2) Clear telegraph overlays immediately ──────────────────────
       const warnEl  = FpPolish.tgWarnEl;
       const alertEl = FpPolish.tgAlertEl;
-      if (warnEl)  warnEl.classList.remove('active');
-      if (alertEl) alertEl.classList.remove('active');
+      if (warnEl)  warnEl.classList.remove('active', 'feint'); // r117: clear feint dim
+      if (alertEl) alertEl.classList.remove('active', 'feint');
       if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
       // r75: hide range ring on successful parry.
       try { _hideAzureRangeRing(180); } catch (e) {}
@@ -11044,9 +11056,9 @@
               swingAttacker._telegraphAt = performance.now();
 
               setTimeout(() => {
-                // Clear 2nd-strike telegraph overlays.
-                if (warnEl)  warnEl.classList.remove('active');
-                if (alertEl) alertEl.classList.remove('active');
+                // Clear 2nd-strike telegraph overlays (r117: also remove .feint).
+                if (warnEl)  warnEl.classList.remove('active', 'feint');
+                if (alertEl) alertEl.classList.remove('active', 'feint');
                 FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
                 swingAttacker._telegraphAt = 0;
 
