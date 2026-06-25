@@ -1150,7 +1150,7 @@
       transform: translate(-50%, -50%);
       width: 14px;
       height: 3px;
-      background: #d8a45a;
+      background: var(--reticle-color, #d8a45a);
       box-shadow: 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
     }
     /* Vertical bar — 3x14 px. */
@@ -1162,7 +1162,7 @@
       transform: translate(-50%, -50%);
       width: 3px;
       height: 14px;
-      background: #d8a45a;
+      background: var(--reticle-color, #d8a45a);
       box-shadow: 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
     }
 
@@ -1174,7 +1174,7 @@
       transform: translate(-50%, -50%);
       width: 4px;
       height: 4px;
-      background: #d8a45a;
+      background: var(--reticle-color, #d8a45a);
       box-shadow: 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
       pointer-events: none;
     }
@@ -1714,6 +1714,38 @@
       transition: opacity 80ms ease-out;
     }
     #fp-edge-blur.active { opacity: 1; }
+
+    /* r72: low-HP danger vignette — persistent red rim that pulses while
+       crimson HP ≤ 25%. Distinct from #fp-damage-vignette (z-24, one-shot
+       hit flash) and #fp-tg-warn (z-23, amber telegraph). Sits at z-22 so
+       all one-shot effects always read on top. The @keyframes pulse is
+       CSS-driven — no per-frame opacity write — so there is no conflict
+       with CSS transitions. JS toggles .active to start/stop it; JS also
+       sets --reticle-color on #fp-reticle for the amber→red crosshair shift. */
+    #fp-danger-vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 22;
+      opacity: 0;
+      background: radial-gradient(ellipse at center,
+        transparent 35%,
+        rgba(220, 30, 30, 0.55) 100%);
+    }
+    #fp-danger-vignette.active {
+      animation: dangerPulse 2s ease-in-out infinite;
+    }
+    @keyframes dangerPulse {
+      0%   { opacity: 0; }
+      50%  { opacity: 0.30; }
+      100% { opacity: 0; }
+    }
+    /* Fade-out envelope when danger deactivates — JS removes .active and
+       adds .fading, which plays a one-shot 0.4s fade to 0 via transition. */
+    #fp-danger-vignette.fading {
+      opacity: 0;
+      transition: opacity 0.4s ease-out;
+    }
   </style>
 
   <script type="importmap">
@@ -1953,6 +1985,11 @@
 
   <!-- r51: FP attack telegraph — ⚠ GUARD alert above reticle. -->
   <div id="fp-tg-alert">⚠ GUARD</div>
+
+  <!-- r72: low-HP danger vignette — ambient red pulse when crimson HP ≤ 25%.
+       CSS @keyframes (2s) drives opacity; JS toggles .active class.
+       z-index 22 sits below fp-tg-warn (23), fp-damage-vignette (24), etc. -->
+  <div id="fp-danger-vignette"></div>
 
   <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
        JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
@@ -4959,6 +4996,131 @@
     // r63: resolve dodge flash DOM ref now that the element exists.
     FpPolish.dodgeFlashEl = document.getElementById('fp-dodge-flash');
 
+    // ── r72: low-HP danger state ─────────────────────────────────────────
+    // Active when crimson HP ≤ 25% and alive. Drives three effects:
+    //   (1) Red vignette pulse — CSS @keyframes 2s, toggled by .active class.
+    //   (2) Reticle amber → red shift via --reticle-color CSS custom property.
+    //   (3) 40Hz sub-bass rumble oscillator (sine) faded in through globalGain.
+    // All effects fade out when HP recovers above the threshold or on death.
+    // resetMatch() calls deactivateDanger() to prevent audio leaks between rounds.
+    const DANGER_HP_THRESHOLD = 0.25; // 25% of HP_MAX
+
+    window._dangerState = {
+      active:    false,
+      audioNode: null,  // { osc, gain } while rumble is running
+      fadingTimer: 0,   // timer for .fading class cleanup
+    };
+
+    const _dangerVigEl   = document.getElementById('fp-danger-vignette');
+    const _dangerReticle = document.getElementById('fp-reticle');
+
+    // Lerp helper for 0-255 integer channel
+    function _lerpCh(a, b, t) { return Math.round(a + (b - a) * t); }
+
+    // activateDanger — called once when HP crosses below threshold.
+    function activateDanger() {
+      window._dangerState.active = true;
+      // (1) Vignette: clear any in-flight fading state, start pulse.
+      if (window._dangerState.fadingTimer) {
+        clearTimeout(window._dangerState.fadingTimer);
+        window._dangerState.fadingTimer = 0;
+      }
+      if (_dangerVigEl) {
+        _dangerVigEl.classList.remove('fading');
+        _dangerVigEl.classList.add('active');
+      }
+      // (3) Audio rumble — guard actx null (pre-gesture) and suspended state.
+      _startDangerRumble();
+    }
+
+    // deactivateDanger — called once when HP recovers or on death/reset.
+    function deactivateDanger() {
+      window._dangerState.active = false;
+      // (1) Vignette: swap to fading class for 0.4s CSS transition, then clear.
+      if (_dangerVigEl) {
+        _dangerVigEl.classList.remove('active');
+        _dangerVigEl.classList.add('fading');
+        if (window._dangerState.fadingTimer) clearTimeout(window._dangerState.fadingTimer);
+        window._dangerState.fadingTimer = setTimeout(() => {
+          window._dangerState.fadingTimer = 0;
+          if (_dangerVigEl) _dangerVigEl.classList.remove('fading');
+        }, 450);
+      }
+      // (2) Reticle: restore to amber baseline.
+      if (_dangerReticle) _dangerReticle.style.removeProperty('--reticle-color');
+      // (3) Audio.
+      _stopDangerRumble();
+    }
+
+    // _startDangerRumble — 40Hz sine oscillator through globalGain.
+    function _startDangerRumble() {
+      if (!actx || !globalGain) return;
+      if (window._dangerState.audioNode) return; // already running
+      try {
+        if (actx.state === 'suspended') actx.resume();
+        const osc  = actx.createOscillator();
+        const gain = actx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(40, actx.currentTime);
+        gain.gain.setValueAtTime(0, actx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.04, actx.currentTime + 0.5);
+        osc.connect(gain);
+        gain.connect(globalGain);  // through master so mute button silences it
+        osc.start();
+        window._dangerState.audioNode = { osc, gain };
+      } catch (e) { /* audio not critical */ }
+    }
+
+    // _stopDangerRumble — gracefully fade out and disconnect.
+    function _stopDangerRumble() {
+      if (!window._dangerState.audioNode) return;
+      const { osc, gain } = window._dangerState.audioNode;
+      window._dangerState.audioNode = null;
+      try {
+        if (actx) gain.gain.linearRampToValueAtTime(0, actx.currentTime + 0.4);
+        setTimeout(() => {
+          try { osc.stop(); } catch (_) {}
+          try { osc.disconnect(); } catch (_) {}
+          try { gain.disconnect(); } catch (_) {}
+        }, 500);
+      } catch (e) {}
+    }
+
+    // updateDangerState — called once per frame from animate().
+    // Reads gameState.crimson.hp, manages activate/deactivate edge,
+    // and lerps reticle color from amber #d8a45a → danger red #ff3030.
+    function updateDangerState() {
+      if (!window.gameState) return;
+      const cs      = window.gameState.crimson;
+      const hp      = cs ? cs.hp : HP_MAX;
+      const dead    = cs ? cs.dead : false;
+      const ratio   = hp / HP_MAX;
+      const shouldBeActive = ratio <= DANGER_HP_THRESHOLD && !dead;
+
+      if (shouldBeActive && !window._dangerState.active) {
+        activateDanger();
+      } else if (!shouldBeActive && window._dangerState.active) {
+        deactivateDanger();
+      }
+
+      // (2) Per-frame reticle color lerp: amber #d8a45a ↔ danger red #ff3030.
+      // Runs independently of active flag so it fades smoothly during activation
+      // ramp (driven by HP ratio clamped to danger zone 0..threshold).
+      if (_dangerReticle) {
+        // t = 0 at full HP, 1 at 0 HP (within danger zone 0..25%)
+        const t = shouldBeActive ? Math.min(1, (DANGER_HP_THRESHOLD - ratio) / DANGER_HP_THRESHOLD) : 0;
+        if (t > 0) {
+          // Amber #d8a45a (216, 164, 90) → danger red #ff3030 (255, 48, 48)
+          const r = _lerpCh(216, 255, t);
+          const g = _lerpCh(164,  48, t);
+          const b = _lerpCh( 90,  48, t);
+          _dangerReticle.style.setProperty('--reticle-color', `rgb(${r},${g},${b})`);
+        } else if (!window._dangerState.active) {
+          _dangerReticle.style.removeProperty('--reticle-color');
+        }
+      }
+    }
+
     // flashDamageVignette — kick the red vignette to opacity 1 immediately
     // then let CSS transition fade it back to 0 over 0.4s. We clear any
     // pending fade-back so a rapid second hit re-triggers cleanly.
@@ -7647,6 +7809,13 @@
         });
         window._r64AimAccum = 0;
       } catch (e) {}
+      // r72: clear low-HP danger state so audio rumble and vignette don't
+      // leak into the next round (HP reset above sets cs.hp = HP_MAX, so
+      // updateDangerState would self-deactivate on the next frame, but we
+      // force-stop here to guarantee the oscillator is disconnected before
+      // the round banner fires).
+      try { if (typeof deactivateDanger === 'function' && window._dangerState && window._dangerState.active) deactivateDanger(); } catch (e) {}
+      try { if (typeof _stopDangerRumble === 'function') _stopDangerRumble(); } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -10841,6 +11010,8 @@
       }
       // r71: advance environment time-of-day color cycle (sun + hemi color lerp)
       try { timeCycle.update(); } catch (e) { /* never break the render loop */ }
+      // r72: low-HP danger state — vignette pulse + reticle shift + audio rumble.
+      try { updateDangerState(); } catch (e) { /* never break the render loop */ }
       composer.render();
     }
     animate();
