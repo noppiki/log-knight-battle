@@ -2177,17 +2177,25 @@
 
         // 2D-style "ready" message (both peers in the room).
         if (msg.type === "ready") {
+          var wasReady = window.mp.peerReady;
           window.mp.peerReady = true;
           _renderStatus();
           _showToast("PEER READY");
+          if (!wasReady && typeof window.mp.onPeerReady === 'function') {
+            try { window.mp.onPeerReady(); } catch (e) { console.warn("[lkb-3d/mp] onPeerReady threw:", e); }
+          }
           return;
         }
 
         // Our own simple fan-out: peer sent a hello.
         if (msg.type === "peer-hello" || msg.type === "hello") {
+          var wasReady2 = window.mp.peerReady;
           window.mp.peerReady = true;
           _renderStatus();
           _showToast("PEER READY");
+          if (!wasReady2 && typeof window.mp.onPeerReady === 'function') {
+            try { window.mp.onPeerReady(); } catch (e) { console.warn("[lkb-3d/mp] onPeerReady threw:", e); }
+          }
           return;
         }
 
@@ -2196,6 +2204,9 @@
           window.mp.peerReady = false;
           _renderStatus();
           _showToast("PEER LEFT");
+          if (typeof window.mp.onPeerLeft === 'function') {
+            try { window.mp.onPeerLeft(); } catch (e) { console.warn("[lkb-3d/mp] onPeerLeft threw:", e); }
+          }
           return;
         }
 
@@ -2207,9 +2218,35 @@
           return;
         }
 
-        // Anything else (game-state messages from a phase-2 peer talking
-        // to a phase-1 client, e.g. { t: "in" }, { t: "st" }) is logged
-        // and ignored — phase-1 doesn't apply state.
+        // Phase-2/3 game-state snapshot from the host. Guest-side:
+        // stash the latest snapshot on window.mp.lastSnapshot for
+        // diagnostics AND call window.applySnapshot() to mutate the
+        // local scene (lerp position/rotation, swap clips, mirror
+        // gauges). Host-side: ignore (we sent it; we don't apply our
+        // own broadcast).
+        if (msg.t === "st" && msg.s) {
+          if (window.mp.role !== 'host') {
+            window.mp.lastSnapshot = msg.s;
+            window.mp.lastSnapshotEvents = msg.ev || null;
+            window.mp.lastSnapshotRxAt = performance.now();
+            if (typeof window.applySnapshot === 'function') {
+              try { window.applySnapshot(msg.s); }
+              catch (e) { console.warn("[lkb-3d/mp] applySnapshot threw:", e); }
+            }
+          }
+          return;
+        }
+
+        // Phase-3 guest input message. Host-side: route the intent to
+        // the local applyGuestInput (which drives azure). Guest-side:
+        // ignore — we authored it.
+        if (msg.t === "in" && msg.k) {
+          if (window.mp.role === 'host' && typeof window.applyGuestInput === 'function') {
+            try { window.applyGuestInput(msg.k); }
+            catch (e) { console.warn("[lkb-3d/mp] applyGuestInput threw:", e); }
+          }
+          return;
+        }
       };
 
       ws.onerror = function (err) {
@@ -2222,6 +2259,11 @@
         var prevRoom     = window.mp.room;
         var prevRole     = window.mp._lastIntendedRole;
         var retried      = window.mp._retryUsed;
+        // Fire onPeerLeft so phase-2+ subscribers (e.g. host broadcast
+        // interval) can tear down their per-session resources.
+        if (typeof window.mp.onPeerLeft === 'function') {
+          try { window.mp.onPeerLeft(); } catch (e) { console.warn("[lkb-3d/mp] onPeerLeft (close) threw:", e); }
+        }
         _resetState();
         _renderStatus();
         // Single auto-retry on EARLY close (we never reached 'connected').
@@ -2243,8 +2285,14 @@
 
     function mpDisconnect() {
       var mp = window.mp;
+      var hadWs = !!mp.ws;
       if (mp.ws) {
         try { mp.ws.close(); } catch (e) {}
+      }
+      // Defensive: if there was no live socket, ws.onclose won't fire,
+      // so call the phase-2+ teardown hook here directly.
+      if (!hadWs && typeof mp.onPeerLeft === 'function') {
+        try { mp.onPeerLeft(); } catch (e) { console.warn("[lkb-3d/mp] onPeerLeft (disconnect) threw:", e); }
       }
       _resetState();
       _renderStatus();
@@ -4814,6 +4862,415 @@
       } catch (e) { console.warn('[lkb-3d] hitLag threw', e); }
     };
 
+    // ════════════════════════════════════════════════════════════════
+    // ── Multiplayer phase 2: HOST-side snapshot broadcast ────────────
+    // ════════════════════════════════════════════════════════════════
+    //
+    // The host is authoritative for all sim state (positions, HP/SP/
+    // stamina, animation clip names, round/match outcomes). At 20 Hz it
+    // serializes a compact snapshot of both knights + match state and
+    // ships it over the relay WebSocket; the guest stashes it on
+    // window.mp.lastSnapshot for the next render frame to apply
+    // (phase-3 wires the actual application).
+    //
+    // Wire format (single source of truth — guest must parse this):
+    //   { t: "st",        // "state" — distinguishes from input "in"
+    //     s: <snapshot>,  // see buildSnapshot() below
+    //     ev: [<event>]   // FX events sent host→guest (drained per tick)
+    //                     //   phase-2 leaves this empty; phase-3 fills.
+    //   }
+    //
+    // We deliberately keep this in the module scope (not the IIFE that
+    // owns window.mp) because the snapshot needs access to module-local
+    // `combatants`, `WINS_MAX`, etc. The IIFE invokes us via the
+    // window.mp.onPeerReady / onPeerLeft hooks we install below.
+    //
+    // Tuning knobs:
+    //   MP_SNAPSHOT_HZ = 20  (50 ms cadence) — matches typical
+    //                        fighting-game netcode tick; cheap to
+    //                        encode (<200 B per frame at JSON).
+    const MP_SNAPSHOT_HZ = 20;
+    const MP_SNAPSHOT_INTERVAL_MS = Math.round(1000 / MP_SNAPSHOT_HZ);
+
+    // Outbound FX-event queue. Phase-3 will push entries (e.g.
+    // { type: "impact", pos: [x,y,z] }) from triggerImpact and friends;
+    // each broadcast drains the queue so events aren't lost on the
+    // wire. Phase-2 leaves it empty — the field is on the snapshot
+    // envelope from day one so the schema is stable.
+    const net = { outEvents: [] };
+    // Expose for phase-3 hooks elsewhere in the module.
+    window._lkbNet = net;
+
+    // mp_snapshot_interval — handle of the host's setInterval. null
+    // unless we're host && peerReady. We re-check role/peerReady inside
+    // the tick callback too, so a torn-down state can never broadcast.
+    let mp_snapshot_interval = null;
+
+    // Build a one-frame snapshot of the entire sim state. Returns null
+    // (and logs once) if a combatant isn't loaded yet — the broadcast
+    // tick just skips that frame in that case.
+    function buildSnapshot() {
+      try {
+        const c = combatants.crimson;
+        const a = combatants.azure;
+        if (!c || !c.root || !a || !a.root) return null;
+        const gs = window.gameState;
+        if (!gs || !gs.crimson || !gs.azure) return null;
+
+        // Match-won state: derive from wins crossing WINS_MAX. Cheaper
+        // and more robust than reading the overlay's DOM text — and
+        // it's frame-accurate (overlay shows on the next tick).
+        let wonMatch = null;
+        if (gs.crimson.wins >= WINS_MAX) {
+          wonMatch = { side: 'crimson', label: 'CRIMSON WINS THE MATCH' };
+        } else if (gs.azure.wins >= WINS_MAX) {
+          wonMatch = { side: 'azure', label: 'AZURE WINS THE MATCH' };
+        }
+
+        return {
+          crimson: {
+            pos: [c.root.position.x, c.root.position.y, c.root.position.z],
+            rot: c.root.rotation.y,
+            hp:      gs.crimson.hp,
+            sp:      gs.crimson.sp,
+            stamina: gs.crimson.stamina,
+            clip:    c.currentClipName || null,
+            wins:    gs.crimson.wins | 0,
+          },
+          azure: {
+            pos: [a.root.position.x, a.root.position.y, a.root.position.z],
+            rot: a.root.rotation.y,
+            hp:      gs.azure.hp,
+            sp:      gs.azure.sp,
+            stamina: gs.azure.stamina,
+            clip:    a.currentClipName || null,
+            wins:    gs.azure.wins | 0,
+          },
+          round:    (gs.round | 0) || 1,
+          wonMatch: wonMatch,
+          t:        performance.now(),
+        };
+      } catch (err) {
+        // Catch-all so a transient null deref during scene swap can't
+        // kill the broadcast loop. Caller treats null as "skip frame".
+        console.warn('[lkb-3d/mp] buildSnapshot threw', err);
+        return null;
+      }
+    }
+    // Expose for console-side debugging / phase-3 unit tests.
+    window.buildSnapshot = buildSnapshot;
+
+    // One broadcast tick. Self-defends against role flips and torn-
+    // down sockets — if anything looks off, just no-op.
+    function hostBroadcastTick() {
+      const mp = window.mp;
+      if (!mp || mp.role !== 'host' || !mp.peerReady) return;
+      const ws = mp.ws;
+      if (!ws || ws.readyState !== 1 /* OPEN */) return;
+      const snap = buildSnapshot();
+      if (!snap) return; // combatants still loading — try again next tick
+      const events = net.outEvents;
+      net.outEvents = []; // drain BEFORE send so a throwing send doesn't double-fire
+      try {
+        ws.send(JSON.stringify({ t: "st", s: snap, ev: events }));
+      } catch (e) {
+        // Push events back so phase-3 retries can deliver them. Snapshot
+        // is fine to drop (next tick will resend a fresher one).
+        if (events.length) net.outEvents = events.concat(net.outEvents);
+        console.warn('[lkb-3d/mp] snapshot send failed', e);
+      }
+    }
+
+    function startHostBroadcast() {
+      if (mp_snapshot_interval) return; // already running
+      if (!window.mp || window.mp.role !== 'host') return;
+      console.log('[lkb-3d/mp] starting host broadcast @',
+        MP_SNAPSHOT_HZ, 'Hz (' + MP_SNAPSHOT_INTERVAL_MS + 'ms)');
+      mp_snapshot_interval = setInterval(hostBroadcastTick, MP_SNAPSHOT_INTERVAL_MS);
+    }
+
+    function stopHostBroadcast() {
+      if (mp_snapshot_interval) {
+        clearInterval(mp_snapshot_interval);
+        mp_snapshot_interval = null;
+        console.log('[lkb-3d/mp] stopped host broadcast');
+      }
+      // Drain any queued events — they were tied to the session we
+      // just ended and would otherwise leak into a future session.
+      net.outEvents.length = 0;
+    }
+
+    // Install hooks the phase-1 IIFE calls when peer state changes.
+    // Both fire on host AND guest; startHostBroadcast self-checks role
+    // so the guest's onPeerReady is a no-op for broadcast purposes.
+    window.mp.onPeerReady = function () {
+      console.log('[lkb-3d/mp] peer ready — role=' + window.mp.role);
+      if (window.mp.role === 'host') startHostBroadcast();
+    };
+    window.mp.onPeerLeft = function () {
+      // Always tear down — covers both peer-left and ws-close paths.
+      stopHostBroadcast();
+      window.mp.lastSnapshot = null;
+      window.mp.lastSnapshotEvents = null;
+      // Reset MP-related local guards so a future session starts clean.
+      _mpWonMatchShown = false;
+      _mpLastAppliedClip = { crimson: null, azure: null };
+    };
+
+    // ── MP phase-3: guest snapshot apply + guest input forwarding ──
+    //
+    // These live in module scope (not the window.mp IIFE) because they
+    // need access to combatants, gameState, playClip, updateGaugeDOM,
+    // WINS_MAX, etc. The IIFE's onmessage reaches us via window hooks
+    // (mirrors the buildSnapshot pattern).
+    //
+    // Wire format (single source of truth):
+    //   host → guest:  { t: "st", s: <snap>, ev: [...] }
+    //   guest → host:  { t: "in", k: { attack: bool, guard: bool, weaponSwap: bool } }
+    //
+    // Authority model: HOST is authoritative for HP/SP/stamina/wins/
+    // damage/death. Guest never mutates gameState locally — it just
+    // displays host's snapshot. Guest input is forwarded as intent;
+    // host applies it to azure and broadcasts the resulting state.
+
+    // Lerp tuning — alpha 0.3 gives a snappy follow without jitter at
+    // 20Hz snapshots. Rotation uses a shortest-arc wrap so a host
+    // crossing the ±π seam doesn't spin the guest's mesh the long way.
+    const MP_LERP_ALPHA = 0.3;
+    function _wrapAngle(a) {
+      // Normalize to (-π, π].
+      while (a >  Math.PI) a -= Math.PI * 2;
+      while (a < -Math.PI) a += Math.PI * 2;
+      return a;
+    }
+    function _lerpAngle(from, to, t) {
+      const d = _wrapAngle(to - from);
+      return from + d * t;
+    }
+
+    // Per-side cache of last-applied clip name so we don't re-trigger
+    // playClip every frame for the same animation (which would reset
+    // the action and freeze it on frame 0).
+    let _mpLastAppliedClip = { crimson: null, azure: null };
+    // One-shot dedup for the MATCH WON overlay. Cleared when snap.wonMatch
+    // returns to null (next match begins) so the overlay re-fires.
+    let _mpWonMatchShown = false;
+
+    function applySnapshot(snap) {
+      if (!snap) return;
+      try {
+        for (const side of ['crimson', 'azure']) {
+          const slot = snap[side];
+          const c = combatants[side];
+          if (!slot || !c || !c.root) continue;
+
+          // Position — lerp x/y/z toward host's authoritative values.
+          if (Array.isArray(slot.pos) && slot.pos.length === 3) {
+            c.root.position.x += (slot.pos[0] - c.root.position.x) * MP_LERP_ALPHA;
+            c.root.position.y += (slot.pos[1] - c.root.position.y) * MP_LERP_ALPHA;
+            c.root.position.z += (slot.pos[2] - c.root.position.z) * MP_LERP_ALPHA;
+          }
+          // Rotation Y — shortest-arc lerp.
+          if (typeof slot.rot === 'number') {
+            c.root.rotation.y = _lerpAngle(c.root.rotation.y, slot.rot, MP_LERP_ALPHA);
+          }
+
+          // Clip swap — only when the host's clip differs from what we
+          // last applied to this side (NOT what's currently playing,
+          // since the action advances frame-by-frame).
+          if (slot.clip && slot.clip !== _mpLastAppliedClip[side]) {
+            const clipName = slot.clip;
+            const loopable = /Idle|Blocking/i.test(clipName);
+            try {
+              playClip(c, clipName, { fadeIn: 0.15, loop: loopable });
+              _mpLastAppliedClip[side] = clipName;
+            } catch (e) {
+              // playClip already logs missing-clip warnings.
+            }
+          }
+
+          // Authoritative gauges. Guest never recomputes — just mirrors.
+          const gs = window.gameState && window.gameState[side];
+          if (gs) {
+            if (typeof slot.hp      === 'number') gs.hp      = slot.hp;
+            if (typeof slot.sp      === 'number') gs.sp      = slot.sp;
+            if (typeof slot.stamina === 'number') gs.stamina = slot.stamina;
+            if (typeof slot.wins    === 'number') gs.wins    = slot.wins | 0;
+          }
+        }
+        if (typeof snap.round === 'number' && window.gameState) {
+          window.gameState.round = snap.round | 0;
+        }
+        try { updateGaugeDOM(); } catch (e) {}
+
+        // Match-won overlay (guest side). The host's wonMatch field is
+        // set frame-accurately when wins crosses WINS_MAX; we show the
+        // overlay once per transition and clear the dedup flag when
+        // host signals the next match has started (wonMatch=null).
+        if (snap.wonMatch) {
+          if (!_mpWonMatchShown) {
+            _mpWonMatchShown = true;
+            try {
+              if (koOverlay) koOverlay.classList.remove('visible');
+              if (matchWonOverlay) {
+                if (mwWinnerText) mwWinnerText.textContent = snap.wonMatch.label || '';
+                matchWonOverlay.classList.add('visible');
+              }
+            } catch (e) {
+              console.warn('[lkb-3d/mp] guest match-won overlay failed', e);
+            }
+          }
+        } else if (_mpWonMatchShown) {
+          // Host has reset for the next match — clear flag so the next
+          // MATCH WON re-fires the overlay, and hide the stale overlay.
+          _mpWonMatchShown = false;
+          try {
+            if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
+          } catch (e) {}
+        }
+      } catch (err) {
+        console.warn('[lkb-3d/mp] applySnapshot threw', err);
+      }
+    }
+    window.applySnapshot = applySnapshot;
+
+    // performAttack — extracted core of playerAttack so the host can
+    // drive crimson (local player) OR azure (remote guest input)
+    // through one code path. `attackerLabel` ∈ {'crimson','azure'};
+    // `local` gates FP-only polish (FOV punch, weapon trail, exhaust
+    // pill) so they don't fire for the remote knight.
+    function performAttack(attackerLabel, defenderLabel, opts) {
+      opts = opts || {};
+      const local = !!opts.local;
+      const attacker = combatants[attackerLabel];
+      const defender = combatants[defenderLabel];
+      if (!attacker || !defender) return false;
+      if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return false;
+      if (attacker.state === 'attack' || attacker.state === 'guard') return false;
+
+      const stmState = window.gameState[attackerLabel];
+      if (stmState.stamina < STM_ATTACK_COST) {
+        if (local) {
+          try { showExhaustPill('EXHAUSTED'); } catch (e) {}
+          try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
+        }
+        return false;
+      }
+      stmState.stamina = Math.max(0, stmState.stamina - STM_ATTACK_COST);
+      try { updateGaugeDOM(); } catch (e) {}
+
+      try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+      try { if (window.sfxStep)  window.sfxStep();  } catch (e) {}
+
+      attacker.state = 'attack';
+      attacker.impactScheduled = false;
+      const chosenAttack = pickAttackClip();
+      const attackAction = playClip(attacker, chosenAttack, {
+        fadeIn: 0.15, loop: false, weight: 1.0,
+      });
+
+      // FP polish — only when this attack came from the local FP player.
+      if (local && cameraDirector && cameraDirector.viewMode === 'fp') {
+        try { triggerFovPunch(); } catch (e) {}
+      }
+      if (local && weaponTrail) {
+        try { weaponTrail.activate(); } catch (e) {}
+      }
+
+      const dur = (attackAction && attacker.currentDuration) || 1.0;
+
+      setTimeout(() => {
+        if (attacker.state !== 'attack') return;
+        attacker.impactScheduled = true;
+        if (defender && !window.gameState[defenderLabel].dead && defender.state !== 'guard' && defender.state !== 'attack') {
+          const hitClip = pickHitClip(defender.state);
+          defender.state = 'hit';
+          playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+        }
+        const defenderRoot = defender && defender.root;
+        const hitPos = defenderRoot
+          ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
+          : { x: 0, y: 1.0, z: 0 };
+        try { window.triggerImpact(hitPos); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
+        try {
+          window.applyDamage(defenderLabel, 8);
+          gainSP(attackerLabel, 5);
+          gainSP(defenderLabel, 5);
+        } catch (err) { console.warn('[lkb-3d] HUD update threw', err); }
+      }, dur * 0.70 * 1000);
+
+      if (local) {
+        setTimeout(() => {
+          if (weaponTrail) {
+            try { weaponTrail.deactivate(); } catch (e) {}
+          }
+        }, dur * 1.00 * 1000);
+      }
+
+      setTimeout(() => {
+        const a = combatants[attackerLabel];
+        if (!a) return;
+        if (window.gameState[attackerLabel].dead) return;
+        // For local FP player, the keyup handler may own state if E is held.
+        if (local && playerInput && playerInput.eHeld) return;
+        playClip(a, CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+        a.state = 'idle';
+      }, dur * 1.05 * 1000);
+      return true;
+    }
+    window.performAttack = performAttack;
+
+    // applyGuestInput — host side. Translates the guest's intent into
+    // azure's animation/combat state. Never called on guest (the
+    // window.mp onmessage routes it only when role==='host').
+    function applyGuestInput(k) {
+      if (!k) return;
+      const a = combatants.azure;
+      if (!a) return;
+      if (window.gameState.azure.dead) return;
+      try {
+        if (k.attack === true) {
+          performAttack('azure', 'crimson', { local: false });
+        }
+        if (k.guard === true) {
+          // Raise azure's guard if not currently attacking.
+          if (a.state !== 'attack' && a.state !== 'guard' && a.state !== 'dead') {
+            if (window.gameState.azure.stamina > 0) {
+              a.state = 'guard';
+              playClip(a, CLIP_NAMES.BLOCK, { fadeIn: 0.12, loop: true, weight: 1.0 });
+            }
+          }
+        } else if (k.guard === false) {
+          // Release guard back to idle.
+          if (a.state === 'guard') {
+            playClip(a, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true });
+            a.state = 'idle';
+          }
+        }
+        // k.weaponSwap reserved for future use (azure has no swap path yet).
+      } catch (err) {
+        console.warn('[lkb-3d/mp] applyGuestInput threw', err);
+      }
+    }
+    window.applyGuestInput = applyGuestInput;
+
+    // sendGuestInput — guest side. Forwards local crimson-driven
+    // intent to the host. No-op if we're not a connected guest.
+    function sendGuestInput(k) {
+      const mp = window.mp;
+      if (!mp || !mp.peerReady || mp.role !== 'guest') return false;
+      const ws = mp.ws;
+      if (!ws || ws.readyState !== 1) return false;
+      try {
+        ws.send(JSON.stringify({ t: "in", k: k }));
+        return true;
+      } catch (e) {
+        console.warn('[lkb-3d/mp] sendGuestInput failed', e);
+        return false;
+      }
+    }
+    window.sendGuestInput = sendGuestInput;
+
     // combatTick — runs every 3s. Picks a random attacker, fires the
     // ATTACK clip on them and the BLOCK clip on the defender, schedules
     // the impact at ~70% of the attack duration, and fades both back to
@@ -4825,6 +5282,10 @@
       // outer setInterval keeps running, so combat resumes on the next
       // tick after the panel closes.
       if (window._gamePaused) return;
+      // MP phase-3: guest never runs the AI loop locally. All combat
+      // resolution happens on the host; the guest just displays the
+      // host's snapshots via applySnapshot().
+      if (window.mp && window.mp.peerReady && window.mp.role === 'guest') return;
       // In FP mode, the player owns crimson — CPU only auto-attacks on
       // azure. Outside FP mode, keep the original 50/50 random attacker.
       let attackerLabel;
@@ -4840,6 +5301,17 @@
       if (!attacker || !defender) return; // not both loaded yet
       // Skip while a knight is dead — resetMatch() will clear the flag.
       if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return;
+
+      // ── MP phase 2: when both peers are connected and we're the
+      //    host, azure's actions come from the guest (phase-3 will
+      //    apply the inputs). Suppress the local AI tick so we don't
+      //    double-control azure. Crimson auto-attacks (when the random
+      //    attacker rolls crimson) still fire locally on the host —
+      //    that's the player. Phase-3 may further refine this once
+      //    guest-input is wired.
+      if (window.mp && window.mp.peerReady && window.mp.role === 'host') {
+        if (attackerLabel === 'azure') return;
+      }
 
       // ── FP-mode adaptive AI: AGGRESSIVE / DEFENSIVE behavior based on azure HP.
       if (isFpMode) {
@@ -5016,6 +5488,14 @@
     // state they're in (idle / guard / attack) so we don't yank them out
     // of their own animation mid-swing.
     function playerAttack() {
+      // MP phase-3: as a connected guest, forward intent to host
+      // instead of running the swing locally. Host echoes back the
+      // resulting azure-vs-crimson state via snapshot. Host case
+      // (and offline single-player) falls through to the local swing.
+      if (window.mp && window.mp.peerReady && window.mp.role === 'guest') {
+        sendGuestInput({ attack: true, guard: false, weaponSwap: false });
+        return;
+      }
       const attacker = combatants.crimson;
       const defender = combatants.azure;
       if (!attacker || !defender) return;
@@ -5106,6 +5586,11 @@
     }
 
     function playerGuardEnter() {
+      // MP phase-3: guest forwards guard-press intent to host.
+      if (window.mp && window.mp.peerReady && window.mp.role === 'guest') {
+        sendGuestInput({ attack: false, guard: true, weaponSwap: false });
+        return;
+      }
       const c = combatants.crimson;
       if (!c) return;
       if (window.gameState.crimson.dead) return;
@@ -5123,6 +5608,11 @@
     }
 
     function playerGuardExit() {
+      // MP phase-3: guest forwards guard-release intent to host.
+      if (window.mp && window.mp.peerReady && window.mp.role === 'guest') {
+        sendGuestInput({ attack: false, guard: false, weaponSwap: false });
+        return;
+      }
       const c = combatants.crimson;
       if (!c) return;
       if (window.gameState.crimson.dead) return;
