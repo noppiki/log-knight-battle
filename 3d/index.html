@@ -6320,6 +6320,51 @@
       }
     }
 
+    // r125: azure shield cyan rim glow on guard — per-frame lerp-driven emissive
+    // on the shield mesh. Same cyan (#4060a0) as r123 helm rim. Fades in when
+    // azure enters 'guard' and fades out when they leave it. Provides a clear
+    // "enemy is blocking" visual cue while reinforcing the blue-boss identity.
+    // Intensity target: 0.12 (slightly above the 0.08 helm baseline for contrast).
+    // Design intent: guard = shield raised = shield glows; no guard = dark shield.
+    // Interaction: r73 desperate and r100 hit-glow both touch the whole azure root
+    // via emissiveSave / _hitGlowBase snapshots, which capture AFTER this function
+    // runs each frame — the shield's dynamic intensity is snapshot-able and restores
+    // back to whatever the lerp has set, so no conflict. resetMatch nulls
+    // _azureShieldMat so the next round re-finds the mesh from the fresh GLB scene.
+    let _azureShieldMat = null;   // cached material; null forces re-search on next call
+    function updateAzureShieldGlow() {
+      if (!_azureShieldMat) {
+        const az = combatants && combatants.azure && combatants.azure.root;
+        if (!az) return;
+        az.traverse((o) => {
+          if (_azureShieldMat) return;
+          if (!o.isMesh || !o.material) return;
+          // KayKit shield node names: "Azure_Round_Shield", "Round_Shield",
+          // "shield", etc. — match any mesh whose name contains "shield".
+          if (!/shield/i.test(o.name)) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of mats) {
+            if (m.emissive) { _azureShieldMat = m; break; }
+          }
+        });
+        if (!_azureShieldMat) return; // GLB has no shield mesh — silent skip
+        // Initialise emissive color and zero intensity so the first guard
+        // fades in from dark rather than starting mid-way.
+        _azureShieldMat.emissive.setHex(0x4060a0);
+        if (_azureShieldMat.emissiveIntensity == null) _azureShieldMat.emissiveIntensity = 0;
+      }
+      const az = combatants && combatants.azure;
+      if (!az) return;
+      const isGuard = az.state === 'guard';
+      const target  = isGuard ? 0.12 : 0;
+      const current = _azureShieldMat.emissiveIntensity;
+      // Faster fade-in (0.08/frame ≈ 100ms to 95%), slower fade-out (0.04 ≈ 200ms).
+      const lerpSpeed = isGuard ? 0.08 : 0.04;
+      _azureShieldMat.emissiveIntensity = current + (target - current) * lerpSpeed;
+      // Keep emissive color locked to cyan in case other systems reset it.
+      _azureShieldMat.emissive.setHex(0x4060a0);
+    }
+
     // flashDamageVignette — kick the red vignette to opacity 1 immediately
     // then let CSS transition fade it back to 0 over 0.4s. We clear any
     // pending fade-back so a rapid second hit re-triggers cleanly.
@@ -9889,6 +9934,10 @@
           }
         }
       } catch (e) {}
+      // r125: null the cached shield material so the next round re-finds the mesh
+      // from the freshly-loaded GLB (roster-swap safe; per-frame lerp will restart
+      // from whatever intensity the material currently has).
+      try { _azureShieldMat = null; } catch (e) {}
       // r75: force-remove range ring so it never leaks into the next round.
       try { if (typeof _removeAzureRangeRingNow === 'function') _removeAzureRangeRingNow(); } catch (e) {}
       // r108: restore azure root.position to its pre-approach snapshot so it
@@ -13983,6 +14032,9 @@
       try { updateDangerState(); } catch (e) { /* never break the render loop */ }
       // r73: azure desperate mode — boss enrage on low HP (interval + emissive + telegraph).
       try { updateAzureDesperateState(); } catch (e) { /* never break the render loop */ }
+      // r125: azure shield cyan rim glow on guard — lerp emissive toward 0.12 while
+      // az.state === 'guard', else lerp back to 0. Visual cue: "enemy is blocking".
+      try { updateAzureShieldGlow(); } catch (e) { /* never break the render loop */ }
       // r76: dodge cooldown progress indicator — O(1) DOM attribute set.
       try { updateDodgeIndicator(); } catch (e) { /* never break the render loop */ }
       // r91: round countdown timer — wall-clock, triggers TIME UP! on expiry.
