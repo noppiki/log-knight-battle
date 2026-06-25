@@ -4726,6 +4726,31 @@
         if (window._gamePaused) return;
         if (window.gameState[attackerLabel].dead) return;
 
+        // r62: feint — telegraph was shown but skip the actual strike.
+        // Reset azure to idle and shorten next-attack gap (3000ms extra tick)
+        // to maintain pressure. The _aiPattern flag stays readable for parry
+        // intercept in triggerPerfectParry / playerGuardEnter.
+        if (attacker._aiPattern === 'feint') {
+          attacker.state = 'idle';
+          try { playClip(attacker, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true }); } catch (e) {}
+          attacker._aiPattern = 'normal'; // consume flag
+          // Short-cycle next attack — azure presses advantage after baiting.
+          setTimeout(combatTick, 3000);
+          // Brief whiff audio: sharp short oscillator "shh" (does not reveal feint during windup).
+          try {
+            const ac = window.actx || null;
+            if (ac) {
+              const o = ac.createOscillator(); const g = ac.createGain();
+              o.type = 'sawtooth'; o.frequency.value = 1800;
+              g.gain.setValueAtTime(0.12, ac.currentTime);
+              g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.08);
+              o.connect(g); g.connect(ac.destination);
+              o.start(); o.stop(ac.currentTime + 0.08);
+            }
+          } catch (e) {}
+          return;
+        }
+
         runAttackFn(mySwing);
       }, TELEGRAPH_MS);
     }
@@ -4746,6 +4771,27 @@
     function triggerPerfectParry(attackerLabel) {
       const attacker = combatants[attackerLabel];
       if (!attacker) return;
+
+      // r62: feint intercept — player pressed E during a feint telegraph.
+      // Cancel the swing normally but grant NO counter damage; the feint
+      // succeeds (azure baited the parry). Reset azure to idle cleanly so
+      // combatTick never gets stuck on state==='windup'.
+      if (attacker._aiPattern === 'feint') {
+        attacker._swingId = (attacker._swingId || 0) + 1;
+        attacker._telegraphAt = 0;
+        attacker._aiPattern = 'normal'; // consume flag
+        // Clear telegraph overlays.
+        const warnEl  = FpPolish.tgWarnEl;
+        const alertEl = FpPolish.tgAlertEl;
+        if (warnEl)  warnEl.classList.remove('active');
+        if (alertEl) alertEl.classList.remove('active');
+        if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+        // Reset azure to idle — critical: prevents permanent windup-stuck state.
+        attacker.state = 'idle';
+        try { playClip(attacker, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true }); } catch (e) {}
+        // No RIPOSTE, no flash, no counter damage — the feint worked.
+        return;
+      }
 
       // ── 1) Cancel the pending swing by bumping swingId ──────────────
       attacker._swingId = (attacker._swingId || 0) + 1;
@@ -7887,11 +7933,112 @@
           } catch (err) {
             console.warn('[lkb-3d] HUD update threw', err);
           }
+
+          // r62: double strike — chain a 2nd attack after a 300ms gap.
+          // Bump swingId immediately to cancel the 105%-dur idle-restore
+          // below (the new id will be used for the follow-up instead).
+          if (swingAttacker._aiPattern === 'double' &&
+              !window.gameState[attackerLabel].dead &&
+              !window.gameState[defenderLabel].dead) {
+            swingAttacker._aiPattern = 'normal'; // consume flag
+            const doubleSwing = (swingAttacker._swingId = (swingAttacker._swingId || 0) + 1);
+            // Hold state so combatTick's windup/attack defer fires during gap.
+            swingAttacker.state = 'attack';
+
+            // Short telegraph (150ms) so the 2nd hit is still parryable.
+            const DOUBLE_TELEGRAPH_MS = 150;
+            setTimeout(() => {
+              if (swingAttacker._swingId !== doubleSwing) return; // parried or superseded
+              if (window._gamePaused) return;
+              if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return;
+
+              // Show a brief vignette warning for the 2nd strike.
+              const warnEl  = FpPolish.tgWarnEl;
+              const alertEl = FpPolish.tgAlertEl;
+              if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+              if (warnEl)  { warnEl.style.transition = 'none'; void warnEl.offsetWidth;
+                             warnEl.style.transition = ''; warnEl.classList.add('active'); }
+              if (alertEl) { alertEl.style.transition = 'none'; void alertEl.offsetWidth;
+                             alertEl.style.transition = ''; alertEl.classList.add('active'); }
+              // Arm parry window for the 2nd hit.
+              swingAttacker._telegraphAt = performance.now();
+
+              setTimeout(() => {
+                // Clear 2nd-strike telegraph overlays.
+                if (warnEl)  warnEl.classList.remove('active');
+                if (alertEl) alertEl.classList.remove('active');
+                FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
+                swingAttacker._telegraphAt = 0;
+
+                if (swingAttacker._swingId !== doubleSwing) return; // parried
+                if (window._gamePaused) return;
+                if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return;
+
+                // 2nd strike: slightly detuned whoosh for "follow-through" feel.
+                try {
+                  if (window.sfxSwing) window.sfxSwing();
+                  const ac = window.actx || null;
+                  if (ac) {
+                    const src = ac.createOscillator(); const g = ac.createGain();
+                    src.type = 'sawtooth'; src.frequency.value = 300;
+                    g.gain.setValueAtTime(0.07, ac.currentTime);
+                    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.12);
+                    src.connect(g); g.connect(ac.destination);
+                    src.start(); src.stop(ac.currentTime + 0.12);
+                  }
+                } catch (e) {}
+
+                const curSwingAttacker2 = combatants[attackerLabel];
+                const curSwingDefender2 = combatants[defenderLabel];
+                if (!curSwingAttacker2 || !curSwingDefender2) return;
+
+                curSwingAttacker2.state = 'attack';
+                const atk2 = playClip(curSwingAttacker2, pickAttackClip(), { fadeIn: 0.15, loop: false, weight: 1.0 });
+                const dur2 = (atk2 && curSwingAttacker2.currentDuration) || 1.0;
+
+                // 2nd impact at 70% of 2nd swing — damage 3 (follow-up is weaker).
+                setTimeout(() => {
+                  if (curSwingAttacker2._swingId !== doubleSwing) return;
+                  if (curSwingAttacker2.state !== 'attack') return;
+                  if (curSwingDefender2 && !window.gameState[defenderLabel].dead) {
+                    const hit2Clip = pickHitClip(curSwingDefender2.state);
+                    curSwingDefender2.state = 'hit';
+                    playClip(curSwingDefender2, hit2Clip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+                  }
+                  const defRoot2 = curSwingDefender2 && curSwingDefender2.root;
+                  const hitPos2 = defRoot2
+                    ? defRoot2.position.clone().add(new THREE.Vector3(0, 1.0, 0))
+                    : { x: 0, y: 1.0, z: 0 };
+                  try { window.triggerImpact(hitPos2); } catch (e) {}
+                  try {
+                    window.applyDamage(defenderLabel, 3); // follow-up: weaker
+                    gainSP(attackerLabel, 3);
+                    gainSP(defenderLabel, 3);
+                  } catch (e) {}
+                }, dur2 * 0.70 * 1000);
+
+                // Idle restore after 2nd swing.
+                setTimeout(() => {
+                  if (curSwingAttacker2._swingId !== doubleSwing) return;
+                  if (combatants[attackerLabel] && !window.gameState[attackerLabel].dead) {
+                    playClip(combatants[attackerLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+                    combatants[attackerLabel].state = 'idle';
+                  }
+                  if (combatants[defenderLabel] && !window.gameState[defenderLabel].dead) {
+                    playClip(combatants[defenderLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+                    combatants[defenderLabel].state = 'idle';
+                  }
+                }, dur2 * 1.05 * 1000);
+              }, DOUBLE_TELEGRAPH_MS);
+            }, 300); // 300ms gap between 1st impact and 2nd telegraph
+          }
         }, dur * 0.70 * 1000);
 
         // Return both knights to idle just after the swing resolves.
         // Skip the idle restore for a knight that just died — Death_A
         // is a one-shot clampWhenFinished clip we want to hold.
+        // r62: guarded by swingId — double strike bumps it at 1st impact,
+        // so this restore naturally no-ops when chaining to 2nd strike.
         setTimeout(() => {
           if (swingAttacker._swingId !== mySwing) return; // superseded
           const aDead = window.gameState[attackerLabel].dead;
@@ -7906,6 +8053,21 @@
           }
         }, dur * 1.05 * 1000);
       }; // end runCombatSwing
+
+      // r62: AI pattern selector — only applies in FP mode where azure is attacker.
+      // Outside FP (AI vs AI) patterns are always 'normal'.
+      if (isFpMode && attackerLabel === 'azure') {
+        const patternRoll = Math.random();
+        if (patternRoll < 0.20) {
+          attacker._aiPattern = 'feint';      // 20%: telegraph but no strike
+        } else if (patternRoll < 0.30) {
+          attacker._aiPattern = 'double';     // 10%: two strikes
+        } else {
+          attacker._aiPattern = 'normal';     // 70%: as before
+        }
+      } else {
+        attacker._aiPattern = 'normal';
+      }
 
       // r51: FP mode + azure is attacker → telegraph first (350ms warning),
       // then fire the swing. Non-FP / non-azure → immediate (no delay).
