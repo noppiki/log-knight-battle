@@ -5957,6 +5957,158 @@
       }
     };
 
+    /* ── GroundDustSystem (r60) ─────────────────────────────────────
+       Tier-2 impact ground dust burst: 30 THREE.Points particles
+       radiate outward in a flat disk from the impact world position,
+       travelling 0–0.6 m over 0.5 s with opacity + size fade.
+       Dust beige color #b39074, NormalBlending, depthWrite off.
+       Particles are tagged with THREE.Points.name = 'tier2_dust' for
+       resetMatch() cleanup and animate()-loop update.
+    ───────────────────────────────────────────────────────────────── */
+    class GroundDustSystem {
+      constructor(scene) {
+        this.scene  = scene;
+        this.bursts = []; // { points, velocities, age, lifetime, baseSize, baseOpacity }
+      }
+
+      spawn(worldPos) {
+        if (!worldPos) return;
+        const COUNT    = 30;
+        const LIFETIME = 0.50;  // seconds
+        const BASE_SIZE    = 0.09;
+        const BASE_OPACITY = 0.65;
+
+        const positions  = new Float32Array(COUNT * 3);
+        const velocities = new Float32Array(COUNT * 3); // m/s
+
+        for (let i = 0; i < COUNT; i++) {
+          // Start slightly above ground level
+          positions[i * 3 + 0] = worldPos.x;
+          positions[i * 3 + 1] = worldPos.y + 0.08;
+          positions[i * 3 + 2] = worldPos.z;
+
+          // Flat radial disk with a small upward kick
+          const phi    = (i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+          const radial = 1.0 + Math.random() * 0.6; // 1.0–1.6 m/s
+          const up     = 0.12 + Math.random() * 0.14; // slight lift
+          velocities[i * 3 + 0] = Math.cos(phi) * radial;
+          velocities[i * 3 + 1] = up;
+          velocities[i * 3 + 2] = Math.sin(phi) * radial;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+          color:           0xb39074, // dust beige
+          size:            BASE_SIZE,
+          sizeAttenuation: true,
+          transparent:     true,
+          opacity:         BASE_OPACITY,
+          depthWrite:      false,
+          blending:        THREE.NormalBlending,
+        });
+
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        points.name = 'tier2_dust'; // tag for resetMatch + animate cleanup
+        this.scene.add(points);
+
+        this.bursts.push({ points, velocities, age: 0, lifetime: LIFETIME, baseSize: BASE_SIZE, baseOpacity: BASE_OPACITY });
+      }
+
+      update(delta) {
+        for (let p = this.bursts.length - 1; p >= 0; p--) {
+          const b = this.bursts[p];
+          b.age += delta;
+          const t = b.age / b.lifetime; // 0 → 1
+
+          if (t >= 1.0) {
+            this.scene.remove(b.points);
+            b.points.geometry.dispose();
+            b.points.material.dispose();
+            this.bursts.splice(p, 1);
+            continue;
+          }
+
+          // Fade out + grow (dust expands as it dissipates)
+          b.points.material.opacity = b.baseOpacity * (1.0 - t);
+          b.points.material.size    = b.baseSize * (1.0 + t * 1.0); // grows to 2× at end
+
+          // Move particles
+          const pos = b.points.geometry.attributes.position;
+          const arr = pos.array;
+          const vel = b.velocities;
+          const n   = arr.length / 3;
+          for (let i = 0; i < n; i++) {
+            arr[i * 3 + 0] += vel[i * 3 + 0] * delta;
+            arr[i * 3 + 1] += vel[i * 3 + 1] * delta;
+            arr[i * 3 + 2] += vel[i * 3 + 2] * delta;
+            // Gravity pulls particles back down
+            vel[i * 3 + 1] -= 3.0 * delta;
+            // Radial deceleration — air resistance
+            vel[i * 3 + 0] *= (1.0 - 1.8 * delta);
+            vel[i * 3 + 2] *= (1.0 - 1.8 * delta);
+          }
+          pos.needsUpdate = true;
+        }
+      }
+
+      clearAll() {
+        for (const b of this.bursts) {
+          this.scene.remove(b.points);
+          b.points.geometry.dispose();
+          b.points.material.dispose();
+        }
+        this.bursts.length = 0;
+      }
+    }
+
+    const groundDustSystem = new GroundDustSystem(scene);
+    window.groundDustSystem = groundDustSystem;
+
+    window.spawnGroundDust = function spawnGroundDust(worldPos) {
+      try {
+        groundDustSystem.spawn(worldPos);
+      } catch (err) {
+        console.warn('[lkb-3d] groundDustSystem.spawn threw', err);
+      }
+    };
+
+    /* ── spawnSwingLight (r60) ──────────────────────────────────────
+       Brief THREE.PointLight spawned at the sword-tip world position
+       on tier-2 charge release. Fades from full intensity to 0 over
+       durationMs, then removes itself from the scene.
+       light.name = 'tier2_flash' for resetMatch() cleanup.
+    ───────────────────────────────────────────────────────────────── */
+    window.spawnSwingLight = function spawnSwingLight(worldPos, color, intensity, distance, durationMs) {
+      color       = (color       !== undefined) ? color       : 0xddeeff;
+      intensity   = (intensity   !== undefined) ? intensity   : 6;
+      distance    = (distance    !== undefined) ? distance    : 4;
+      durationMs  = (durationMs  !== undefined) ? durationMs  : 120;
+
+      try {
+        const light = new THREE.PointLight(color, intensity, distance);
+        light.position.copy(worldPos);
+        light.name = 'tier2_flash'; // tag for resetMatch cleanup
+        scene.add(light);
+
+        const start = performance.now();
+        const fade = () => {
+          const t = (performance.now() - start) / durationMs;
+          if (t >= 1.0) {
+            scene.remove(light);
+            return;
+          }
+          light.intensity = intensity * (1.0 - t);
+          requestAnimationFrame(fade);
+        };
+        requestAnimationFrame(fade);
+      } catch (err) {
+        console.warn('[lkb-3d] spawnSwingLight threw', err);
+      }
+    };
+
     /* ── BreathFogSystem ────────────────────────────────────────────
        Visible cold-air exhalation. Each knight exhales a small white
        plume from the mouth every ~3 s while idle, sold as 20–30
@@ -6628,6 +6780,12 @@
           p.m.emissive.setHex(p.color);
           p.m.emissiveIntensity = p.intensity;
         });
+      } catch (e) {}
+      // r60: clear any in-flight tier2 ground dust bursts and point light flashes
+      try { groundDustSystem.clearAll(); } catch (e) {}
+      try {
+        const flashLights = scene.children.filter((o) => o.name === 'tier2_flash');
+        flashLights.forEach((l) => scene.remove(l));
       } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
@@ -7987,6 +8145,22 @@
           setTimeout(() => { try { spawnSwingAfterimage(); } catch (e) {} }, i * 50);
         }
       }
+      // r60: tier2 release — point light flash at sword tip (discharge flare).
+      // Fired at swing-start so the light pulses as the blade leaves the hand.
+      if (myChargeTier >= 2) {
+        try {
+          const lightPos = new THREE.Vector3();
+          if (fpSwordClone) {
+            // Sword tip in local space is (0, 0.9, 0); transform to world
+            lightPos.set(0, 0.9, 0);
+            fpSwordClone.localToWorld(lightPos);
+          } else if (attacker && attacker.root) {
+            attacker.root.getWorldPosition(lightPos);
+            lightPos.y += 1.4; // approximate hand height
+          }
+          window.spawnSwingLight(lightPos, 0xddeeff, 6, 4, 120);
+        } catch (e) {}
+      }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
       // Impact at ~70% through the swing — matches combatTick timing.
@@ -8008,6 +8182,16 @@
           ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
           : { x: 0, y: 1.0, z: 0 };
         try { window.triggerImpact(hitPos, myChargeTier); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
+        // r60: tier2 — ground dust burst at defender feet on landing hit
+        if (myChargeTier >= 2) {
+          try {
+            const dustPos = defenderRoot
+              ? defenderRoot.position.clone()
+              : new THREE.Vector3(0, 0, 0);
+            dustPos.y = 0; // snap to ground plane
+            window.spawnGroundDust(dustPos);
+          } catch (e) {}
+        }
         // r55: tier2 — screen edge cyan flash on impact
         if (myChargeTier >= 2) {
           const flashEl = FpPolish.chargeImpactEl;
@@ -9373,6 +9557,7 @@
       // position advance is preserved and only the size buffer is masked.
       try { updateWeather(delta); } catch (e) { /* never break the loop */ }
       try { snowPuffSystem.update(delta); } catch (e) {}
+      try { groundDustSystem.update(delta); } catch (e) {} // r60: tier2 ground dust
       try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
