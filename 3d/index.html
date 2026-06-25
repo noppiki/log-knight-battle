@@ -663,7 +663,7 @@
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
       pointer-events: none; z-index: 5;
       background: radial-gradient(ellipse at center,
-        transparent 40%, rgba(15,12,20,0.35) 80%, rgba(8,6,12,0.6) 100%);
+        transparent 40%, rgba(15,12,20,0.18) 80%, rgba(8,6,12,0.25) 100%);
     }
 
     /* ── vignette anchors ───────────────────────────────────────── */
@@ -1167,8 +1167,8 @@
     </div>
     <div class="sp-row">
       <span class="sp-label">Bloom</span>
-      <input type="range" id="sp-bloom" min="0" max="1.5" step="0.05" value="0.55">
-      <span class="sp-value" id="sp-bloom-val">0.55</span>
+      <input type="range" id="sp-bloom" min="0" max="1.5" step="0.05" value="0.15">
+      <span class="sp-value" id="sp-bloom-val">0.15</span>
     </div>
     <div class="sp-row">
       <span class="sp-label">SSAO</span>
@@ -1226,8 +1226,10 @@
   </div>
   <div id="mp-toast">PEER READY</div>
 
-  <!-- CINEMA mode toggle — auto camera cycle on/off. JS wires click. -->
-  <button id="cinema-toggle" type="button" title="Toggle automatic camera cycle">&#x1F3A5; CYCLE: ON</button>
+  <!-- CINEMA mode toggle — auto camera cycle on/off. Default OFF (locked
+       SIDE_WIDE) per "the camera shouldn't move on its own during a duel".
+       JS reads localStorage["lkb3d_cinemacycle"] on boot and flips state. -->
+  <button id="cinema-toggle" class="off" type="button" title="Toggle automatic camera cycle">&#x1F3A5; CYCLE: OFF</button>
 
   <!-- VIEW mode toggle — cycles 3rd-person (cinematic) / FP / MANUAL. JS wires click + localStorage. -->
   <button id="view-toggle" type="button" title="Cycle camera view: 3rd-person / First-person / Manual">&#x1F441; VIEW: 3rd</button>
@@ -2481,8 +2483,11 @@
 
     /* ── scene ─────────────────────────────────────────────────── */
     const scene = new THREE.Scene();
-    scene.environment  = fallbackEnvTex;  // will be replaced by HDR PMREM on success
-    scene.background   = fallbackEnvTex;  // show env as visible sky; replaced by HDRI on load
+    scene.environment  = fallbackEnvTex;  // drives reflections (PMREM); replaced by HDR on success
+    // EMERGENCY restore: HDRI as visible background was drowning subjects + bloom whitewashed
+    // the frame. Force scene.background = null so the gradient skydome (added below) shows
+    // through. HDRI stays in scene.environment for reflections only.
+    scene.background   = null;
     scene.environmentIntensity = 1.0;    // Three r150+ scene-level prop
 
     // Track the currently-applied HDRI PMREM so subsequent rotations can dispose it.
@@ -2496,11 +2501,11 @@
       (hdrTex) => {
         hdrTex.mapping = THREE.EquirectangularReflectionMapping;
         const pmremTex = pmrem.fromEquirectangular(hdrTex).texture;
-        scene.environment = pmremTex;
-        scene.background  = pmremTex;  // HDRI becomes the visible sky
+        scene.environment = pmremTex;        // reflections only
+        scene.background  = null;            // EMERGENCY: gradient skydome owns the visible sky
         currentHdriPmrem = pmremTex;
         hdrTex.dispose();
-        console.log('[lkb-3d] HDRI env_dusk.hdr loaded');
+        console.log('[lkb-3d] HDRI env_dusk.hdr loaded (env only; background = gradient skydome)');
       },
       undefined,
       (err) => {
@@ -2546,8 +2551,8 @@
           if (currentHdriPmrem && currentHdriPmrem !== fallbackEnvTex) {
             try { currentHdriPmrem.dispose(); } catch (e) {}
           }
-          scene.environment = pmremTex;
-          scene.background  = pmremTex;
+          scene.environment = pmremTex;     // reflections only
+          scene.background  = null;          // EMERGENCY: keep gradient skydome as visible sky
           currentHdriPmrem  = pmremTex;
           currentHdriIndex  = idx;
           hdrTex.dispose();
@@ -2652,11 +2657,17 @@
       `
     });
     const skyDome = new THREE.Mesh(skyGeo, skyMat);
-    // scene.add(skyDome); // disabled: HDRI (scene.background = pmremTex) is now the visible sky.
-    //                      // The gradient skydome was competing with the HDRI horizon.
+    // EMERGENCY restore (round-1 era): HDRI as scene.background drowned subjects and bloom
+    // whitewashed the frame. Re-enable the gradient skydome and keep scene.background = null
+    // so this dome is the visible sky. HDRI still drives scene.environment for reflections.
+    skyDome.renderOrder = -1; // draw behind everything else
+    scene.add(skyDome);
 
     // Cool dusk fog — fades the far end of the log into atmosphere.
-    scene.fog = new THREE.FogExp2(0x9098a8, 0.006);
+    // EMERGENCY: density 0.006 → 0.010 so distant ramparts/aurora soften and
+    // the foreground knights pop by contrast. Calm-weather preset also bumped
+    // to 0.010 below so the weather tick doesn't immediately overwrite this.
+    scene.fog = new THREE.FogExp2(0x9098a8, 0.010);
 
     /* ── lighting ──────────────────────────────────────────────── */
     // Hemisphere: sky cool-blue, ground warm terracotta
@@ -3219,6 +3230,9 @@
       const glintPoints = new THREE.Points(glintGeo, glintMat);
       glintPoints.frustumCulled = false;
       scene.add(glintPoints);
+      // EMERGENCY: snowGlint disabled by default — was drawing eyes away
+      // from the knights. Settings can re-enable via points.visible = true.
+      glintPoints.visible = false;
       snowGlintSystem = { points: glintPoints, material: glintMat };
       window.snowGlintSystem = snowGlintSystem;
     } catch (sgErr) {
@@ -3566,6 +3580,16 @@
         // The pointerdown / cinemaBtn handlers below keep viewMode in sync
         // when they flip `active`, so the two flags never contradict.
         this.viewMode = 'cinematic';
+        // cycleEnabled — third axis. When false (default), the camera
+        // LOCKS to shots[0] (SIDE_WIDE) even in 'cinematic' viewMode and
+        // ignores combat-driven jumpTo() calls. The "🎥 CYCLE" button is
+        // the sole explicit opt-in; persisted via localStorage
+        // "lkb3d_cinemacycle". Rationale: the auto-cycle between
+        // SIDE_WIDE/CLOSE_CRIMSON/CLOSE_AZURE/HIGH_WIDE plus combat
+        // close-ups made the duel unreadable. Default: deterministic
+        // fixed wide shot. KO_REPLAY (match-end slow-mo) is a SEPARATE
+        // path and still fires regardless — see the KO_REPLAY block.
+        this.cycleEnabled = false;
         // Captured ONCE — used to restore fov when leaving FP. Capturing per
         // entry would lose the original if we ever entered FP twice without
         // a cinematic restore in between.
@@ -3620,8 +3644,16 @@
 
       // Combat sync: jump immediately to a named shot (kills any hold,
       // begins a fresh transition). reason is a label for diagnostics.
+      // Gated on cycleEnabled — when the user has CYCLE OFF, combat
+      // close-ups are suppressed and the camera stays on SIDE_WIDE no
+      // matter what happens in the match. KO_REPLAY is the documented
+      // exception and bypasses this gate by calling _beginTransitionTo
+      // through its own path? — actually it routes through this jumpTo,
+      // so we exempt the explicit 'KO_REPLAY' reason below to preserve
+      // the match-end slow-mo cinematic regardless of cycleEnabled.
       jumpTo(shot, reason) {
         if (!this.active) return;
+        if (!this.cycleEnabled && reason !== 'KO_REPLAY') return;
         this._override = { shot, reason };
         this._beginTransitionTo(shot);
       }
@@ -3751,6 +3783,29 @@
         // viewMode==='fp' and skips camera.lookAt(), but defensive too.
         if (this.viewMode === 'fp') {
           this.camera.position.copy(FP_SHOT.getPosition());
+          return;
+        }
+
+        // ── cycle gate ────────────────────────────────────────────
+        // When the user has CYCLE OFF (default), 'cinematic' viewMode
+        // locks to shots[0] (SIDE_WIDE) with no transitions, no holds,
+        // no combat overrides. This is the deterministic fixed wide
+        // shot. Clear any leftover override so a CYCLE ON→OFF flip in
+        // the middle of a combat close-up snaps back cleanly.
+        if (!this.cycleEnabled) {
+          if (this._override) this._override = null;
+          const lockShot = this.shots[0];
+          this.camera.position.copy(lockShot.pos);
+          this.currentLookAt.copy(lockShot.look);
+          // Keep travel anchors in sync so a future CYCLE ON starts
+          // its first transition from SIDE_WIDE (no snap).
+          this.fromPos.copy(lockShot.pos);
+          this.fromLook.copy(lockShot.look);
+          this.toPos.copy(lockShot.pos);
+          this.toLook.copy(lockShot.look);
+          this.state         = 'holding';
+          this.elapsed       = 0;
+          this.currentIndex  = 0;
           return;
         }
 
@@ -4016,11 +4071,18 @@
       }
       if (cameraDirector.active) {
         cameraDirector.setViewMode('manual');
+        // Manual takeover implies cycle off (user is dragging orbit).
+        // We can't call applyCycleEnabled here — it's defined later in
+        // the file — so inline the flag write + UI sync (CSS .off +
+        // localStorage). The cinemaBtn handler defined below uses the
+        // same fields.
+        cameraDirector.cycleEnabled = false;
         const btn = document.getElementById('cinema-toggle');
         if (btn) {
           btn.textContent = '🎥 CYCLE: OFF';
           btn.classList.add('off');
         }
+        try { localStorage.setItem('lkb3d_cinemacycle', '0'); } catch (e) {}
         syncViewButton();
       }
     });
@@ -4175,17 +4237,33 @@
     };
     refreshFpOverlays();
 
-    // 🎥 toggle button — flips cinema on/off. When turning ON, we also
-    // disable orbit input; when OFF, we re-enable it so the user can
-    // drag freely (consistent with the pointer-down path above).
-    // Routes through setViewMode so viewMode and active stay aligned.
+    // 🎥 toggle button — flips the auto camera cycle on/off. This is the
+    // ONLY explicit opt-in for the cinematic auto-cycle (boot default
+    // OFF = locked SIDE_WIDE). It does NOT change viewMode — cinematic
+    // / FP / manual are owned by the 👁 button. Persisted via
+    // localStorage["lkb3d_cinemacycle"].
+    //
+    // ON  → enable cycle; if we're in 'manual' (orbit-takeover), snap
+    //       back to 'cinematic' so the cycle has a stage to run on.
+    // OFF → freeze on SIDE_WIDE (the update() gate clamps the pose);
+    //       leave viewMode as-is so users in FP/manual aren't yanked.
     const cinemaBtn = document.getElementById('cinema-toggle');
+    function applyCycleEnabled(on) {
+      cameraDirector.cycleEnabled = !!on;
+      if (cinemaBtn) {
+        cinemaBtn.textContent = on ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
+        cinemaBtn.classList.toggle('off', !on);
+      }
+      try { localStorage.setItem('lkb3d_cinemacycle', on ? '1' : '0'); } catch (e) {}
+    }
     if (cinemaBtn) {
       cinemaBtn.addEventListener('click', () => {
-        const next = !cameraDirector.active;
-        cameraDirector.setViewMode(next ? 'cinematic' : 'manual');
-        cinemaBtn.textContent = next ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
-        cinemaBtn.classList.toggle('off', !next);
+        const next = !cameraDirector.cycleEnabled;
+        if (next && cameraDirector.viewMode === 'manual') {
+          // Need a cinema stage to cycle on — return to cinematic.
+          cameraDirector.setViewMode('cinematic');
+        }
+        applyCycleEnabled(next);
         syncViewButton();
       });
     }
@@ -4200,29 +4278,42 @@
         const idx = VIEW_CYCLE.indexOf(cameraDirector.viewMode);
         const next = VIEW_CYCLE[(idx + 1) % VIEW_CYCLE.length];
         cameraDirector.setViewMode(next);
-        // Keep cinema button label consistent when switching to/from cinematic.
-        if (cinemaBtn) {
-          cinemaBtn.textContent = cameraDirector.active ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
-          cinemaBtn.classList.toggle('off', !cameraDirector.active);
+        // Cycle is owned by cycleEnabled (independent of viewMode).
+        // Leaving manual into cinematic/fp does NOT auto-arm the cycle —
+        // user must opt in via the 🎥 button. Switching INTO manual
+        // implicitly drops cycleEnabled (orbit takeover).
+        if (next === 'manual' && cameraDirector.cycleEnabled) {
+          cameraDirector.cycleEnabled = false;
+          if (cinemaBtn) {
+            cinemaBtn.textContent = '🎥 CYCLE: OFF';
+            cinemaBtn.classList.add('off');
+          }
+          try { localStorage.setItem('lkb3d_cinemacycle', '0'); } catch (e) {}
         }
         syncViewButton();
       });
     }
 
     // Boot restore — replay last saved viewMode (if valid) so the user
-    // continues where they left off. Unconditionally sync the button label
-    // because setViewMode early-returns when mode === viewMode (no DOM side
-    // effect), so we call syncViewButton() regardless of whether a restore
-    // actually changed state.
+    // continues where they left off, EXCEPT: a saved 'fp' is overridden
+    // to 'cinematic' on boot. Rationale (user pivot): "何やってるのか全然
+    // 見えない" — readability of the duel comes first; the user can opt
+    // back into FP via the 👁 button. cycleEnabled also restores from
+    // localStorage["lkb3d_cinemacycle"] (default OFF = locked SIDE_WIDE).
+    // Unconditionally sync the button label because setViewMode early-
+    // returns when mode === viewMode (no DOM side effect), so we call
+    // syncViewButton() regardless of whether a restore actually changed
+    // state.
     {
-      const saved = (() => { try { return localStorage.getItem('lkb3d_viewmode'); } catch(e) { return null; } })();
+      let saved = (() => { try { return localStorage.getItem('lkb3d_viewmode'); } catch(e) { return null; } })();
+      if (saved === 'fp') saved = 'cinematic'; // user-pivot override
       if (saved && VIEW_CYCLE.includes(saved)) {
         cameraDirector.setViewMode(saved);
-        if (cinemaBtn) {
-          cinemaBtn.textContent = cameraDirector.active ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
-          cinemaBtn.classList.toggle('off', !cameraDirector.active);
-        }
       }
+      const savedCycle = (() => { try { return localStorage.getItem('lkb3d_cinemacycle'); } catch(e) { return null; } })();
+      // Default OFF when no prior choice exists. '1' = ON, anything else = OFF.
+      const cycleOn = (savedCycle === '1');
+      applyCycleEnabled(cycleOn);
       syncViewButton(); // always set label (handles both restore and cinematic default)
     }
 
@@ -4270,23 +4361,27 @@
 
     // BokehPass — depth-of-field, focused on the knights (~7m from camera).
     // Mild aperture so knights stay crisp; only the far log + ground blur.
+    // Disabled by default (iter 68): DoF blurring was biggest readability offender.
+    // Settings panel slider keeps the option but default OFF.
     const bokehPass = new BokehPass(scene, camera, {
       focus:    7.0,
-      aperture: 0.0010,
+      aperture: 0.00010,
       maxblur:  0.013,
       width:    initialW,
       height:   initialH,
     });
+    bokehPass.enabled = false;
     composer.addPass(bokehPass);
 
     // Bloom — soft glow on highlights.
-    // Iter 67: strength 0.55 → 0.45. The dusk HDRI provides its own glow;
-    // over-bloom blurs sprite/edge detail.
+    // Iter 68: strength 0.55 → 0.30, threshold 0.78 → 0.92.
+    // EMERGENCY (knights as visual focus): strength 0.30 → 0.15, threshold 0.92 → 0.95.
+    // Only the brightest highlights bloom; dusk HDRI provides ambient glow.
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(initialW, initialH),
-      0.55,  // strength (amplifies amber outline rim glow)
+      0.15,  // strength (amplifies amber outline rim glow)
       0.6,   // radius
-      0.78   // threshold
+      0.95   // threshold — only the very brightest highlights bloom
     );
     composer.addPass(bloomPass);
 
@@ -4307,8 +4402,8 @@
       uniforms: {
         tDiffuse:  { value: null },
         uTime:     { value: 0.0 },
-        uChroma:   { value: 0.004 },
-        uGrain:    { value: 0.04 }
+        uChroma:   { value: 0.0008 },
+        uGrain:    { value: 0.012 }
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -4347,6 +4442,9 @@
         }
       `
     });
+    // EMERGENCY: chromaPass.enabled = false — film grain + chroma fringe
+    // were adding visual noise that competed with the knights for attention.
+    chromaPass.enabled = false;
     composer.addPass(chromaPass);
 
     // OutputPass — handles tone mapping + color space conversion at the end.
@@ -4363,7 +4461,7 @@
     (function bootSettings() {
       const SETTINGS_KEY = 'lkb3d_settings';
       const DEFAULTS = {
-        fov: 70, mouseSens: 0.0022, bloomStrength: 0.55,
+        fov: 70, mouseSens: 0.0022, bloomStrength: 0.15,
         ssaoEnabled: true, muted: false,
       };
       // Schema clamps — validate everything coming out of localStorage.
@@ -7220,7 +7318,7 @@
     let dustParticles = null;
     let dustVelocities = null;   // [fallSpeed, driftX] interleaved per particle
     try {
-      const DUST_COUNT = 3500;
+      const DUST_COUNT = 500;
       const dustGeo = new THREE.BufferGeometry();
       const positions = new Float32Array(DUST_COUNT * 3);
       const sizes     = new Float32Array(DUST_COUNT);
@@ -7504,7 +7602,7 @@
        boot — so this layer cooperates with whatever upstream code does
        to the snow/fog/cape/ambient without permanent drift. */
     const WEATHER_PRESETS = {
-      calm:     { snowDensityMul: 0.7, fogDensity: 0.005, capeWind: 1.0, ambientTintMul: 1.0 },
+      calm:     { snowDensityMul: 0.7, fogDensity: 0.010, capeWind: 1.0, ambientTintMul: 1.0 },
       windy:    { snowDensityMul: 1.4, fogDensity: 0.010, capeWind: 1.8, ambientTintMul: 0.9 },
       blizzard: { snowDensityMul: 2.2, fogDensity: 0.020, capeWind: 2.8, ambientTintMul: 0.7 },
     };
