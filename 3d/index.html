@@ -2671,7 +2671,7 @@
 
     /* ── lighting ──────────────────────────────────────────────── */
     // Hemisphere: sky cool-blue, ground warm terracotta
-    const hemi = new THREE.HemisphereLight(0x8aa0d8, 0x443a3a, 1.2);
+    const hemi = new THREE.HemisphereLight(0x8aa0d8, 0x443a3a, 1.5);
     scene.add(hemi);
     const ambientFill = new THREE.AmbientLight(0x9aa8c0, 0.25);
     scene.add(ambientFill);
@@ -2765,7 +2765,7 @@
     // Wrap in try/catch so a single light failure doesn't break the scene.
     try {
       // Crimson knight (x = -2) — warm amber back-rim + cool blue top-rim
-      const rim_crimson_back = new THREE.SpotLight(0xffc88a, 3.2);
+      const rim_crimson_back = new THREE.SpotLight(0xffc88a, 5.0);
       rim_crimson_back.position.set(-2, 2.8, 4);
       rim_crimson_back.target.position.set(-2, 1, 0);
       rim_crimson_back.distance  = 6;
@@ -2775,7 +2775,7 @@
       scene.add(rim_crimson_back);
       scene.add(rim_crimson_back.target);
 
-      const rim_crimson_top = new THREE.SpotLight(0x8ab4ff, 1.4);
+      const rim_crimson_top = new THREE.SpotLight(0x8ab4ff, 2.4);
       rim_crimson_top.position.set(-2.5, 4, 0);
       rim_crimson_top.target.position.set(-2, 1.5, 0);
       rim_crimson_top.distance = 5;
@@ -2785,7 +2785,7 @@
       scene.add(rim_crimson_top.target);
 
       // Azure knight (x = +2) — cool blue back-rim + warm amber top-rim
-      const rim_azure_back = new THREE.SpotLight(0x8ab4ff, 3.2);
+      const rim_azure_back = new THREE.SpotLight(0x8ab4ff, 5.0);
       rim_azure_back.position.set(2, 2.8, 4);
       rim_azure_back.target.position.set(2, 1, 0);
       rim_azure_back.distance  = 6;
@@ -2795,7 +2795,7 @@
       scene.add(rim_azure_back);
       scene.add(rim_azure_back.target);
 
-      const rim_azure_top = new THREE.SpotLight(0xffc88a, 1.4);
+      const rim_azure_top = new THREE.SpotLight(0xffc88a, 2.4);
       rim_azure_top.position.set(2.5, 4, 0);
       rim_azure_top.target.position.set(2, 1.5, 0);
       rim_azure_top.distance = 5;
@@ -4659,6 +4659,60 @@
     const loader = new GLTFLoader();
     let loaded = 0;
     const TOTAL = 3; // log + crimson + azure
+
+    /* ── Pivot-compensated scale ──────────────────────────────────
+       Both crimson.glb and azure.glb have their world placement
+       (~±2, ~0.81, 0) baked into mesh local matrices — root.position
+       is (0,0,0) but child meshes already sit at world ±2. A naive
+       root.scale.setScalar(K) would scale those baked positions
+       outward from world origin, sliding knights laterally and
+       lifting them off the log top.
+
+       This helper measures the current foot anchor in world space
+       (bbox.center on XZ, bbox.min on Y) BEFORE scaling, then sets
+       both scale K and a compensating root.position so the foot
+       anchor stays invariant:
+
+         finalMeshWorld = root.position + K * meshLocal
+                        = (1-K)*footAnchor + K*meshLocal
+         at the foot:    (1-K)*footAnchor + K*footAnchor = footAnchor
+
+       The bbox is computed BEFORE any prior root.position/scale
+       change (i.e. immediately after gltf.scene was added to the
+       parent at identity), so footAnchor reads the raw world-space
+       baked pose. After this call, root.position is no longer
+       (0,0,0) for crimson/azure — combat FX that anchor off
+       root.position will shift slightly (impact burst, breath fog
+       fallback), but stay within the duel area. Head-IK uses the
+       skinned head bone, not root.position, so eye-line is correct. */
+    function pivotCompensatedScale(root, K) {
+      // Make sure world matrices reflect the current (pre-scale)
+      // local matrices before we measure. setFromObject walks the
+      // hierarchy and applies matrixWorld internally, but only if
+      // the parent chain is up-to-date.
+      root.updateMatrixWorld(true);
+      const bbox = new THREE.Box3().setFromObject(root);
+      const footAnchor = new THREE.Vector3(
+        (bbox.min.x + bbox.max.x) * 0.5,
+        bbox.min.y,
+        (bbox.min.z + bbox.max.z) * 0.5,
+      );
+      root.scale.setScalar(K);
+      // Compensating offset keeps footAnchor world-invariant:
+      //   newMeshWorld = (1-K)*footAnchor + K*meshLocal
+      // so the foot point (where meshLocal == footAnchor) is fixed.
+      root.position.set(
+        (1 - K) * footAnchor.x,
+        (1 - K) * footAnchor.y,
+        (1 - K) * footAnchor.z,
+      );
+      root.updateMatrixWorld(true);
+      return footAnchor;
+    }
+
+    // 1.4× upscale for both KayKit knights — feet stay on the log top
+    // via the pivot-compensated scale helper above.
+    const KNIGHT_BASE_SCALE = 1.4;
 
     function onAllLoaded() {
       console.log('[lkb-3d] scene ready');
@@ -6907,6 +6961,13 @@
         applyShadows(root, true, false);
         scene.add(root);
         outlinePass.selectedObjects.push(root);
+        // 1.4× upscale with foot anchor preserved. Measures the
+        // baked world pose BEFORE adjusting transforms, so feet stay
+        // on the log top instead of sliding outward + upward.
+        const crimsonFoot = pivotCompensatedScale(root, KNIGHT_BASE_SCALE);
+        console.log('[lkb-3d] crimson scaled', KNIGHT_BASE_SCALE,
+          'foot anchor=', crimsonFoot.x.toFixed(3), crimsonFoot.y.toFixed(3), crimsonFoot.z.toFixed(3),
+          'root.position=', root.position.x.toFixed(3), root.position.y.toFixed(3), root.position.z.toFixed(3));
         setupMixerFor(gltf, 'crimson');
         // FP boot-restore replay: if the user's saved viewMode was 'fp',
         // the early setCrimsonSelfVisible/attachFpSword calls hit the TDZ
@@ -6938,6 +6999,14 @@
         applyShadows(root, true, false);
         scene.add(root);
         outlinePass.selectedObjects.push(root);
+        // 1.4× upscale with foot anchor preserved. Same rationale as
+        // the crimson loader above — measures the baked +X world
+        // position before adjusting so the right knight's feet stay
+        // on the log top after scaling.
+        const azureFoot = pivotCompensatedScale(root, KNIGHT_BASE_SCALE);
+        console.log('[lkb-3d] azure scaled', KNIGHT_BASE_SCALE,
+          'foot anchor=', azureFoot.x.toFixed(3), azureFoot.y.toFixed(3), azureFoot.z.toFixed(3),
+          'root.position=', root.position.x.toFixed(3), root.position.y.toFixed(3), root.position.z.toFixed(3));
         setupMixerFor(gltf, 'azure');
         markLoaded();
         // After the default boots, honour any saved roster pick by
@@ -7092,10 +7161,18 @@
     // The hand-tuned azure.glb instead has its placement baked into mesh
     // world-space, so for roster characters we apply the canonical pose
     // directly on gltf.scene before adding to the world.
+    //
+    // Scale: previously 0.6908. With the 1.4× KNIGHT_BASE_SCALE upscale
+    // applied to the boot crimson/azure (via pivotCompensatedScale),
+    // the roster swap path multiplies by the same factor so the swapped
+    // character keeps parity in apparent size with the crimson rig.
+    // Roster KayKit rigs have their root at the feet (no baked-mesh
+    // offset), so a plain scale.setScalar() on root keeps feet on the
+    // log top — no pivot compensation needed here.
     const OPPONENT_TRANSFORM = {
       position: new THREE.Vector3(2, 0.81, 0),
       rotationY: Math.PI,    // face crimson (-X side)
-      scale:     0.6908,
+      scale:     0.6908 * KNIGHT_BASE_SCALE,  // 0.96712
     };
     // Cool-steel tint so the swapped character still reads as "team blue"
     // at a glance — applied non-destructively (we clone the material so
