@@ -3341,6 +3341,50 @@
     window.rotateHdriForNextMatch = rotateHdriForNextMatch;
     window.HDRI_POOL             = HDRI_POOL;
 
+    /* ── r71: TimeCycle class — environment time-of-day color cycle ────────
+       Defined here (before `sun` and `hemi` are declared) so `new TimeCycle()`
+       below can reference it. 75-second sinusoidal oscillation between two
+       poles of the dusk palette. Only sun.color and hemi sky/ground color are
+       driven — intensity is owned by the weather system (disjoint channels).
+       PMREM / envMap and sky shader uniforms (GLSL constants) are untouched. */
+    class TimeCycle {
+      constructor(sunLight, hemiLight) {
+        this._sun  = sunLight;
+        this._hemi = hemiLight;
+        this._startMs = performance.now();
+        this._periodMs = 75000; // 75 s full cycle
+
+        // Warm pole — exact original values from the lighting init below
+        this._warm = {
+          sun:    new THREE.Color(0xffc88a), // amber
+          sky:    new THREE.Color(0x8aa0d8), // cool-blue (hemi sky)
+          ground: new THREE.Color(0x443a3a), // warm terracotta (hemi ground)
+        };
+        // Cool pole — subtle shift within dusk palette; no jarring hue flip
+        this._cool = {
+          sun:    new THREE.Color(0xd0aacc), // muted lilac-dusk
+          sky:    new THREE.Color(0x7090b8), // deeper slate-blue
+          ground: new THREE.Color(0x2a2a44), // shadowed purple-earth
+        };
+      }
+
+      update() {
+        const t = (performance.now() - this._startMs) / this._periodMs;
+        // cosine-shaped phase 0→1→0 over one period
+        const phase = (Math.sin(t * Math.PI * 2 - Math.PI * 0.5) + 1) * 0.5;
+        this._sun.color.lerpColors(this._warm.sun,    this._cool.sun,    phase);
+        this._hemi.color.lerpColors(this._warm.sky,   this._cool.sky,    phase);
+        this._hemi.groundColor.lerpColors(this._warm.ground, this._cool.ground, phase);
+      }
+
+      // Restore baseline colors (available for future hard-reset scenarios)
+      restore() {
+        this._sun.color.copy(this._warm.sun);
+        this._hemi.color.copy(this._warm.sky);
+        this._hemi.groundColor.copy(this._warm.ground);
+      }
+    }
+
     // Dusk gradient background via a sky-dome mesh (large inverted sphere)
     // Fragment shader maps vertical position to a warm dusk gradient:
     //   top    #2a2538  (deep cool-purple zenith)
@@ -3416,6 +3460,10 @@
     sun.shadow.camera.bottom = -10;
     sun.shadow.bias = -0.0003;          // tightened from -0.001
     scene.add(sun);
+
+    // r71: time-of-day color cycle — instantiated after both lights exist.
+    // timeCycle.update() is called each frame inside animate() just before render.
+    const timeCycle = new TimeCycle(sun, hemi);
 
     // ── Lensflare on the sun (procedural canvas textures, no external assets) ──
     try {
@@ -10791,6 +10839,8 @@
       if (chromaPass && chromaPass.uniforms && chromaPass.uniforms.uTime) {
         chromaPass.uniforms.uTime.value = performance.now() * 0.001;
       }
+      // r71: advance environment time-of-day color cycle (sun + hemi color lerp)
+      try { timeCycle.update(); } catch (e) { /* never break the render loop */ }
       composer.render();
     }
     animate();
