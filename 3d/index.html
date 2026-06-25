@@ -1188,6 +1188,50 @@
       from { border-color: rgba(255, 60, 60, 0.75); }
       to   { border-color: rgba(255, 140, 80, 1.00); }
     }
+
+    /* r51: enemy attack telegraph — amber incoming-warning vignette.
+       Distinct from fp-damage-vignette (red = you were hit).
+       Amber = "attack incoming, press E to guard". Opacity driven by JS.
+       z-index 23 = below fp-damage-vignette (24) so a simultaneous hit
+       doesn't stomp it. */
+    #fp-tg-warn {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 23;
+      opacity: 0;
+      background: radial-gradient(ellipse at center,
+        transparent 55%,
+        rgba(255, 160, 40, 0.38) 82%,
+        rgba(200, 100, 10, 0.62) 100%);
+      transition: opacity 120ms ease-in;
+    }
+    #fp-tg-warn.active { opacity: 1; }
+
+    /* r51: "⚠ GUARD" HUD alert — flashes above reticle during telegraph. */
+    #fp-tg-alert {
+      position: fixed;
+      left: 50%;
+      top: calc(50% - 120px);
+      transform: translate(-50%, -50%) scale(0.7);
+      pointer-events: none;
+      z-index: 26;
+      opacity: 0;
+      font-family: 'Segoe UI', 'Arial', sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      color: rgba(255, 200, 60, 1.00);
+      text-shadow:
+        0 0 12px rgba(255, 160, 20, 0.90),
+        0 0 4px  rgba(0, 0, 0, 0.95);
+      transition: opacity 100ms ease-in, transform 100ms ease-in;
+      will-change: opacity, transform;
+    }
+    #fp-tg-alert.active {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1.0);
+    }
   </style>
 
   <script type="importmap">
@@ -1380,6 +1424,13 @@
     <div class="lb-corner lb-bl"></div>
     <div class="lb-corner lb-br"></div>
   </div>
+
+  <!-- r51: FP attack telegraph — amber vignette (incoming warning).
+       triggerEnemyTelegraph() drives .active → removed over 350ms. -->
+  <div id="fp-tg-warn"></div>
+
+  <!-- r51: FP attack telegraph — ⚠ GUARD alert above reticle. -->
+  <div id="fp-tg-alert">⚠ GUARD</div>
 
   <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
        JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
@@ -4201,6 +4252,9 @@
       vignetteEl:       document.getElementById('fp-damage-vignette'),
       dmgArrowEl:       document.getElementById('fp-dmg-arrow'),
       lockBracketEl:    document.getElementById('fp-lock-bracket'),
+      tgWarnEl:         document.getElementById('fp-tg-warn'),   // r51 telegraph amber vignette
+      tgAlertEl:        document.getElementById('fp-tg-alert'),  // r51 telegraph ⚠ alert
+      tgFadeTimer:      0,                                        // r51 telegraph fade-out timer
       // Pre-allocated THREE.Vector3 so updateLockBracket() never allocates
       // per-frame (avoids GC pressure in the hot animate() path).
       _lbProj:          new THREE.Vector3(),
@@ -4310,6 +4364,59 @@
       FpPolish.dmgArrowTimer = setTimeout(() => {
         FpPolish.dmgArrowTimer = 0;
       }, 600);
+    }
+
+    // ── r51: triggerEnemyTelegraph ──────────────────────────────────
+    // Pre-attack warning system for FP mode. Called from combatTick
+    // immediately when azure is chosen as attacker. Flow:
+    //   1) Set attacker.state = 'windup' (blocks re-entrant combatTick).
+    //   2) Arm _swingId so stale impact callbacks self-cancel.
+    //   3) Show amber vignette + ⚠ GUARD alert + play sfxHorn (low cue).
+    //   4) After TELEGRAPH_MS, check still-alive + same swingId, then
+    //      launch the real attack (sfxSwing, sfxStep, animation, setTimeout
+    //      chain for impact + idle-restore).
+    //
+    // Defender's auto-guard is NOT set here — in FP mode the player must
+    // press E during the telegraph window. Non-FP path calls runAttack()
+    // directly (synchronously) and keeps auto-guard for AI vs AI.
+    const TELEGRAPH_MS = 350;
+
+    function triggerEnemyTelegraph(attackerLabel, defenderLabel, runAttackFn) {
+      const attacker = combatants[attackerLabel];
+      if (!attacker) { runAttackFn(); return; }
+
+      // Arm the swing-id immediately so the outer combatTick doesn't start
+      // a second attack before the 350ms fires. State = 'windup' blocks
+      // the re-entrant defer check added to combatTick.
+      const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
+      attacker.state = 'windup';
+
+      // ── Visual: amber incoming vignette ──────────────────────────
+      const warnEl  = FpPolish.tgWarnEl;
+      const alertEl = FpPolish.tgAlertEl;
+      if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+      if (warnEl)  { warnEl.style.transition  = 'none'; void warnEl.offsetWidth;
+                     warnEl.style.transition  = ''; warnEl.classList.add('active'); }
+      if (alertEl) { alertEl.style.transition = 'none'; void alertEl.offsetWidth;
+                     alertEl.style.transition = ''; alertEl.classList.add('active'); }
+
+      // ── Audio: low horn warning cue ───────────────────────────────
+      try { if (window.sfxHorn) window.sfxHorn(); } catch (e) {}
+
+      // ── Delayed attack launch ─────────────────────────────────────
+      setTimeout(() => {
+        // Clear telegraph overlays.
+        if (warnEl)  { warnEl.classList.remove('active'); }
+        if (alertEl) { alertEl.classList.remove('active'); }
+        FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
+
+        // Safety checks before committing to the swing.
+        if (attacker._swingId !== mySwing) return; // superseded
+        if (window._gamePaused) return;
+        if (window.gameState[attackerLabel].dead) return;
+
+        runAttackFn(mySwing);
+      }, TELEGRAPH_MS);
     }
 
     // triggerFovPunch — kick FOV from rest → peak over 0.08s, then back
@@ -6862,6 +6969,13 @@
         setTimeout(combatTick, 800);
         return;
       }
+      // r51: also defer if azure is already in windup (telegraph pending)
+      // or attack — prevents a re-entrant second telegraph from stacking.
+      if (combatants.azure &&
+          (combatants.azure.state === 'windup' || combatants.azure.state === 'attack')) {
+        setTimeout(combatTick, 800);
+        return;
+      }
       // MP phase-3: guest never runs the AI loop locally. All combat
       // resolution happens on the host; the guest just displays the
       // host's snapshots via applySnapshot().
@@ -6928,85 +7042,119 @@
       combatTickCount++;
       console.log(`[lkb-3d] combatTick #${combatTickCount}: ${attackerLabel} → ${defenderLabel}`);
 
-      // ── SFX wiring: swing whoosh on attack windup. The matching hit
-      //    fires inside window.triggerImpact at ~70% of the swing.
-      try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
-      // Footstep thud — adds weight to the windup plant.
-      try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
+      // r51: extract the actual swing launch into a local fn so both the
+      // immediate path (non-FP / non-azure) and the telegraph-delayed path
+      // share one code path. mySwing is passed in from triggerEnemyTelegraph
+      // when it fires, or generated here for the synchronous path.
+      const runCombatSwing = (inheritedSwingId) => {
+        const swingAttacker = combatants[attackerLabel];
+        const swingDefender = combatants[defenderLabel];
+        if (!swingAttacker || !swingDefender) return;
+        if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return;
 
-      // Wind up + attack — randomize attack clip each tick for variety.
-      // State labels track the rough phase so future logic (HUD, sound
-      // cues) can read combatant.state.
-      attacker.state = 'attack';
-      attacker.impactScheduled = false;
-      const chosenAttack = pickAttackClip();
-      const attackAction = playClip(attacker, chosenAttack, {
-        fadeIn: 0.2,
-        loop: false,
-        weight: 1.0,
-      });
+        // Claim a swing id — use inherited id from telegraph, or create new.
+        const mySwing = inheritedSwingId !== undefined
+          ? inheritedSwingId
+          : (swingAttacker._swingId = (swingAttacker._swingId || 0) + 1);
 
-      defender.state = 'guard';
-      playClip(defender, CLIP_NAMES.BLOCK, {
-        fadeIn: 0.2,
-        loop: false,
-        weight: 1.0,
-      });
+        // ── SFX wiring: swing whoosh on attack windup. The matching hit
+        //    fires inside window.triggerImpact at ~70% of the swing.
+        try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+        // Footstep thud — adds weight to the windup plant.
+        try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
 
-      // Duration → attack clip length (with safe fallback if missing).
-      const dur = (attackAction && attacker.currentDuration) || 1.0;
+        // Wind up + attack — randomize attack clip each tick for variety.
+        // State labels track the rough phase so future logic (HUD, sound
+        // cues) can read combatant.state.
+        swingAttacker.state = 'attack';
+        swingAttacker.impactScheduled = false;
+        const chosenAttack = pickAttackClip();
+        const attackAction = playClip(swingAttacker, chosenAttack, {
+          fadeIn: 0.2,
+          loop: false,
+          weight: 1.0,
+        });
 
-      // Impact at ~70% through the swing.
-      setTimeout(() => {
-        if (attacker.state !== 'attack') return; // got interrupted
-        attacker.impactScheduled = true;
-
-        // Crossfade defender to a hit-reaction clip (LoopOnce).
-        // Block_Hit when guarding; Hit_A or Hit_B at random otherwise.
-        if (defender && !window.gameState[defenderLabel].dead) {
-          const hitClip = pickHitClip(defender.state);
-          defender.state = 'hit';
-          playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+        // r51: In FP mode (azure attacking crimson), defender auto-guard is
+        // suppressed — the player must press E themselves during the telegraph
+        // window. In non-FP mode keep the original auto-guard for AI vs AI.
+        const fpModeNow = cameraDirector && cameraDirector.viewMode === 'fp';
+        const skipAutoGuard = fpModeNow && attackerLabel === 'azure';
+        if (!skipAutoGuard) {
+          swingDefender.state = 'guard';
+          playClip(swingDefender, CLIP_NAMES.BLOCK, {
+            fadeIn: 0.2,
+            loop: false,
+            weight: 1.0,
+          });
         }
 
-        // Hit position: defender chest height for VFX / camera shake.
-        const defenderRoot = defender && defender.root;
-        const hitPos = defenderRoot
-          ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
-          : { x: 0, y: 1.0, z: 0 };
+        // Duration → attack clip length (with safe fallback if missing).
+        const dur = (attackAction && swingAttacker.currentDuration) || 1.0;
 
-        try {
-          window.triggerImpact(hitPos);
-        } catch (err) {
-          console.warn('[lkb-3d] triggerImpact threw', err);
-        }
-        // HUD wiring: damage the defender, +5 SP to both sides per
-        // combat tick. applyDamage handles death + reset internally.
-        // r47: AI (azure) damage reduced 8→5 for better balance.
-        try {
-          window.applyDamage(defenderLabel, 5);
-          gainSP(attackerLabel, 5);
-          gainSP(defenderLabel, 5);
-        } catch (err) {
-          console.warn('[lkb-3d] HUD update threw', err);
-        }
-      }, dur * 0.70 * 1000);
+        // Impact at ~70% through the swing.
+        setTimeout(() => {
+          if (swingAttacker._swingId !== mySwing) return; // superseded / cancelled
+          if (swingAttacker.state !== 'attack') return;    // got interrupted
+          swingAttacker.impactScheduled = true;
 
-      // Return both knights to idle just after the swing resolves.
-      // Skip the idle restore for a knight that just died — Death_A
-      // is a one-shot clampWhenFinished clip we want to hold.
-      setTimeout(() => {
-        const aDead = window.gameState[attackerLabel].dead;
-        const dDead = window.gameState[defenderLabel].dead;
-        if (combatants[attackerLabel] && !aDead) {
-          playClip(combatants[attackerLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
-          combatants[attackerLabel].state = 'idle';
-        }
-        if (combatants[defenderLabel] && !dDead) {
-          playClip(combatants[defenderLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
-          combatants[defenderLabel].state = 'idle';
-        }
-      }, dur * 1.05 * 1000);
+          // Crossfade defender to a hit-reaction clip (LoopOnce).
+          // Block_Hit when guarding; Hit_A or Hit_B at random otherwise.
+          if (swingDefender && !window.gameState[defenderLabel].dead) {
+            const hitClip = pickHitClip(swingDefender.state);
+            swingDefender.state = 'hit';
+            playClip(swingDefender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+          }
+
+          // Hit position: defender chest height for VFX / camera shake.
+          const defenderRoot = swingDefender && swingDefender.root;
+          const hitPos = defenderRoot
+            ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
+            : { x: 0, y: 1.0, z: 0 };
+
+          try {
+            window.triggerImpact(hitPos);
+          } catch (err) {
+            console.warn('[lkb-3d] triggerImpact threw', err);
+          }
+          // HUD wiring: damage the defender, +5 SP to both sides per
+          // combat tick. applyDamage handles death + reset internally.
+          // r47: AI (azure) damage reduced 8→5 for better balance.
+          try {
+            window.applyDamage(defenderLabel, 5);
+            gainSP(attackerLabel, 5);
+            gainSP(defenderLabel, 5);
+          } catch (err) {
+            console.warn('[lkb-3d] HUD update threw', err);
+          }
+        }, dur * 0.70 * 1000);
+
+        // Return both knights to idle just after the swing resolves.
+        // Skip the idle restore for a knight that just died — Death_A
+        // is a one-shot clampWhenFinished clip we want to hold.
+        setTimeout(() => {
+          if (swingAttacker._swingId !== mySwing) return; // superseded
+          const aDead = window.gameState[attackerLabel].dead;
+          const dDead = window.gameState[defenderLabel].dead;
+          if (combatants[attackerLabel] && !aDead) {
+            playClip(combatants[attackerLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+            combatants[attackerLabel].state = 'idle';
+          }
+          if (combatants[defenderLabel] && !dDead) {
+            playClip(combatants[defenderLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+            combatants[defenderLabel].state = 'idle';
+          }
+        }, dur * 1.05 * 1000);
+      }; // end runCombatSwing
+
+      // r51: FP mode + azure is attacker → telegraph first (350ms warning),
+      // then fire the swing. Non-FP / non-azure → immediate (no delay).
+      const fpModeForTelegraph = isFpMode && attackerLabel === 'azure';
+      if (fpModeForTelegraph) {
+        triggerEnemyTelegraph(attackerLabel, defenderLabel, runCombatSwing);
+      } else {
+        runCombatSwing();
+      }
     }
 
     // Boot the combat loop once both knights are ready. We poll on a
