@@ -834,6 +834,45 @@
       color: rgba(200, 185, 138, 0.55);
     }
 
+    /* ── r84: streak preview banner ────────────────────────────── */
+    #streak-preview {
+      margin-top: 18px;
+      text-align: center;
+      letter-spacing: 0.14em;
+      font-size: 13px;
+      color: rgba(216, 164, 90, 0.85);
+      text-shadow: 0 0 8px rgba(216, 164, 90, 0.4);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.5s ease-out 0.6s, transform 0.5s ease-out 0.6s;
+    }
+    #streak-preview.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .streak-line {
+      font-size: 14px;
+      margin-bottom: 2px;
+    }
+    .streak-line #streak-x {
+      color: #ffd87a;
+      font-weight: 700;
+    }
+    .streak-cta {
+      font-size: 12px;
+      opacity: 0.7;
+    }
+    .streak-arrows {
+      display: inline-block;
+      margin-left: 6px;
+      color: #66ddff;
+      animation: streakArrowPulse 1.2s ease-in-out infinite;
+    }
+    @keyframes streakArrowPulse {
+      0%, 100% { opacity: 0.4; transform: translateX(0); }
+      50%       { opacity: 1;   transform: translateX(4px); }
+    }
+
     /* ── r70: rematch hotkey hint ─────────────────────────────── */
     /* Fixed to bottom-centre, shown only while match-won-overlay is
        visible. Pointer-events: none so it never swallows clicks.
@@ -2176,6 +2215,11 @@
         <div class="stat-sub"><span id="sc-parries">0</span> parries</div>
       </div>
     </div>
+    <!-- r84: streak preview — shown after 2+ session wins -->
+    <div id="streak-preview" style="display:none" aria-live="polite">
+      <div class="streak-line">STREAK <span id="streak-x">×0</span></div>
+      <div class="streak-cta">NEXT BATTLE <span class="streak-arrows">›››</span></div>
+    </div>
   </div>
   <!-- r70: rematch hotkey hint — shown when match-won-overlay is active -->
   <div id="match-hotkey-hint" aria-hidden="true">
@@ -3004,6 +3048,24 @@
       });
     };
 
+    // r84: refreshStreakPreview — shows streak banner inside match-won-overlay
+    // after 2+ consecutive session wins (player = crimson only).
+    // Called from refreshPostMatchStats() and reset on resetMatch/session reset.
+    window.refreshStreakPreview = function refreshStreakPreview() {
+      var sw = window._sessionWins || 0;
+      var el = document.getElementById('streak-preview');
+      if (!el) return;
+      if (sw >= 2) {
+        el.querySelector('#streak-x').textContent = '×' + sw;
+        el.style.display = '';
+        // Trigger reveal animation on next frame (after display:'' takes effect)
+        requestAnimationFrame(function () { el.classList.add('show'); });
+      } else {
+        el.classList.remove('show');
+        el.style.display = 'none';
+      }
+    };
+
     // Wire the "Reset Record" button in the settings panel.
     // The button is in the DOM right now (non-deferred script order),
     // so we can bind immediately.
@@ -3029,6 +3091,9 @@
       window._sessionLosses = 0;
       window.updateRecordHUD();
       window.refreshStreakHUD();
+      // r84: also hide streak preview on full session reset
+      var _sp = document.getElementById('streak-preview');
+      if (_sp) { _sp.classList.remove('show'); _sp.style.display = 'none'; }
     };
 
     // Initial HUD paint — runs once the DOM is ready.
@@ -8503,6 +8568,11 @@
       updateGaugeDOM();
       if (koOverlay) koOverlay.classList.remove('visible');
       if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
+      // r84: hide streak preview so it never bleeds into next round display
+      try {
+        var _sp = document.getElementById('streak-preview');
+        if (_sp) { _sp.classList.remove('show'); _sp.style.display = 'none'; }
+      } catch (e) {}
       // r54: clear combo chain on round/match reset
       try { if (window._comboReset) window._comboReset(); } catch (e) {}
       // r55: cancel any in-progress charge so ring + rumble don't leak between rounds
@@ -8799,6 +8869,8 @@
             // r66: refresh streak HUD + post-match stats panel
             if (window.refreshStreakHUD) window.refreshStreakHUD();
             if (window.refreshPostMatchStats) window.refreshPostMatchStats();
+            // r84: streak preview banner (player win only)
+            if (winnerId === 'crimson' && window.refreshStreakPreview) window.refreshStreakPreview();
           }
         } catch (e) { console.warn('[lkb-3d] record update failed', e); }
 
