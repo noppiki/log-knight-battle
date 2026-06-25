@@ -11747,9 +11747,21 @@
       // at t=200ms when azure first appears in the cinematic intro camera sweep.
       // flashWinnerGlow is reused (color/intensity/duration overrides) so lazy-init
       // of _winnerGlowBase captures the true idle baseline before any combat state.
+      // r130: entrance dust burst fires in same callback — ground-plane y=0 snap
+      // matches existing swing-dust callers (line ~12213); count=15/velScale=1.0
+      // matches tier-0 swing dust so the burst reads as a landing impact, not a
+      // tier-2 charge. No separate timer needed; single _matchIntroActive guard covers both.
       window._matchIntroTimers.push(setTimeout(() => {
         if (window._matchIntroActive) {
           try { flashWinnerGlow('azure', 600, 0x4060a0, 0.4); } catch (_e) {}
+          try {
+            const _azRootR130 = combatants && combatants.azure && combatants.azure.root;
+            if (_azRootR130 && typeof spawnGroundDust === 'function') {
+              const _azDustPosR130 = _azRootR130.position.clone();
+              _azDustPosR130.y = 0; // snap to ground plane (root y may be body-centre)
+              spawnGroundDust(_azDustPosR130, 15, 1.0);
+            }
+          } catch (_e) {}
         }
       }, 200));
 
