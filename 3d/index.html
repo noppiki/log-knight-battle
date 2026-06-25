@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Log Knight Battle — 3D vertical slice (iter 66)</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #1a1f2e;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+    }
+
+    #canvas-host {
+      position: fixed;
+      inset: 0;
+    }
+
+    canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    /* ── top-right back link ────────────────────────────────────── */
+    #back-link {
+      position: fixed;
+      top: 14px;
+      right: 18px;
+      z-index: 20;
+      color: #e8dcc0;
+      background: rgba(26, 31, 46, 0.72);
+      border: 1px solid rgba(216, 164, 90, 0.38);
+      border-radius: 4px;
+      padding: 5px 12px;
+      font-size: 12px;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-weight: bold;
+      letter-spacing: 0.04em;
+      text-decoration: none;
+      transition: background 0.15s, color 0.15s;
+    }
+    #back-link:hover {
+      background: rgba(216, 164, 90, 0.22);
+      color: #d8a45a;
+    }
+
+    /* ── bottom-left HUD strip ──────────────────────────────────── */
+    #hud {
+      position: fixed;
+      bottom: 14px;
+      left: 18px;
+      z-index: 20;
+      color: #e8dcc0;
+      background: rgba(26, 31, 46, 0.72);
+      border: 1px solid rgba(216, 164, 90, 0.28);
+      border-radius: 4px;
+      padding: 6px 13px;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 0.06em;
+      line-height: 1.5;
+      pointer-events: none;
+    }
+    #hud .label {
+      color: #d8a45a;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    /* ── loading overlay ────────────────────────────────────────── */
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #1a1f2e;
+      color: #e8dcc0;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 0.1em;
+      transition: opacity 0.5s;
+    }
+    #loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loading-dot {
+      display: inline-block;
+      animation: blink 1.2s infinite both;
+    }
+    .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink {
+      0%, 80%, 100% { opacity: 0.2; }
+      40% { opacity: 1; }
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://esm.sh/three@0.171.0",
+      "three/addons/": "https://esm.sh/three@0.171.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+  <div id="loading">
+    LOADING<span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span>
+  </div>
+
+  <div id="canvas-host"></div>
+
+  <a id="back-link" href="../index.html">&#x2190; back to 2D</a>
+
+  <div id="hud">
+    <div class="label">iter 66 vertical slice</div>
+    crimson astride · drag to rotate
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+    import { RGBELoader }      from 'three/addons/loaders/RGBELoader.js';
+
+    // Post-processing chain
+    import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { SMAAPass }        from 'three/addons/postprocessing/SMAAPass.js';
+    import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+    import { SSAOPass }        from 'three/addons/postprocessing/SSAOPass.js';
+
+    /* ── renderer ──────────────────────────────────────────────── */
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+    renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.35;  // HDRI envs tend to need slight lift
+    renderer.outputColorSpace  = THREE.SRGBColorSpace;
+
+    const host = document.getElementById('canvas-host');
+    host.appendChild(renderer.domElement);
+
+    /* ── IBL environment map (PMREM) ───────────────────────────── */
+    // Primary: real HDRI from assets/env_dusk.hdr.
+    // Fallback: RoomEnvironment if the HDR file is missing / fails to load.
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+
+    function makeRoomEnvFallback() {
+      const envScene = new RoomEnvironment();
+      return pmrem.fromScene(envScene, 0.04).texture;
+    }
+
+    // Set fallback immediately so reflections work before/without the HDR.
+    const fallbackEnvTex = makeRoomEnvFallback();
+
+    /* ── scene ─────────────────────────────────────────────────── */
+    const scene = new THREE.Scene();
+    scene.environment = fallbackEnvTex;  // will be replaced by HDR PMREM on success
+    scene.environmentIntensity = 1.0;    // Three r150+ scene-level prop
+
+    // Async HDRI load — non-blocking; falls back gracefully on 404 / parse fail.
+    new RGBELoader().load(
+      'assets/env_dusk.hdr',
+      (hdrTex) => {
+        hdrTex.mapping = THREE.EquirectangularReflectionMapping;
+        const pmremTex = pmrem.fromEquirectangular(hdrTex).texture;
+        scene.environment = pmremTex;
+        hdrTex.dispose();
+        console.log('[lkb-3d] HDRI env_dusk.hdr loaded');
+      },
+      undefined,
+      (err) => {
+        console.warn('[lkb-3d] env_dusk.hdr load failed, keeping RoomEnvironment fallback', err);
+        // fallbackEnvTex already assigned to scene.environment — nothing to do.
+      }
+    );
+
+    // Dusk gradient background via a sky-dome mesh (large inverted sphere)
+    // Fragment shader maps vertical position to a warm dusk gradient:
+    //   top    #2a2538  (deep cool-purple zenith)
+    //   middle #6a5d68  (dusky rose horizon)
+    //   lower  #d8a45a  (warm amber glow near horizon)
+    const skyGeo = new THREE.SphereGeometry(150, 32, 16);
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      uniforms: {},
+      vertexShader: /* glsl */`
+        varying vec3 vWorldPos;
+        void main() {
+          vWorldPos = position;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        varying vec3 vWorldPos;
+
+        vec3 colorZenith  = vec3(0.165, 0.145, 0.220); // #2a2538
+        vec3 colorHorizon = vec3(0.416, 0.365, 0.408); // #6a5d68
+        vec3 colorGlow    = vec3(0.847, 0.643, 0.353); // #d8a45a
+
+        void main() {
+          // normalised height  -1..+1 → we remap to 0..1
+          float t = clamp((vWorldPos.y / 150.0) * 0.5 + 0.5, 0.0, 1.0);
+
+          vec3 col;
+          // lower half: glow → horizon
+          // upper half: horizon → zenith
+          if (t < 0.45) {
+            float f = t / 0.45;
+            col = mix(colorGlow, colorHorizon, f);
+          } else {
+            float f = (t - 0.45) / 0.55;
+            col = mix(colorHorizon, colorZenith, f);
+          }
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `
+    });
+    const skyDome = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(skyDome);
+
+    // Fog for depth
+    scene.fog = new THREE.FogExp2(0x3a3548, 0.018);
+
+    /* ── lighting ──────────────────────────────────────────────── */
+    // Hemisphere: sky cool-blue, ground warm terracotta
+    const hemi = new THREE.HemisphereLight(0x8aa0d8, 0x443a3a, 1.0);
+    scene.add(hemi);
+
+    // Key sun: warm amber directional, casts shadows
+    const sun = new THREE.DirectionalLight(0xffc88a, 2.2);
+    sun.position.set(6, 5, -4);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.near = 0.5;
+    sun.shadow.camera.far  = 50;
+    sun.shadow.camera.left   = -12;
+    sun.shadow.camera.right  =  12;
+    sun.shadow.camera.top    =  12;
+    sun.shadow.camera.bottom = -12;
+    sun.shadow.bias = -0.001;
+    scene.add(sun);
+
+    // Warm rim fill from front-left
+    const rim = new THREE.PointLight(0xff9060, 0.6, 20);
+    rim.position.set(-1.5, 4, 5);
+    scene.add(rim);
+
+    /* ── ground ────────────────────────────────────────────────── */
+    const groundGeo = new THREE.PlaneGeometry(40, 40);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x2c3848,
+      roughness: 0.92,
+      metalness: 0.0,
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    /* ── camera ────────────────────────────────────────────────── */
+    // Iter 67: reframed for duel staging — symmetric centred composition,
+    // mild tele compression (fov 35) for cinematic feel.
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 200);
+    camera.position.set(0, 2.0, -7.5);
+    camera.lookAt(0, 1.0, 0);
+
+    /* ── orbit controls (inspection helper) ────────────────────── */
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.0, 0);
+    controls.enableDamping   = true;
+    controls.dampingFactor   = 0.07;
+    controls.minDistance     = 1.5;
+    controls.maxDistance     = 20;
+    controls.maxPolarAngle   = Math.PI * 0.78; // don't go below ground
+    controls.autoRotate      = true;
+    controls.autoRotateSpeed = 0.3;
+    controls.update();
+
+    /* ── post-processing chain (EffectComposer) ────────────────── */
+    // Render → SSAO → Bloom → SMAA → Output
+    const initialW = host.clientWidth  || window.innerWidth;
+    const initialH = host.clientHeight || window.innerHeight;
+    const pixelRatio = renderer.getPixelRatio();
+
+    const composer = new EffectComposer(renderer);
+    composer.setPixelRatio(pixelRatio);
+    composer.setSize(initialW, initialH);
+
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+
+    // SSAO — contact occlusion for grounded look. Specs don't matter, keep ON.
+    const ssaoPass = new SSAOPass(scene, camera, initialW, initialH);
+    ssaoPass.kernelRadius = 6;
+    ssaoPass.minDistance  = 0.005;
+    ssaoPass.maxDistance  = 0.1;
+    composer.addPass(ssaoPass);
+
+    // Bloom — soft glow on highlights.
+    // Iter 67: strength 0.55 → 0.45. The dusk HDRI provides its own glow;
+    // over-bloom blurs sprite/edge detail.
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(initialW, initialH),
+      0.45,  // strength
+      0.6,   // radius
+      0.82   // threshold
+    );
+    composer.addPass(bloomPass);
+
+    // SMAA — sub-pixel anti-aliasing (operates in device pixels).
+    const smaaPass = new SMAAPass(initialW * pixelRatio, initialH * pixelRatio);
+    composer.addPass(smaaPass);
+
+    // OutputPass — handles tone mapping + color space conversion at the end.
+    const outputPass = new OutputPass();
+    composer.addPass(outputPass);
+
+    /* ── GLB loader ─────────────────────────────────────────────── */
+    const loader = new GLTFLoader();
+    let loaded = 0;
+    const TOTAL = 3; // log + crimson + azure
+
+    function onAllLoaded() {
+      console.log('[lkb-3d] scene ready');
+      const overlay = document.getElementById('loading');
+      overlay.classList.add('fade-out');
+      setTimeout(() => overlay.remove(), 600);
+    }
+
+    function markLoaded() {
+      loaded++;
+      if (loaded >= TOTAL) onAllLoaded();
+    }
+
+    // helper: enable shadow casting/receiving on every mesh in a GLTF scene
+    function applyShadows(gltfScene, cast = true, receive = false) {
+      gltfScene.traverse(node => {
+        if (node.isMesh) {
+          node.castShadow    = cast;
+          node.receiveShadow = receive;
+        }
+      });
+    }
+
+    /* ── AnimationMixer registry ───────────────────────────────── */
+    // One mixer per animated GLB root. The render loop advances them all
+    // via the shared Clock delta.
+    const mixers = [];
+    const animClock = new THREE.Clock();
+
+    // Pick an "idle"-ish clip from a clips array. Substring-match on name
+    // (case-insensitive) for 'idle' / 'breathe' / 'stand', else fall back
+    // to clips[0]. Returns the AnimationClip or null.
+    function pickIdleClip(clips) {
+      if (!clips || clips.length === 0) return null;
+      const wanted = ['idle', 'breathe', 'stand'];
+      for (const key of wanted) {
+        const hit = clips.find(c => c.name && c.name.toLowerCase().includes(key));
+        if (hit) return hit;
+      }
+      return clips[0];
+    }
+
+    // Attach a mixer + start playing the chosen idle clip. Tolerant: if
+    // there are no clips on this GLB, returns silently.
+    function setupMixerFor(gltf, label) {
+      if (!gltf.animations || gltf.animations.length === 0) {
+        console.log(`[lkb-3d] ${label}: no animations baked into GLB`);
+        return;
+      }
+      const mixer = new THREE.AnimationMixer(gltf.scene);
+      const clip  = pickIdleClip(gltf.animations);
+      if (clip) {
+        const action = mixer.clipAction(clip);
+        action.play();
+        console.log(`[lkb-3d] ${label}: playing clip "${clip.name}"`);
+      }
+      mixers.push(mixer);
+    }
+
+    // ── log.glb ────────────────────────────────────────────────── */
+    loader.load(
+      'assets/log.glb',
+      (gltf) => {
+        const root = gltf.scene;
+        applyShadows(root, true, true);
+        scene.add(root);
+        // Log usually static, but if a future bake has anims, drive them.
+        setupMixerFor(gltf, 'log');
+        markLoaded();
+      },
+      undefined,
+      (err) => {
+        console.error('[lkb-3d] failed to load log.glb', err);
+        markLoaded(); // still proceed
+      }
+    );
+
+    // ── crimson.glb ─────────────────────────────────────────────── */
+    loader.load(
+      'assets/crimson.glb',
+      (gltf) => {
+        const root = gltf.scene;
+        // Do NOT re-anchor; meshes are already at their Blender world positions.
+        applyShadows(root, true, false);
+        scene.add(root);
+        setupMixerFor(gltf, 'crimson');
+        markLoaded();
+      },
+      undefined,
+      (err) => {
+        console.error('[lkb-3d] failed to load crimson.glb', err);
+        markLoaded();
+      }
+    );
+
+    // ── azure.glb ───────────────────────────────────────────────── */
+    loader.load(
+      'assets/azure.glb',
+      (gltf) => {
+        const root = gltf.scene;
+        applyShadows(root, true, false);
+        scene.add(root);
+        setupMixerFor(gltf, 'azure');
+        markLoaded();
+      },
+      undefined,
+      (err) => {
+        console.error('[lkb-3d] failed to load azure.glb', err);
+        markLoaded();
+      }
+    );
+
+    /* ── particle dust/snow (optional, fail-soft) ──────────────── */
+    // 800 tiny additive points drifting downward, wrapped on a vertical
+    // band so the air always feels populated. Wrapped in try/catch — if
+    // any of this errors, we silently skip rather than breaking the scene.
+    let dustParticles = null;
+    let dustVelocities = null;
+    try {
+      const DUST_COUNT = 800;
+      const dustGeo = new THREE.BufferGeometry();
+      const positions = new Float32Array(DUST_COUNT * 3);
+      dustVelocities = new Float32Array(DUST_COUNT);
+      const SPAN_X = 16, SPAN_Z = 16;
+      const Y_MIN = 0.1, Y_MAX = 8.0;
+      for (let i = 0; i < DUST_COUNT; i++) {
+        positions[i * 3 + 0] = (Math.random() - 0.5) * SPAN_X;
+        positions[i * 3 + 1] = Math.random() * (Y_MAX - Y_MIN) + Y_MIN;
+        positions[i * 3 + 2] = (Math.random() - 0.5) * SPAN_Z;
+        // Gentle per-particle fall speed (m/s).
+        dustVelocities[i] = 0.08 + Math.random() * 0.18;
+      }
+      dustGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+      const dustMat = new THREE.PointsMaterial({
+        color: 0xd8c8b8,
+        size: 0.05,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.75,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+
+      dustParticles = new THREE.Points(dustGeo, dustMat);
+      dustParticles.userData = { Y_MIN, Y_MAX };
+      scene.add(dustParticles);
+    } catch (err) {
+      console.warn('[lkb-3d] dust particles skipped', err);
+      dustParticles = null;
+    }
+
+    function updateDust(delta) {
+      if (!dustParticles) return;
+      const pos = dustParticles.geometry.attributes.position;
+      const arr = pos.array;
+      const { Y_MIN, Y_MAX } = dustParticles.userData;
+      const n = arr.length / 3;
+      for (let i = 0; i < n; i++) {
+        const yi = i * 3 + 1;
+        arr[yi] -= dustVelocities[i] * delta;
+        if (arr[yi] < Y_MIN) {
+          arr[yi] = Y_MAX; // wrap-around: re-spawn at the top
+        }
+      }
+      pos.needsUpdate = true;
+    }
+
+    /* ── resize handler ─────────────────────────────────────────── */
+    function onResize() {
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false); // false → CSS manages element size
+
+      // Composer + all size-aware passes must follow the canvas.
+      const pr = renderer.getPixelRatio();
+      composer.setPixelRatio(pr);
+      composer.setSize(w, h);
+      ssaoPass.setSize(w, h);
+      bloomPass.setSize(w, h);
+      smaaPass.setSize(w * pr, h * pr);
+    }
+    window.addEventListener('resize', onResize);
+    onResize();
+
+    /* ── render loop ────────────────────────────────────────────── */
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = animClock.getDelta();
+      // Advance every animation mixer (knights' idle, log if anim'd, etc.)
+      if (mixers.length > 0) {
+        mixers.forEach(m => m.update(delta));
+      }
+      updateDust(delta);
+      controls.update(); // needed for damping
+      composer.render();
+    }
+    animate();
+  </script>
+</body>
+</html>
