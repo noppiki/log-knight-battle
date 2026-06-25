@@ -6694,6 +6694,16 @@
 
       // ── 4) Counter damage to azure (3 HP) — r58: parry kind + RIPOSTE caption
       try { window.applyDamage(attackerLabel, 3, { kind: 'parry', caption: 'RIPOSTE' }); } catch (e) {}
+      // ── r114: riposte shake boost — additive atop r99 parry shake ────
+      // Damage lands here → bump amplitude to 0.15 / duration to 0.20s.
+      // Math.max preserves any larger in-flight shake; never overwrites.
+      try {
+        if (impactSystem && impactSystem.shake) {
+          impactSystem.shake.amplitude = Math.max(impactSystem.shake.amplitude || 0, 0.15);
+          impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining  || 0, 0.20);
+          impactSystem.shake.duration  = Math.max(impactSystem.shake.duration   || 0, 0.20);
+        }
+      } catch (e) {}
 
       // ── 5) Cyan-white parry flash ────────────────────────────────────
       const flashEl = FpPolish.parryFlashEl;
