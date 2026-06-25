@@ -5946,6 +5946,7 @@
       audioNode:    null,  // { osc, gain } while rumble is running
       fadingTimer:  0,     // timer for .fading class cleanup
       heartbeatId:  0,     // r113: setInterval id for low-HP heartbeat pulse
+      pantingId:    0,     // r128: setTimeout id for low-HP panting breath
     };
 
     const _dangerVigEl   = document.getElementById('fp-danger-vignette');
@@ -6009,6 +6010,8 @@
       tone({ freq: 1000, freq2: 500, dur: 0.15, type: 'triangle', vol: 0.1, attack: 0.02 });
       // (5) r113: heartbeat pulse — 60Hz triangle, 80ms, 1.5s interval.
       _startHeartbeat();
+      // (6) r128: panting breath sfx — first fire offset 750ms, escalates with depth.
+      _startPantingBreath();
     }
 
     // deactivateDanger — called once when HP recovers or on death/reset.
@@ -6030,6 +6033,8 @@
       _stopDangerRumble();
       // (4) r113: stop heartbeat pulse.
       _stopHeartbeat();
+      // (5) r128: stop panting breath sfx.
+      _stopPantingBreath();
     }
 
     // _startDangerRumble — 40Hz sine oscillator through globalGain.
@@ -6087,6 +6092,43 @@
       if (!window._dangerState.heartbeatId) return;
       clearInterval(window._dangerState.heartbeatId);
       window._dangerState.heartbeatId = 0;
+    }
+
+    // ── r128: low-HP panting breath sfx ─────────────────────────────────
+    // Short bandpass noise burst (150→80Hz) imitating a sharp exhale.
+    // Interval and volume escalate as HP drops deeper into the danger zone
+    // (ratio 0.25 → 0): 2200ms → 1200ms interval, vol 0.04 → 0.09.
+    // Deliberately offset from the 1500ms heartbeat (first fire at 750ms)
+    // so the two layers interleave rather than stack.
+    // Crimson-only: start/stop piggybacked on activateDanger/deactivateDanger
+    // so it inherits the same reset/death lifecycle without a second edge.
+    function _playPantingBreath() {
+      if (!actx) return;
+      try {
+        if (actx.state === 'suspended') actx.resume();
+        const hp    = (window.gameState && window.gameState.crimson) ? window.gameState.crimson.hp : HP_MAX;
+        const ratio = Math.max(0, Math.min(DANGER_HP_THRESHOLD, hp / HP_MAX));
+        // depth: 0 at threshold (25%), 1 at 0 HP
+        const depth = (DANGER_HP_THRESHOLD - ratio) / DANGER_HP_THRESHOLD;
+        const vol   = 0.04 + depth * 0.05; // 0.04 → 0.09
+        // Exhale: short downward-swept bandpass noise
+        noise({ dur: 0.06, vol: vol, type: 'bandpass', freqStart: 150, freqEnd: 80, q: 2.5, attack: 0.005 });
+        // Schedule next tick — interval shrinks from 2200ms → 1200ms with depth
+        const nextMs = Math.round(2200 - depth * 1000);
+        window._dangerState.pantingId = setTimeout(_playPantingBreath, nextMs);
+      } catch (e) {}
+    }
+
+    function _startPantingBreath() {
+      if (window._dangerState.pantingId) return; // already running
+      // First fire offset by 750ms to interleave with 1500ms heartbeat ticks
+      window._dangerState.pantingId = setTimeout(_playPantingBreath, 750);
+    }
+
+    function _stopPantingBreath() {
+      if (!window._dangerState.pantingId) return;
+      clearTimeout(window._dangerState.pantingId);
+      window._dangerState.pantingId = 0;
     }
 
     // ── r82: BGM combat tension sub layer ──────────────────────────────
