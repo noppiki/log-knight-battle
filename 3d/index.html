@@ -1801,6 +1801,22 @@
       animation: spStamPulse 0.4s ease-out forwards;
     }
 
+    /* ── r110: HP bar tick marks — 10% increment vertical dividers (pure CSS, ::after overlay) */
+    #game-hud .hp-bar::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        90deg,
+        transparent 0,
+        transparent calc(10% - 1px),
+        rgba(255, 255, 255, 0.22) calc(10% - 1px),
+        rgba(255, 255, 255, 0.22) 10%
+      );
+      z-index: 2;
+    }
+
     /* EXHAUSTED pill — transient center-top tooltip that flashes when
        an action (attack / guard-enter) is blocked due to insufficient
        stamina. JS spawns one .exhaust-pill, then strips it after 1s. */
