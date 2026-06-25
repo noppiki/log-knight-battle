@@ -76,6 +76,121 @@
       text-transform: uppercase;
     }
 
+    /* ── game HUD (HP/SP gauges, engraved player labels, VS badge) ─
+       Sits on top of the canvas, z-index above the vignette but below
+       the loading overlay. Pointer-events: none on the wrapper so the
+       canvas stays draggable behind it. Palette mirrors the 2D PAL.*:
+         ink #1a1f2e  skyAmber #d8a45a  bone #e8dcc0
+         steelDk #2f3a52  redBody #a23030  bluBody #3050a8           */
+    #game-hud {
+      position: fixed;
+      top: 24px;
+      left: 0;
+      right: 0;
+      z-index: 20;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      padding: 0 32px;
+      pointer-events: none;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+    }
+    #game-hud .player-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    #game-hud .player-card.right {
+      align-items: flex-end;
+    }
+    #game-hud .player-name {
+      /* Iter-65 engraved-metal: 5-layer text-shadow stack — top bevel
+         highlight, base body fill, two darker carved layers, and a
+         deep cast shadow for lift. */
+      color: #e8dcc0;
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      text-shadow:
+        0 -1px 0 rgba(255, 235, 200, 0.55),
+        0 1px 0 rgba(20, 16, 24, 0.95),
+        0 2px 0 rgba(20, 16, 24, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 4px 8px rgba(0, 0, 0, 0.7);
+    }
+    #game-hud .player-name .tag {
+      color: #d8a45a;
+      margin-right: 8px;
+      font-weight: 900;
+    }
+    #game-hud .hp-bar,
+    #game-hud .sp-bar {
+      width: 280px;
+      background: #2a3146;
+      border: 3px solid #1a1f2e;
+      border-radius: 2px;
+      box-shadow:
+        inset 0 1px 2px rgba(0, 0, 0, 0.7),
+        0 2px 6px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+      position: relative;
+    }
+    #game-hud .hp-bar { height: 16px; }
+    #game-hud .sp-bar { height: 8px; }
+    #game-hud .hp-fill,
+    #game-hud .sp-fill {
+      height: 100%;
+      width: 100%;
+      transition: width 0.18s ease-out;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    }
+    #game-hud .player-card.left  .hp-fill {
+      background: linear-gradient(to right, #a23030, #ff6868);
+    }
+    #game-hud .player-card.right .hp-fill {
+      background: linear-gradient(to left, #3050a8, #6880ff);
+      margin-left: auto; /* shrink from the left edge */
+    }
+    #game-hud .sp-fill {
+      background: linear-gradient(to right, #d8a45a, #ffd089);
+    }
+    #game-hud .player-card.right .sp-fill {
+      background: linear-gradient(to left, #d8a45a, #ffd089);
+      margin-left: auto;
+    }
+    #game-hud .vs-badge {
+      color: #d8a45a;
+      font-size: 32px;
+      font-weight: 900;
+      letter-spacing: 0.18em;
+      align-self: center;
+      margin-top: 4px;
+      text-shadow:
+        0 -1px 0 rgba(255, 235, 200, 0.45),
+        0 2px 0 rgba(20, 16, 24, 0.9),
+        0 4px 12px rgba(0, 0, 0, 0.85);
+    }
+    #ko-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 25;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      color: #ff3030;
+      font-size: 64px;
+      font-weight: 900;
+      letter-spacing: 0.22em;
+      text-shadow:
+        0 0 18px rgba(255, 48, 48, 0.6),
+        0 4px 0 #1a1f2e,
+        0 8px 24px rgba(0, 0, 0, 0.9);
+    }
+    #ko-overlay.visible { display: flex; }
+
     /* ── full-screen radial vignette ───────────────────────────── */
     #vignette {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -166,6 +281,24 @@
     <div class="label">iter 66 vertical slice</div>
     crimson astride · drag to rotate
   </div>
+
+  <!-- Game HUD: HP/SP gauges + engraved player labels + VS badge.
+       JS keeps window.gameState in sync; CSS bars read width from
+       inline style updates in updateGaugeDOM(). -->
+  <div id="game-hud">
+    <div class="player-card left">
+      <div class="player-name"><span class="tag">P1</span>CRIMSON</div>
+      <div class="hp-bar"><div class="hp-fill" id="hp-fill-crimson"></div></div>
+      <div class="sp-bar"><div class="sp-fill" id="sp-fill-crimson"></div></div>
+    </div>
+    <div class="vs-badge">VS</div>
+    <div class="player-card right">
+      <div class="player-name"><span class="tag">P2</span>AZURE</div>
+      <div class="hp-bar"><div class="hp-fill" id="hp-fill-azure"></div></div>
+      <div class="sp-bar"><div class="sp-fill" id="sp-fill-azure"></div></div>
+    </div>
+  </div>
+  <div id="ko-overlay">K.O.</div>
 
   <script type="module">
     import * as THREE from 'three';
@@ -572,6 +705,7 @@
       const combatant = {
         label,
         mixer,
+        root: gltf.scene,
         clips: gltf.animations,
         current: null,
         currentClipName: null,
@@ -629,6 +763,8 @@
         this.bursts      = []; // active particle bursts
         this.shake       = null; // { remaining, duration, basePos }
         this.flash       = null; // { remaining, duration, baseStrength }
+        this.cameraPunch = null; // { phase, elapsed, target, zoomDir }
+        this.punchOffset = new THREE.Vector3(); // additive offset applied after controls.update()
         this._baseBloomStrength = bloomPass ? bloomPass.strength : 0;
       }
 
@@ -698,6 +834,23 @@
           };
           this.bloomPass.strength = this.flash.peakStrength;
         }
+
+        // Camera punch — zoom 15% closer to target over 0.12s, hold 0.05s,
+        // lerp back over 0.20s. Total ~0.37s. Applied as additive punchOffset
+        // after controls.update() so OrbitControls damping is not disrupted.
+        // zoomDir is the unit vector from camera toward hitPos — the offset
+        // is computed fresh each frame from the *current* camera.position so
+        // the direction stays meaningful even if the user drags mid-punch.
+        this.cameraPunch = {
+          phase:   'in',    // 'in' | 'hold' | 'out'
+          elapsed: 0,
+          target:  hitPos.clone ? hitPos.clone() : new THREE.Vector3(hitPos.x, hitPos.y, hitPos.z),
+          inDur:   0.12,
+          holdDur: 0.05,
+          outDur:  0.20,
+          factor:  0.15,    // 15% closer
+        };
+        this.punchOffset.set(0, 0, 0);
       }
 
       update(delta) {
@@ -763,10 +916,149 @@
               (this.flash.peakStrength - this.flash.baseStrength) * t;
           }
         }
+
+        // ── camera punch (zoom-in burst, additive offset) ─────────
+        // punchOffset is reset to zero here so stale values don't leak if
+        // the punch finishes or was never active.
+        this.punchOffset.set(0, 0, 0);
+        if (this.cameraPunch) {
+          const cp = this.cameraPunch;
+          cp.elapsed += delta;
+
+          // Direction from current camera toward target — recomputed each
+          // frame so it stays correct after OrbitControls damping moves cam.
+          const dir = new THREE.Vector3()
+            .subVectors(cp.target, this.camera.position)
+            .normalize();
+
+          // Maximum offset magnitude = 15% of current distance to target.
+          const dist = this.camera.position.distanceTo(cp.target);
+          const maxOffset = dist * cp.factor;
+
+          let alpha = 0; // normalised [0..1] zoom amount this frame
+
+          if (cp.phase === 'in') {
+            const t = Math.min(cp.elapsed / cp.inDur, 1.0);
+            alpha = t; // lerp in
+            if (cp.elapsed >= cp.inDur) {
+              cp.phase   = 'hold';
+              cp.elapsed = 0;
+            }
+          } else if (cp.phase === 'hold') {
+            alpha = 1.0; // full zoom during hold
+            if (cp.elapsed >= cp.holdDur) {
+              cp.phase   = 'out';
+              cp.elapsed = 0;
+            }
+          } else if (cp.phase === 'out') {
+            const t = Math.min(cp.elapsed / cp.outDur, 1.0);
+            alpha = 1.0 - t; // lerp back out
+            if (cp.elapsed >= cp.outDur) {
+              this.cameraPunch = null;
+              alpha = 0;
+            }
+          }
+
+          // NEUTRALIZED (round-13 regression fix): keep the state machine
+          // ticking so existing triggers still drain cleanly, but never write
+          // a non-zero offset. The caller in animate() also no longer applies
+          // punchOffset. Reference computation kept for future re-enable:
+          //   this.punchOffset.copy(dir).multiplyScalar(maxOffset * alpha);
+          void dir; void maxOffset; void alpha;
+          this.punchOffset.set(0, 0, 0);
+        }
+
+        // The caller (animate) no longer applies punchOffset; the additive
+        // camera mutation is disabled to prevent the round-13 drift bug.
       }
     }
 
     const impactSystem = new ImpactSystem(scene, camera, bloomPass);
+
+    /* ── game state, HUD bars, death & reset ───────────────────────
+       window.gameState holds per-knight HP/SP. updateGaugeDOM() pushes
+       the values into the bar widths in the top HUD. window.applyDamage
+       decrements HP (capped at 0) and triggers Death_A + a 5s reset
+       cycle when a knight falls. The combat tick (below) calls into
+       applyDamage and bumps SP on every contact frame. */
+    window.gameState = {
+      crimson: { hp: 100, sp: 0, dead: false },
+      azure:   { hp: 100, sp: 0, dead: false },
+    };
+    const HP_MAX = 100;
+    const SP_MAX = 100;
+    const koOverlay = document.getElementById('ko-overlay');
+    const hpFill = {
+      crimson: document.getElementById('hp-fill-crimson'),
+      azure:   document.getElementById('hp-fill-azure'),
+    };
+    const spFill = {
+      crimson: document.getElementById('sp-fill-crimson'),
+      azure:   document.getElementById('sp-fill-azure'),
+    };
+
+    function updateGaugeDOM() {
+      for (const id of ['crimson', 'azure']) {
+        const s = window.gameState[id];
+        if (hpFill[id]) hpFill[id].style.width = (s.hp / HP_MAX * 100) + '%';
+        if (spFill[id]) spFill[id].style.width = (s.sp / SP_MAX * 100) + '%';
+      }
+    }
+    updateGaugeDOM();
+
+    // Reset cycle — called 5s after a KO. Restores both knights to
+    // full HP/SP, hides the overlay, and forces both back to idle so
+    // the next combat tick has clean state to drive.
+    let resetTimerHandle = null;
+    function resetMatch() {
+      window.gameState.crimson = { hp: HP_MAX, sp: 0, dead: false };
+      window.gameState.azure   = { hp: HP_MAX, sp: 0, dead: false };
+      updateGaugeDOM();
+      if (koOverlay) koOverlay.classList.remove('visible');
+      for (const id of ['crimson', 'azure']) {
+        const c = combatants[id];
+        if (c) {
+          playClip(c, CLIP_NAMES.IDLE, { fadeIn: 0.3, loop: true });
+          c.state = 'idle';
+        }
+      }
+      console.log('[lkb-3d] match reset');
+    }
+
+    // triggerDeath — fires Death_A on the dead knight, shows K.O.,
+    // and schedules the 5s reset. Idempotent per defender thanks to
+    // the gameState.dead flag.
+    function triggerDeath(defenderId) {
+      const c = combatants[defenderId];
+      if (!c) return;
+      window.gameState[defenderId].dead = true;
+      c.state = 'dead';
+      playClip(c, 'Death_A', { fadeIn: 0.15, loop: false });
+      if (koOverlay) koOverlay.classList.add('visible');
+      console.log(`[lkb-3d] ${defenderId} K.O.`);
+      if (resetTimerHandle) clearTimeout(resetTimerHandle);
+      resetTimerHandle = setTimeout(resetMatch, 5000);
+    }
+
+    // applyDamage — single source of truth for HP changes. Skips if
+    // the defender is already down so a late-arriving impact doesn't
+    // re-fire Death_A on the same knight.
+    window.applyDamage = function applyDamage(defenderId, amount) {
+      const s = window.gameState[defenderId];
+      if (!s || s.dead) return;
+      s.hp = Math.max(0, s.hp - amount);
+      updateGaugeDOM();
+      if (s.hp <= 0) triggerDeath(defenderId);
+    };
+
+    // gainSP — small helper for the SP +5 on every combat tick. Capped
+    // at SP_MAX; no side effects beyond the DOM update.
+    function gainSP(id, amount) {
+      const s = window.gameState[id];
+      if (!s) return;
+      s.sp = Math.min(SP_MAX, s.sp + amount);
+      updateGaugeDOM();
+    }
 
     // Real triggerImpact — replaces the earlier stub. Accepts either a
     // THREE.Vector3 (preferred — world-space hit position) or the legacy
@@ -799,6 +1091,8 @@
       const attacker = combatants[attackerLabel];
       const defender = combatants[defenderLabel];
       if (!attacker || !defender) return; // not both loaded yet
+      // Skip while a knight is dead — resetMatch() will clear the flag.
+      if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return;
 
       combatTickCount++;
       console.log(`[lkb-3d] combatTick #${combatTickCount}: ${attackerLabel} → ${defenderLabel}`);
@@ -828,24 +1122,46 @@
       setTimeout(() => {
         if (attacker.state !== 'attack') return; // got interrupted
         attacker.impactScheduled = true;
+
+        // Crossfade defender from BLOCK → Hit_A reaction (LoopOnce).
+        if (defender && !window.gameState[defenderLabel].dead) {
+          defender.state = 'hit';
+          playClip(defender, CLIP_NAMES.HIT, { fadeIn: 0.1, loop: false, weight: 1.0 });
+        }
+
+        // Hit position: defender chest height for VFX / camera shake.
+        const defenderRoot = defender && defender.root;
+        const hitPos = defenderRoot
+          ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
+          : { x: 0, y: 1.0, z: 0 };
+
         try {
-          window.triggerImpact({
-            attacker: attackerLabel,
-            defender: defenderLabel,
-            tick: combatTickCount,
-          });
+          window.triggerImpact(hitPos);
         } catch (err) {
           console.warn('[lkb-3d] triggerImpact threw', err);
+        }
+        // HUD wiring: damage the defender, +5 SP to both sides per
+        // combat tick. applyDamage handles death + reset internally.
+        try {
+          window.applyDamage(defenderLabel, 8);
+          gainSP(attackerLabel, 5);
+          gainSP(defenderLabel, 5);
+        } catch (err) {
+          console.warn('[lkb-3d] HUD update threw', err);
         }
       }, dur * 0.70 * 1000);
 
       // Return both knights to idle just after the swing resolves.
+      // Skip the idle restore for a knight that just died — Death_A
+      // is a one-shot clampWhenFinished clip we want to hold.
       setTimeout(() => {
-        if (combatants[attackerLabel]) {
+        const aDead = window.gameState[attackerLabel].dead;
+        const dDead = window.gameState[defenderLabel].dead;
+        if (combatants[attackerLabel] && !aDead) {
           playClip(combatants[attackerLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
           combatants[attackerLabel].state = 'idle';
         }
-        if (combatants[defenderLabel]) {
+        if (combatants[defenderLabel] && !dDead) {
           playClip(combatants[defenderLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
           combatants[defenderLabel].state = 'idle';
         }
@@ -1007,6 +1323,13 @@
     /* ── render loop ────────────────────────────────────────────── */
     function animate() {
       requestAnimationFrame(animate);
+      // SAFETY GUARD: reset camera if it has drifted out of the playable bowl.
+      // Round-13 camera-punch additive offset could push camera below ground or
+      // far outside the scene; this snaps it back to the default framing.
+      if (camera.position.y < 0.5 || camera.position.length() > 50) {
+        camera.position.set(0, 2.0, -7.0);
+        controls.update();
+      }
       const delta = animClock.getDelta();
       // Advance every animation mixer (knights' idle, log if anim'd, etc.)
       if (mixers.length > 0) {
@@ -1016,6 +1339,10 @@
       controls.update(); // needed for damping (recomputes camera.position)
       // Run impact FX AFTER controls so camera-shake jitter wins this frame.
       impactSystem.update(delta);
+      // NOTE: camera punch additive offset DISABLED (round-13 regression).
+      // impactSystem.update() now forces punchOffset to (0,0,0); we also do
+      // not add it here. Camera shake jitter (handled inside update()) is
+      // unaffected — only the zoom-punch additive mutation is neutralized.
       composer.render();
     }
     animate();
