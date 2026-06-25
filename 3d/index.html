@@ -10904,6 +10904,15 @@
           const _approachDelta = _azDist - _approachTargetDist;
           const _dest = _azRoot.position.clone().addScaledVector(_dir, _approachDelta);
 
+          // r109: approach footstep sfx — two quick thumps for the lunge step.
+          // Routes through tone() → sfxGain → globalGain (mute-compliant).
+          tone({ freq: 80, freq2: 50, dur: 0.065, type: 'sawtooth', vol: 0.06, attack: 0.005 });
+          setTimeout(() => {
+            try {
+              tone({ freq: 76, freq2: 48, dur: 0.065, type: 'sawtooth', vol: 0.06, attack: 0.005 });
+            } catch (e) {}
+          }, 125);
+
           // State guard: mark 'moving' so combatTick defers re-entry.
           attacker.state = 'moving';
 
