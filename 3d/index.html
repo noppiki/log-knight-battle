@@ -636,6 +636,62 @@
         0 4px 14px rgba(0, 0, 0, 0.85);
     }
 
+    /* ── combo counter HUD (r54) ──────────────────────────────── */
+    /* Displays "×N HIT" when the player lands 2+ consecutive unguarded
+       hits on azure within 1.5s. Crimson-accent palette; sits at bottom-
+       center, z-index 29 — above damage floaters (28) and below KO (25).
+       We intentionally invert z-order perception: kombo is ephemeral
+       pop; match text is persistent. Both read cleanly. */
+    #combo-hud {
+      position: fixed;
+      bottom: 18%;
+      left: 50%;
+      transform: translateX(-50%) scale(0.8);
+      z-index: 29;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      opacity: 0;
+      transition: opacity 0.15s ease-out, transform 0.15s ease-out;
+    }
+    #combo-hud.visible {
+      opacity: 1;
+      transform: translateX(-50%) scale(1.0);
+    }
+    #combo-hud .combo-count {
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 68px;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      color: #e85c3a;
+      text-shadow:
+        0 0 24px rgba(232, 92, 58, 0.75),
+        0 0 8px  rgba(255, 120, 60, 0.55),
+        0 3px 0  #1a0c06,
+        0 6px 20px rgba(0, 0, 0, 0.90);
+      line-height: 1;
+    }
+    #combo-hud .combo-label {
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.30em;
+      color: #d8a45a;
+      text-shadow: 0 2px 6px rgba(0,0,0,0.9);
+      text-transform: uppercase;
+    }
+    /* Pulse animation on each new hit — added/removed by JS */
+    #combo-hud.pulse .combo-count {
+      animation: comboPulse 0.22s ease-out;
+    }
+    @keyframes comboPulse {
+      0%   { transform: scale(1.30); color: #ff8050; }
+      60%  { transform: scale(0.95); color: #e85c3a; }
+      100% { transform: scale(1.00); color: #e85c3a; }
+    }
+
     /* ── cinematic letterbox bars (KO_REPLAY slow-mo) ─────────── */
     /* z-index 95 — above all HUD layers (max 80) but below settings panel
        (95 backdrop / 100 panel) and below KO / MATCH WON text (25-26).
@@ -1469,6 +1525,12 @@
       </div>
     </div>
   </div>
+  <!-- Combo counter HUD (r54) — shown when player lands 2+ consecutive hits -->
+  <div id="combo-hud">
+    <div class="combo-count" id="combo-count-text">×2</div>
+    <div class="combo-label">HIT COMBO</div>
+  </div>
+
   <!-- Cinematic letterbox bars — slide in during KO_REPLAY slow-mo -->
   <div id="letterbox-top"></div>
   <div id="letterbox-bottom"></div>
@@ -6378,6 +6440,8 @@
       updateGaugeDOM();
       if (koOverlay) koOverlay.classList.remove('visible');
       if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
+      // r54: clear combo chain on round/match reset
+      try { if (window._comboReset) window._comboReset(); } catch (e) {}
       // Ensure letterbox bars are retracted before the next round starts
       // (defensive — restore fn above normally handles this, but guard the
       // edge case where bars were left active without a pending restore).
@@ -6609,6 +6673,37 @@
       window._pendingCheerHandle = cheerHandle;
     }
 
+    // ── Combo counter (r54) ─────────────────────────────────────────
+    // Tracks consecutive unguarded player-dealt hits to azure within
+    // COMBO_RESET_MS. Combo = 2+ hits. Displayed as "×N HIT COMBO" in
+    // the bottom-center HUD (#combo-hud). Resets on: timeout, guard-
+    // absorbed hit, round/match reset, or player death.
+    const COMBO_RESET_MS = 1500;
+    let _comboCount      = 0;
+    let _comboResetTimer = null;
+    const _comboEl       = document.getElementById('combo-hud');
+    const _comboCountEl  = document.getElementById('combo-count-text');
+
+    function _comboReset() {
+      _comboCount = 0;
+      if (_comboResetTimer) { clearTimeout(_comboResetTimer); _comboResetTimer = null; }
+      if (_comboEl) _comboEl.classList.remove('visible', 'pulse');
+    }
+    function _comboHit() {
+      _comboCount += 1;
+      if (_comboResetTimer) clearTimeout(_comboResetTimer);
+      _comboResetTimer = setTimeout(_comboReset, COMBO_RESET_MS);
+      if (_comboCount < 2) return; // single hit — no display yet
+      if (_comboCountEl) _comboCountEl.textContent = '×' + _comboCount;
+      if (_comboEl) {
+        _comboEl.classList.remove('pulse');
+        void _comboEl.offsetWidth; // force reflow to re-trigger animation
+        _comboEl.classList.add('visible', 'pulse');
+      }
+    }
+    // Expose reset so resetMatch / resetFullMatch can clear the combo.
+    window._comboReset = _comboReset;
+
     // applyDamage — single source of truth for HP changes. Skips if
     // the defender is already down so a late-arriving impact doesn't
     // re-fire Death_A on the same knight.
@@ -6664,6 +6759,16 @@
       // Spawn a floating "-N" above the defender's head. Best-effort —
       // bails internally if the combatant root isn't ready yet.
       showDamageFloater(defenderId, amount);
+      // r54: combo counter — increment when player (crimson) lands an
+      // unguarded hit on azure. Guarded hits reset the chain because
+      // guard-absorbed damage breaks the "clean" streak feel.
+      if (defenderId === 'azure') {
+        if (!guardAbsorbed) {
+          try { _comboHit(); } catch (e) {}
+        } else {
+          try { _comboReset(); } catch (e) {}
+        }
+      }
       if (s.hp <= 0) triggerDeath(defenderId);
     };
 
