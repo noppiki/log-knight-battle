@@ -9054,6 +9054,26 @@
           });
         });
         console.log('[lkb-3d] r123 azure helm cyan rim:', _helmRimBound ? 'bound' : 'helm mesh not found — no-op');
+
+        // r165: azure sword constant cyan rim — mirrors helm rim (r123) to
+        // complete the "blue boss" 3-piece set (helm / shield / sword).
+        // Same cyan 0x4060a0, intensity 0.05 (slightly softer than helm 0.08).
+        // Load-time bind only; no per-frame cost. Other emissive systems
+        // (r100 hit-glow, r120 winner, r73 desperate) will temporarily
+        // override, which is intentional — cyan is the resting baseline.
+        let _swordRimBound = false;
+        gltf.scene.traverse((o) => {
+          if (!o.isMesh || !o.material) return;
+          if (!/Azure_1H_Sword/i.test(o.name)) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (!m.emissive) return;
+            m.emissive.setHex(0x4060a0);
+            m.emissiveIntensity = 0.05;
+            _swordRimBound = true;
+          });
+        });
+        console.log('[lkb-3d] r165 azure sword cyan rim:', _swordRimBound ? 'bound' : 'sword mesh not found — no-op');
       }
 
       console.log(`[lkb-3d] ${label}: combatant ready (${gltf.animations.length} clips)`);
