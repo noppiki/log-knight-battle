@@ -1144,6 +1144,50 @@
       transform: translateY(6px);
     }
     #mp-toast.is-visible { opacity: 1; transform: translateY(0); }
+
+    /* ── FP Lock-on bracket — projects azure's screen AABB onto four
+       corner L-shapes that scale with distance. Amber at rest; red while
+       azure is attacking (danger-state telegraph); hidden when FP is off,
+       pointer is unlocked, azure is dead, or azure is off-screen / behind
+       the camera. Container is positioned by JS (left/top/width/height);
+       CSS only handles appearance and the four pinned corners.
+       z-index 25 = peer of reticle / dmg-arrow so it draws above bloom. */
+    #fp-lock-bracket {
+      position: fixed;
+      pointer-events: none;
+      z-index: 25;
+      opacity: 0;
+      transition: opacity 150ms ease-out, border-color 120ms ease-out;
+      /* width/height/left/top driven by JS */
+    }
+    #fp-lock-bracket.visible { opacity: 1; }
+    #fp-lock-bracket .lb-corner {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      border-color: rgba(216, 164, 90, 0.85);
+      border-style: solid;
+      border-width: 0;
+      transition: border-color 120ms ease-out;
+    }
+    /* Four corners — each exposes two of the four borders */
+    #fp-lock-bracket .lb-tl { top: 0; left: 0;
+      border-top-width: 2px; border-left-width: 2px; }
+    #fp-lock-bracket .lb-tr { top: 0; right: 0;
+      border-top-width: 2px; border-right-width: 2px; }
+    #fp-lock-bracket .lb-bl { bottom: 0; left: 0;
+      border-bottom-width: 2px; border-left-width: 2px; }
+    #fp-lock-bracket .lb-br { bottom: 0; right: 0;
+      border-bottom-width: 2px; border-right-width: 2px; }
+    /* Danger state — azure is attacking; flash red */
+    #fp-lock-bracket.danger .lb-corner {
+      border-color: rgba(255, 60, 60, 0.92);
+      animation: lockBracketPulse 0.35s ease-in-out infinite alternate;
+    }
+    @keyframes lockBracketPulse {
+      from { border-color: rgba(255, 60, 60, 0.75); }
+      to   { border-color: rgba(255, 140, 80, 1.00); }
+    }
   </style>
 
   <script type="importmap">
@@ -1324,6 +1368,18 @@
        viewMode==='fp' AND pointer IS locked. Toggled together with
        the lock hint by refreshFpOverlays(). -->
   <div id="fp-reticle"><span id="fp-reticle-dot"></span></div>
+
+  <!-- FP lock-on bracket — four corner L-shapes that frame azure in
+       screen space. JS projects azure's head/feet world-positions each
+       frame and sets left/top/width/height on this container.
+       .visible when FP+locked+azure-alive+on-screen; .danger when azure
+       is attacking. Corner divs are purely decorative — no content. -->
+  <div id="fp-lock-bracket">
+    <div class="lb-corner lb-tl"></div>
+    <div class="lb-corner lb-tr"></div>
+    <div class="lb-corner lb-bl"></div>
+    <div class="lb-corner lb-br"></div>
+  </div>
 
   <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
        JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
@@ -4144,6 +4200,10 @@
       reticleEl:        document.getElementById('fp-reticle'),
       vignetteEl:       document.getElementById('fp-damage-vignette'),
       dmgArrowEl:       document.getElementById('fp-dmg-arrow'),
+      lockBracketEl:    document.getElementById('fp-lock-bracket'),
+      // Pre-allocated THREE.Vector3 so updateLockBracket() never allocates
+      // per-frame (avoids GC pressure in the hot animate() path).
+      _lbProj:          new THREE.Vector3(),
       dmgArrowTimer:    0,
       vignetteFadeTimer: 0,
       fovPunch: {
@@ -4311,6 +4371,80 @@
     // Back-compat alias — any earlier code paths that referenced the old
     // name keep working without a separate edit.
     const refreshFpLockHint = refreshFpOverlays;
+
+    // updateLockBracket — per-frame FP lock-on bracket update.
+    // Projects azure's feet (root.position) and head (root.position + 1.8 Y)
+    // into NDC space; converts to pixel coords; sizes and positions the
+    // bracket container; toggles .visible / .danger.
+    //
+    // Guard strategy (mandatory — without it the bracket teleports when azure
+    // is behind the camera because project() mirrors points behind near-plane):
+    //   ndc.z > 1          → behind camera         → hide
+    //   |ndc.x| or |ndc.y| > 1.15 → mostly off-screen → hide
+    //
+    // Bracket box: project both feet and head separately; pixel delta is the
+    // screen-space body height. Add a small horizontal padding (0.45× height)
+    // so the bracket reads as a rectangular frame, not a thin vertical strip.
+    function updateLockBracket() {
+      const el = FpPolish.lockBracketEl;
+      if (!el) return;
+
+      const isFp    = cameraDirector && cameraDirector.viewMode === 'fp';
+      const locked  = !!window._mouseLocked;
+      const azure   = (typeof combatants !== 'undefined' && combatants) ? combatants.azure : null;
+      const azRoot  = azure && azure.root;
+
+      // Hide when not in FP+locked, or when azure is missing / dead.
+      if (!isFp || !locked || !azRoot || azure.state === 'dead') {
+        el.classList.remove('visible', 'danger');
+        return;
+      }
+
+      const proj = FpPolish._lbProj;
+      const W    = window.innerWidth;
+      const H    = window.innerHeight;
+
+      // ── Project feet (ground level) ─────────────────────────────
+      proj.copy(azRoot.position);
+      proj.project(camera);
+      // Behind-camera guard: NDC z > 1 means the point is behind the near plane.
+      if (proj.z > 1.0) { el.classList.remove('visible', 'danger'); return; }
+      const feetX = ( proj.x * 0.5 + 0.5) * W;
+      const feetY = (-proj.y * 0.5 + 0.5) * H;
+
+      // ── Project head (body top ~1.8 m above root) ───────────────
+      proj.copy(azRoot.position);
+      proj.y += 1.8;
+      proj.project(camera);
+      // Also guard on the head — if it's exactly on the clip edge the bracket
+      // can flicker; clamp rather than hide (head is rarely behind camera).
+      if (proj.z > 1.0) { el.classList.remove('visible', 'danger'); return; }
+      const headX = ( proj.x * 0.5 + 0.5) * W;
+      const headY = (-proj.y * 0.5 + 0.5) * H;
+
+      // ── Compute screen AABB with horizontal padding ───────────────
+      const boxH   = Math.abs(feetY - headY);          // pixel height of body
+      const boxW   = Math.max(boxH * 0.55, 20);        // ~55% aspect, min 20px
+      const ctrX   = (feetX + headX) * 0.5;
+      const ctrY   = (feetY + headY) * 0.5;
+      const left   = ctrX - boxW * 0.5;
+      const top    = ctrY - boxH * 0.5;
+
+      // Off-screen guard — hide if center is well outside viewport.
+      if (left + boxW < -40 || left > W + 40 || top + boxH < -40 || top > H + 40) {
+        el.classList.remove('visible', 'danger'); return;
+      }
+
+      // ── Apply geometry ────────────────────────────────────────────
+      el.style.left   = left   + 'px';
+      el.style.top    = top    + 'px';
+      el.style.width  = boxW   + 'px';
+      el.style.height = boxH   + 'px';
+
+      // ── Visibility + danger state ─────────────────────────────────
+      el.classList.add('visible');
+      el.classList.toggle('danger', azure.state === 'attack');
+    }
 
     document.addEventListener('pointerlockchange', () => {
       window._mouseLocked = (document.pointerLockElement === renderer.domElement);
@@ -8341,6 +8475,10 @@
       // updateFovPunch() bails out cheaply when the punch isn't active
       // or when viewMode !== 'fp'.
       updateFovPunch(delta);
+      // FP lock-on bracket — world→screen projection of azure's AABB.
+      // Runs after camera ownership so the projection uses the final
+      // camera pose for this frame. Bails cheaply when not in FP mode.
+      try { updateLockBracket(); } catch (e) { /* never break the loop */ }
 
       // Run impact FX AFTER camera ownership so camera-shake jitter
       // wins this frame (its 0.18 s additive offset lands on top of
