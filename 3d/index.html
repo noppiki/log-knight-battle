@@ -6496,6 +6496,16 @@
       try { triggerFovPunch(); } catch (e) {}
       // ── r61: post-parry pitch kick — 5° upward camera recoil 200ms ───
       try { triggerParryKick(); } catch (e) {}
+      // ── r99: positional camera shake on parry success (150ms / amp 0.10) ─
+      // Runs parallel to parryKick (pitch) — additive physical feedback.
+      // Uses Math.max to avoid clobbering a larger in-flight shake.
+      try {
+        if (impactSystem && impactSystem.shake) {
+          impactSystem.shake.amplitude = Math.max(impactSystem.shake.amplitude || 0, 0.10);
+          impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining  || 0, 0.15);
+          impactSystem.shake.duration  = Math.max(impactSystem.shake.duration   || 0, 0.15);
+        }
+      } catch (e) {}
 
       // ── 7) ⚡ PARRY! HUD text ─────────────────────────────────────────
       const textEl = FpPolish.parryTextEl;
