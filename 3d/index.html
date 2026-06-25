@@ -8167,6 +8167,17 @@
       FpPolish._dodgeCdPrev = cdUntil;
     }
 
+    // ── r168: playDodgeFootplant ─────────────────────────────────────────
+    // Short stomp sfx fired when the r63 dodge tween completes (active→false).
+    // 40Hz sawtooth 80ms vol 0.06 — lighter than r163 azure approach (35Hz/100ms).
+    // Routes via sfxGain → globalGain (mute-compliant).
+    function playDodgeFootplant() {
+      if (!actx) return;
+      try {
+        tone({ freq: 40, freq2: 28, dur: 0.08, type: 'sawtooth', vol: 0.06, attack: 0.005 });
+      } catch (e) {}
+    }
+
     // ── r63: triggerRetreatDodge ─────────────────────────────────────────
     // Retreat dodge on Shift key — camera slides 0.8m toward world -X
     // (away from azure at +X) over 0.3s with an ease-out-back-in shape,
@@ -8234,7 +8245,13 @@
       if (cameraDirector.viewMode !== 'fp') { d.active = false; return 0; }
       d.elapsed += delta;
       const t = d.elapsed / d.duration;
-      if (t >= 1.0) { d.active = false; return 0; }
+      if (t >= 1.0) {
+        d.active = false;
+        // r168: dodge end footplant sfx — 40Hz sawtooth 80ms (stomp on landing)
+        // Distinct from r163 azure approach footplant (35Hz); lighter body weight.
+        try { playDodgeFootplant(); } catch (_) {}
+        return 0;
+      }
       // sin(π*t): 0 at t=0, peak 1 at t=0.5, 0 at t=1.
       const offset = Math.sin(Math.PI * t) * d.peakOffset;
       return -offset; // -X direction (away from azure)
