@@ -1463,6 +1463,23 @@
       animation: hpHitPulse 0.2s ease-out forwards;
     }
 
+    /* r81: azure desperate HP bar pulse — slow crimson throb while azure HP ≤ 25% */
+    @keyframes desperateHpPulse {
+      0%   { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 10px 3px rgba(220, 40, 40, 0.75); }
+      50%  { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 20px 6px rgba(255, 60, 30, 0.95); }
+      100% { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 10px 3px rgba(220, 40, 40, 0.75); }
+    }
+    .hp-bar.desperate-pulse {
+      animation: desperateHpPulse 1.1s ease-in-out infinite;
+    }
+    /* hit-flash overrides desperate-pulse so damage flash always reads on top */
+    .hp-bar.hit-flash.desperate-pulse {
+      animation: hpHitPulse 0.2s ease-out forwards;
+    }
+
     /* EXHAUSTED pill — transient center-top tooltip that flashes when
        an action (attack / guard-enter) is blocked due to insufficient
        stamina. JS spawns one .exhaust-pill, then strips it after 1s. */
@@ -5498,6 +5515,13 @@
         }
       } catch (e) {}
 
+      // 4) r81: azure HP bar throb — slow crimson pulse while desperate active.
+      try {
+        const _azHpBarEl = document.getElementById('hp-fill-azure');
+        const _azHpBar   = _azHpBarEl ? _azHpBarEl.closest('.hp-bar') : null;
+        if (_azHpBar) _azHpBar.classList.add('desperate-pulse');
+      } catch (e) {}
+
       console.log('[lkb-3d] r73 azure desperate → ACTIVE (interval ×' + DESPERATE_INTERVAL_FACTOR + ', tg ' + DESPERATE_TELEGRAPH_MS + 'ms)');
     }
 
@@ -5521,6 +5545,13 @@
         } catch (_e) {}
       });
       ad.emissiveSave = [];
+
+      // r81: remove HP bar throb on deactivation.
+      try {
+        const _azHpBarEl = document.getElementById('hp-fill-azure');
+        const _azHpBar   = _azHpBarEl ? _azHpBarEl.closest('.hp-bar') : null;
+        if (_azHpBar) _azHpBar.classList.remove('desperate-pulse');
+      } catch (e) {}
 
       console.log('[lkb-3d] r73 azure desperate → INACTIVE');
     }
