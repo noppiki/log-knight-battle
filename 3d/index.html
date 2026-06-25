@@ -57,7 +57,7 @@
     #mute-btn {
       position: fixed;
       top: 14px;
-      right: 138px;
+      right: 310px;
       z-index: 20;
       width: 38px;
       height: 32px;
@@ -138,6 +138,34 @@
       border-color: rgba(120, 110, 90, 0.5);
     }
     #cinema-toggle:hover {
+      background: rgba(40, 30, 20, 0.95);
+      border-color: rgba(255, 196, 120, 1);
+    }
+
+    /* ── VIEW mode toggle (3rd / FP / MANUAL cycle) ───────────────
+       Sits immediately to the left of #cinema-toggle (8px gap).
+       Same dark-amber plate so the two buttons read as a cluster. */
+    #view-toggle {
+      position: fixed;
+      top: 14px;
+      right: 158px;
+      z-index: 30;
+      pointer-events: auto;
+      cursor: pointer;
+      user-select: none;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.8);
+      border-radius: 4px;
+      padding: 6px 12px;
+      font: bold 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.08em;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    #view-toggle:hover {
       background: rgba(40, 30, 20, 0.95);
       border-color: rgba(255, 196, 120, 1);
     }
@@ -497,6 +525,9 @@
 
   <!-- CINEMA mode toggle — auto camera cycle on/off. JS wires click. -->
   <button id="cinema-toggle" type="button" title="Toggle automatic camera cycle">&#x1F3A5; CYCLE: ON</button>
+
+  <!-- VIEW mode toggle — cycles 3rd-person (cinematic) / FP / MANUAL. JS wires click + localStorage. -->
+  <button id="view-toggle" type="button" title="Cycle camera view: 3rd-person / First-person / Manual">&#x1F441; VIEW: 3rd</button>
 
   <!-- Game HUD: HP/SP gauges + engraved player labels + VS badge.
        JS keeps window.gameState in sync; CSS bars read width from
@@ -1475,12 +1506,42 @@
       HIGH_WIDE:     { pos: new THREE.Vector3(0,    5.5, -4.5), look: new THREE.Vector3( 0,   0.7, 0) },
     };
 
+    // First-person camera anchored to crimson's head, looking out toward
+    // azure. Lives OUTSIDE the cycle list — selected only via the
+    // viewMode='fp' branch in CameraDirector.update().
+    //
+    // Position rationale: combatants.crimson.root.position stays at
+    // (0,0,0) because the crimson GLB loader explicitly does NOT
+    // re-anchor (placement is baked into child meshes — see the
+    // "Do NOT re-anchor" comment in the crimson.glb loader, and
+    // confirmed by rim_crimson_back.target at x=-2). A dynamic getter
+    // off root.position would resolve to log center, so we hard-code
+    // the head position. Look target is a point far in +X so azure
+    // (at x≈2) is centered and the view stays level.
+    const FP_SHOT = {
+      name: 'FP_CRIMSON',
+      getPosition: () => new THREE.Vector3(-2, 1.4, 0),
+      getLookAt:   () => new THREE.Vector3( 5, 1.2, 0),
+      fov: 75,
+    };
+
     class CameraDirector {
       constructor(camera, controls, shots) {
         this.camera   = camera;
         this.controls = controls;
         this.shots    = shots;     // cycle list: [A,B,A,C,A,D]
         this.active   = true;      // independent of controls.enabled
+        // viewMode is the SECOND axis of ownership, orthogonal to `active`:
+        //   'cinematic' — run the cycle (the historical mode)
+        //   'fp'        — first-person, anchored to FP_SHOT (active stays true)
+        //   'manual'    — OrbitControls owns (active is forced false)
+        // The pointerdown / cinemaBtn handlers below keep viewMode in sync
+        // when they flip `active`, so the two flags never contradict.
+        this.viewMode = 'cinematic';
+        // Captured ONCE — used to restore fov when leaving FP. Capturing per
+        // entry would lose the original if we ever entered FP twice without
+        // a cinematic restore in between.
+        this.originalFov = camera.fov;
         this.state    = 'holding'; // 'holding' | 'transitioning'
         this.holdTime       = 4.5;
         this.transitionTime = 0.9;
@@ -1554,8 +1615,74 @@
         }
       }
 
+      // setViewMode(mode) — switch between the three view modes.
+      //   'cinematic' → resume cycle (active=true, controls disabled, default fov)
+      //   'fp'        → first-person on crimson (active=true, controls disabled, fov=75)
+      //   'manual'    → OrbitControls owns (active=false, controls enabled, default fov)
+      //
+      // fov is touched ONLY on mode transitions (here), never per-frame, so
+      // updateProjectionMatrix() is called at most once per setViewMode call.
+      setViewMode(mode) {
+        if (mode !== 'cinematic' && mode !== 'fp' && mode !== 'manual') return;
+        if (this.viewMode === mode) return;
+        const prev = this.viewMode;
+        this.viewMode = mode;
+
+        if (mode === 'fp') {
+          // Clear any in-flight combat override so the return to cinematic
+          // isn't holding a stale close-up.
+          this._override = null;
+          // Seed camera + lookAt now so the very next animate frame is correct.
+          this.camera.position.copy(FP_SHOT.getPosition());
+          this.currentLookAt.copy(FP_SHOT.getLookAt());
+          if (this.camera.fov !== FP_SHOT.fov) {
+            this.camera.fov = FP_SHOT.fov;
+            this.camera.updateProjectionMatrix();
+          }
+          this.active = true;
+          this.controls.enabled = false;
+          return;
+        }
+
+        // Leaving FP (or arriving from any other state) — restore fov if
+        // we'd switched to FP fov previously.
+        if (prev === 'fp' && this.camera.fov !== this.originalFov) {
+          this.camera.fov = this.originalFov;
+          this.camera.updateProjectionMatrix();
+        }
+
+        if (mode === 'cinematic') {
+          // Re-seat fromPos/fromLook so the next transition eases from
+          // wherever we landed (avoid a snap on FP→cinematic).
+          this.fromPos.copy(this.camera.position);
+          this.fromLook.copy(this.currentLookAt);
+          this.state   = 'holding';
+          this.elapsed = 0;
+          this._override = null;
+          this.active = true;
+          this.controls.enabled = false;
+        } else {
+          // 'manual' — hand to OrbitControls.
+          this.controls.target.copy(this.currentLookAt);
+          this.controls.update();
+          this.active = false;
+          this.controls.enabled = true;
+        }
+      }
+
       update(delta) {
         if (!this.active) return;
+
+        // FP mode — skip the cycle state machine entirely. Camera sits
+        // at FP_SHOT.getPosition() and currentLookAt is the FP target
+        // (animate() reads currentLookAt and calls camera.lookAt()).
+        // fov is set ONCE in setViewMode('fp') — not per-frame — so
+        // updateProjectionMatrix() is not called here.
+        if (this.viewMode === 'fp') {
+          this.camera.position.copy(FP_SHOT.getPosition());
+          this.currentLookAt.copy(FP_SHOT.getLookAt());
+          return;
+        }
 
         if (this.state === 'holding') {
           // While holding, camera sits exactly at toPos / toLook.
@@ -1600,31 +1727,88 @@
     // Manual-takeover: any pointer-down on the canvas drops cinema and
     // hands control to OrbitControls. The 🎥 button re-arms it. We bind
     // to the renderer canvas (not window) so HUD clicks don't trigger.
+    // viewMode is kept in sync: dropping to orbit implies 'manual'.
+
+    // ── syncViewButton ─────────────────────────────────────────────
+    // Single source of truth: derives label from cameraDirector.viewMode
+    // and writes to localStorage. Called from all four sites that can
+    // change viewMode (pointerdown, cinema click, view-toggle click, boot).
+    const VIEW_LABELS = { cinematic: '👁 VIEW: 3rd', fp: '👁 VIEW: FP', manual: '👁 VIEW: MANUAL' };
+    function syncViewButton() {
+      const vBtn = document.getElementById('view-toggle');
+      if (!vBtn) return;
+      vBtn.textContent = VIEW_LABELS[cameraDirector.viewMode] || '👁 VIEW: 3rd';
+      try { localStorage.setItem('lkb3d_viewmode', cameraDirector.viewMode); } catch(e) {}
+    }
+
     renderer.domElement.addEventListener('pointerdown', () => {
       if (cameraDirector.active) {
-        cameraDirector.setActive(false);
-        controls.enabled = true;
+        cameraDirector.setViewMode('manual');
         const btn = document.getElementById('cinema-toggle');
         if (btn) {
           btn.textContent = '🎥 CYCLE: OFF';
           btn.classList.add('off');
         }
+        syncViewButton();
       }
     });
 
     // 🎥 toggle button — flips cinema on/off. When turning ON, we also
     // disable orbit input; when OFF, we re-enable it so the user can
     // drag freely (consistent with the pointer-down path above).
+    // Routes through setViewMode so viewMode and active stay aligned.
     const cinemaBtn = document.getElementById('cinema-toggle');
     if (cinemaBtn) {
       cinemaBtn.addEventListener('click', () => {
         const next = !cameraDirector.active;
-        cameraDirector.setActive(next);
-        controls.enabled = !next;
+        cameraDirector.setViewMode(next ? 'cinematic' : 'manual');
         cinemaBtn.textContent = next ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
         cinemaBtn.classList.toggle('off', !next);
+        syncViewButton();
       });
     }
+
+    // 👁 VIEW mode toggle — cycles 3rd / FP / MANUAL.
+    // Reading the current mode from cameraDirector (single source of truth)
+    // prevents desync if viewMode was changed via any other path.
+    const VIEW_CYCLE = ['cinematic', 'fp', 'manual'];
+    const viewBtn = document.getElementById('view-toggle');
+    if (viewBtn) {
+      viewBtn.addEventListener('click', () => {
+        const idx = VIEW_CYCLE.indexOf(cameraDirector.viewMode);
+        const next = VIEW_CYCLE[(idx + 1) % VIEW_CYCLE.length];
+        cameraDirector.setViewMode(next);
+        // Keep cinema button label consistent when switching to/from cinematic.
+        if (cinemaBtn) {
+          cinemaBtn.textContent = cameraDirector.active ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
+          cinemaBtn.classList.toggle('off', !cameraDirector.active);
+        }
+        syncViewButton();
+      });
+    }
+
+    // Boot restore — replay last saved viewMode (if valid) so the user
+    // continues where they left off. Unconditionally sync the button label
+    // because setViewMode early-returns when mode === viewMode (no DOM side
+    // effect), so we call syncViewButton() regardless of whether a restore
+    // actually changed state.
+    {
+      const saved = (() => { try { return localStorage.getItem('lkb3d_viewmode'); } catch(e) { return null; } })();
+      if (saved && VIEW_CYCLE.includes(saved)) {
+        cameraDirector.setViewMode(saved);
+        if (cinemaBtn) {
+          cinemaBtn.textContent = cameraDirector.active ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
+          cinemaBtn.classList.toggle('off', !cameraDirector.active);
+        }
+      }
+      syncViewButton(); // always set label (handles both restore and cinematic default)
+    }
+
+    // Public callable entry point — used by console / future HUD button /
+    // tests to flip into FP mode without depending on UI state. Also
+    // exposes the director so external tooling can inspect viewMode.
+    window.setViewMode = (mode) => { cameraDirector.setViewMode(mode); syncViewButton(); };
+    window.cameraDirector = cameraDirector;
 
     /* ── post-processing chain (EffectComposer) ────────────────── */
     // Render → SSAO → Bloom → SMAA → Output
@@ -2641,7 +2825,9 @@
       //   otherwise            → clear override, resume cycle
       // Only fires when active and only on edges (key change), so the
       // director keeps cycling normally when nothing is happening.
-      if (cameraDirector.active && combatants) {
+      // Gated on viewMode === 'cinematic' so FP/manual don't fire
+      // jumpTo/clearOverride and corrupt cycle state during their reign.
+      if (cameraDirector.active && cameraDirector.viewMode === 'cinematic' && combatants) {
         const cKnight = combatants.crimson;
         const aKnight = combatants.azure;
         const cState  = cKnight ? cKnight.state : null;
