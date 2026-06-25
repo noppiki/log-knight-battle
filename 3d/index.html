@@ -491,6 +491,31 @@
       80%  { opacity: 1; transform: scale(1.0)  translateY(0);    letter-spacing: 0.22em; }
       100% { opacity: 0; transform: scale(0.98) translateY(2px);  letter-spacing: 0.22em; }
     }
+
+    /* FP pointer-lock hint — center-screen, only visible when
+       viewMode==='fp' && !pointerLocked. JS toggles .visible. */
+    #fp-lock-hint {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 10px 18px;
+      font: 600 13px/1.2 system-ui, -apple-system, sans-serif;
+      letter-spacing: 0.08em;
+      color: #f4e4c1;
+      background: rgba(12, 8, 6, 0.62);
+      border: 1px solid rgba(216, 164, 90, 0.55);
+      border-radius: 4px;
+      box-shadow: 0 0 18px rgba(0, 0, 0, 0.55), inset 0 0 12px rgba(216, 164, 90, 0.08);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      pointer-events: none;
+      z-index: 50;
+      opacity: 0;
+      transition: opacity 180ms ease-out;
+    }
+    #fp-lock-hint.visible {
+      opacity: 1;
+    }
   </style>
 
   <script type="importmap">
@@ -571,6 +596,11 @@
        animation completes (~1.5s). Pointer-events: none keeps it from
        blocking the canvas. -->
   <div id="round-banner" aria-live="polite"></div>
+
+  <!-- FP Pointer Lock hint — visible only when viewMode==='fp' AND
+       pointer is NOT locked. Click on the canvas grabs the lock; ESC
+       releases. JS toggles .visible based on pointerlockchange + viewMode. -->
+  <div id="fp-lock-hint">&#x1F3AF; click to aim &mdash; ESC to release</div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -1559,6 +1589,15 @@
         // hold the override shot until cleared. Cleared on idle return.
         this._override = null; // { pos, look, reason } | null
 
+        // FP mouselook state — yaw around world Y, pitch around camera local X.
+        // Reconstructed by setViewMode('fp') from FP_SHOT.getLookAt() so the
+        // first frame after entering FP stays aimed at azure. Driven each
+        // frame by pointerlocked mousemove (see mouselook block below).
+        // We use camera.rotation.order = 'YXZ' so rotation.y is yaw and
+        // rotation.x is pitch with no roll (standard FPS rig).
+        this.fpYaw   = 0;
+        this.fpPitch = 0;
+
         // Seed camera at first shot so the very first frame is correct.
         this.camera.position.copy(this.fromPos);
         this.camera.lookAt(this.currentLookAt);
@@ -1639,6 +1678,28 @@
             this.camera.fov = FP_SHOT.fov;
             this.camera.updateProjectionMatrix();
           }
+          // ── FP mouselook seed ────────────────────────────────────
+          // Use YXZ Euler order so .y is yaw (around world Y) and .x is
+          // pitch (local X) with zero roll — the standard FPS rig. Derive
+          // initial yaw/pitch from FP_SHOT.getLookAt() so we open aimed at
+          // azure (+X). The animate() loop will assign camera.rotation
+          // directly from (fpYaw, fpPitch) while in FP, so we MUST NOT
+          // call camera.lookAt() in that branch (it would overwrite the
+          // rotation we just set, and reset pitch every frame).
+          this.camera.rotation.order = 'YXZ';
+          const _fpPos  = FP_SHOT.getPosition();
+          const _fpLook = FP_SHOT.getLookAt();
+          const _dx = _fpLook.x - _fpPos.x;
+          const _dy = _fpLook.y - _fpPos.y;
+          const _dz = _fpLook.z - _fpPos.z;
+          // Three.js camera looks down -Z by default; with rotation.y=0 the
+          // forward vector is (0,0,-1). yaw = atan2(-dx, -dz) maps a world
+          // delta (dx,dz) to the rotation.y needed to face it. For FP_SHOT
+          // (delta ≈ +X, dz ≈ 0) this evaluates to -π/2 → looking toward +X.
+          this.fpYaw   = Math.atan2(-_dx, -_dz);
+          const _horiz = Math.hypot(_dx, _dz);
+          this.fpPitch = Math.atan2(_dy, _horiz);
+          this.camera.rotation.set(this.fpPitch, this.fpYaw, 0);
           this.active = true;
           this.controls.enabled = false;
           // Hide crimson's own meshes (helm/body) so the camera looking
@@ -1684,13 +1745,14 @@
         if (!this.active) return;
 
         // FP mode — skip the cycle state machine entirely. Camera sits
-        // at FP_SHOT.getPosition() and currentLookAt is the FP target
-        // (animate() reads currentLookAt and calls camera.lookAt()).
-        // fov is set ONCE in setViewMode('fp') — not per-frame — so
-        // updateProjectionMatrix() is not called here.
+        // at FP_SHOT.getPosition(); rotation is owned by the mouselook
+        // handler (camera.rotation.set(pitch, yaw, 0) on YXZ order),
+        // NOT by currentLookAt. fov is set ONCE in setViewMode('fp') —
+        // not per-frame — so updateProjectionMatrix() is not called here.
+        // CRITICAL: do NOT touch currentLookAt here; animate() guards on
+        // viewMode==='fp' and skips camera.lookAt(), but defensive too.
         if (this.viewMode === 'fp') {
           this.camera.position.copy(FP_SHOT.getPosition());
-          this.currentLookAt.copy(FP_SHOT.getLookAt());
           return;
         }
 
@@ -1848,6 +1910,13 @@
     }
 
     renderer.domElement.addEventListener('pointerdown', () => {
+      // FP mode: a canvas click means "aim" — grab pointer lock and
+      // stay in FP. Do NOT drop to manual, which would tear down the
+      // FP self-rig (helm/sword viewmodel) and dump us into orbit.
+      if (cameraDirector.viewMode === 'fp') {
+        try { renderer.domElement.requestPointerLock(); } catch (e) {}
+        return;
+      }
       if (cameraDirector.active) {
         cameraDirector.setViewMode('manual');
         const btn = document.getElementById('cinema-toggle');
@@ -1858,6 +1927,57 @@
         syncViewButton();
       }
     });
+
+    // ── FP mouselook ────────────────────────────────────────────────
+    // Pointer Lock + per-frame YXZ Euler aim. The CameraDirector owns
+    // (fpYaw, fpPitch); we mutate them here from movementX/Y while the
+    // pointer is locked, and animate() applies them via
+    // camera.rotation.set(fpPitch, fpYaw, 0). YXZ order means yaw is
+    // applied first (around world Y), then pitch (around the resulting
+    // local X) — the standard FPS no-roll rig.
+    //
+    // Sensitivity: 0.0022 rad/px ≈ 0.126°/px — comfortable for both
+    // trackpads and gaming mice without further tuning.
+    // Pitch clamp keeps us just shy of straight up/down so the YXZ
+    // gimbal never degenerates (and the helm-cam never flips).
+    const FP_MOUSE_SENS = 0.0022;
+    const FP_PITCH_MIN  = -Math.PI / 2 + 0.05;
+    const FP_PITCH_MAX  =  Math.PI / 2 - 0.05;
+    const fpLockHint = document.getElementById('fp-lock-hint');
+
+    function refreshFpLockHint() {
+      if (!fpLockHint) return;
+      // Hint visible iff (FP mode && pointer not locked).
+      const show = cameraDirector.viewMode === 'fp' && !window._mouseLocked;
+      fpLockHint.classList.toggle('visible', show);
+    }
+
+    document.addEventListener('pointerlockchange', () => {
+      window._mouseLocked = (document.pointerLockElement === renderer.domElement);
+      refreshFpLockHint();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!window._mouseLocked) return;
+      if (cameraDirector.viewMode !== 'fp') return;
+      cameraDirector.fpYaw   -= e.movementX * FP_MOUSE_SENS;
+      cameraDirector.fpPitch -= e.movementY * FP_MOUSE_SENS;
+      if (cameraDirector.fpPitch < FP_PITCH_MIN) cameraDirector.fpPitch = FP_PITCH_MIN;
+      if (cameraDirector.fpPitch > FP_PITCH_MAX) cameraDirector.fpPitch = FP_PITCH_MAX;
+    });
+
+    // Hint also needs to react to view-mode changes (button click,
+    // boot restore, programmatic window.setViewMode). Wrap
+    // cameraDirector.setViewMode so every viewMode mutation site
+    // (including the boot-restore replay that already fired above)
+    // refreshes the hint without us having to thread the call through
+    // each handler.
+    const _origSetViewMode = cameraDirector.setViewMode.bind(cameraDirector);
+    cameraDirector.setViewMode = function (mode) {
+      _origSetViewMode(mode);
+      refreshFpLockHint();
+    };
+    refreshFpLockHint();
 
     // 🎥 toggle button — flips cinema on/off. When turning ON, we also
     // disable orbit input; when OFF, we re-enable it so the user can
@@ -2589,6 +2709,13 @@
     window.applyDamage = function applyDamage(defenderId, amount) {
       const s = window.gameState[defenderId];
       if (!s || s.dead) return;
+      // Guard absorbs the hit — chip damage only (20%) plus a clang sfx
+      // so the player feels the contact even though most of it is blocked.
+      const defenderCombatant = combatants[defenderId];
+      if (defenderCombatant && defenderCombatant.state === 'guard' && amount > 0) {
+        amount = Math.max(1, Math.floor(amount * 0.2));
+        try { if (window.sfxClang) window.sfxClang(); } catch (e) {}
+      }
       s.hp = Math.max(0, s.hp - amount);
       updateGaugeDOM();
       // Spawn a floating "-N" above the defender's head. Best-effort —
@@ -2635,7 +2762,14 @@
     // IDLE just after the attack finishes (~105%).
     let combatTickCount = 0;
     function combatTick() {
-      const attackerLabel = Math.random() < 0.5 ? 'crimson' : 'azure';
+      // In FP mode, the player owns crimson — CPU only auto-attacks on
+      // azure. Outside FP mode, keep the original 50/50 random attacker.
+      let attackerLabel;
+      if (cameraDirector && cameraDirector.viewMode === 'fp') {
+        attackerLabel = 'azure';
+      } else {
+        attackerLabel = Math.random() < 0.5 ? 'crimson' : 'azure';
+      }
       const defenderLabel = attackerLabel === 'crimson' ? 'azure' : 'crimson';
       const attacker = combatants[attackerLabel];
       const defender = combatants[defenderLabel];
@@ -2741,6 +2875,128 @@
         maybeStartCombatLoop();
       }
     }, 200);
+
+    // ── FP player input — Space=attack, E=guard ────────────────────
+    // Only active when viewMode==='fp' AND the pointer is locked, so it
+    // never collides with the title screen, menus, or 3rd-person cinema.
+    // Player owns crimson; combatTick handles azure (CPU) auto-attack.
+    const playerInput = { spacePressed: false, eHeld: false, lastSpaceTime: 0 };
+    const PLAYER_ATTACK_COOLDOWN_MS = 250; // soft floor between repeated taps
+
+    function fpInputActive() {
+      return cameraDirector && cameraDirector.viewMode === 'fp' && window._mouseLocked;
+    }
+
+    // Player-driven attack on crimson. Mirrors the swing → impact → damage
+    // sequence from combatTick, but lets the defender (azure) keep whatever
+    // state they're in (idle / guard / attack) so we don't yank them out
+    // of their own animation mid-swing.
+    function playerAttack() {
+      const attacker = combatants.crimson;
+      const defender = combatants.azure;
+      if (!attacker || !defender) return;
+      if (window.gameState.crimson.dead || window.gameState.azure.dead) return;
+      // Debounce — ignore if already mid-swing or guarding.
+      if (attacker.state === 'attack' || attacker.state === 'guard') return;
+
+      try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+
+      attacker.state = 'attack';
+      attacker.impactScheduled = false;
+      const chosenAttack = pickAttackClip();
+      const attackAction = playClip(attacker, chosenAttack, {
+        fadeIn: 0.15,
+        loop: false,
+        weight: 1.0,
+      });
+      const dur = (attackAction && attacker.currentDuration) || 1.0;
+
+      // Impact at ~70% through the swing — matches combatTick timing.
+      setTimeout(() => {
+        if (attacker.state !== 'attack') return; // got interrupted (e.g. died)
+        attacker.impactScheduled = true;
+
+        // Only play hit reaction on defender if they aren't dead, attacking,
+        // or actively guarding (guard frame should hold its BLOCK pose so
+        // applyDamage's chip-damage path reads right).
+        if (defender && !window.gameState.azure.dead && defender.state !== 'guard' && defender.state !== 'attack') {
+          defender.state = 'hit';
+          playClip(defender, CLIP_NAMES.HIT, { fadeIn: 0.1, loop: false, weight: 1.0 });
+        }
+
+        const defenderRoot = defender && defender.root;
+        const hitPos = defenderRoot
+          ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
+          : { x: 0, y: 1.0, z: 0 };
+        try { window.triggerImpact(hitPos); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
+        try {
+          window.applyDamage('azure', 8);
+          gainSP('crimson', 5);
+          gainSP('azure', 5);
+        } catch (err) { console.warn('[lkb-3d] HUD update threw', err); }
+      }, dur * 0.70 * 1000);
+
+      // Return crimson to idle after the swing — but only if E isn't held
+      // (in which case the keyup handler will own the state).
+      setTimeout(() => {
+        if (!combatants.crimson) return;
+        if (window.gameState.crimson.dead) return;
+        if (playerInput.eHeld) return; // guard takes over
+        playClip(combatants.crimson, CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+        combatants.crimson.state = 'idle';
+      }, dur * 1.05 * 1000);
+    }
+
+    function playerGuardEnter() {
+      const c = combatants.crimson;
+      if (!c) return;
+      if (window.gameState.crimson.dead) return;
+      if (c.state === 'attack') return; // can't guard mid-swing
+      c.state = 'guard';
+      playClip(c, CLIP_NAMES.BLOCK, { fadeIn: 0.12, loop: true, weight: 1.0 });
+    }
+
+    function playerGuardExit() {
+      const c = combatants.crimson;
+      if (!c) return;
+      if (window.gameState.crimson.dead) return;
+      if (c.state !== 'guard') return;
+      playClip(c, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true });
+      c.state = 'idle';
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (!fpInputActive()) return;
+      if (e.code === 'Space') {
+        if (e.repeat) return;
+        e.preventDefault();
+        const now = performance.now();
+        if (now - playerInput.lastSpaceTime < PLAYER_ATTACK_COOLDOWN_MS) return;
+        playerInput.lastSpaceTime = now;
+        playerInput.spacePressed = true;
+        playerAttack();
+      } else if (e.code === 'KeyE') {
+        if (e.repeat) return;
+        e.preventDefault();
+        if (playerInput.eHeld) return;
+        playerInput.eHeld = true;
+        playerGuardEnter();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') {
+        playerInput.spacePressed = false;
+      } else if (e.code === 'KeyE') {
+        if (!playerInput.eHeld) return;
+        playerInput.eHeld = false;
+        // Only exit guard if we're still in FP mode — otherwise leave
+        // the state alone (avoid stomping on cinema/3rd-person logic).
+        if (cameraDirector && cameraDirector.viewMode === 'fp') {
+          playerGuardExit();
+        }
+      }
+    });
 
     // ── log.glb ────────────────────────────────────────────────── */
     loader.load(
@@ -2981,7 +3237,17 @@
       // the single source of truth (see CameraDirector ownership doc).
       if (cameraDirector.active) {
         cameraDirector.update(delta);
-        camera.lookAt(cameraDirector.currentLookAt);
+        // FP: rotation owned by mouselook (camera.rotation.set on YXZ),
+        // NOT by lookAt — calling lookAt() here would resnap pitch every
+        // frame and override the user's aim. We DO assign rotation per
+        // frame from (fpYaw, fpPitch) so it always reflects the latest
+        // mousemove deltas, even when pointer lock is not yet engaged
+        // (so the camera stays where setViewMode('fp') seeded it).
+        if (cameraDirector.viewMode === 'fp') {
+          camera.rotation.set(cameraDirector.fpPitch, cameraDirector.fpYaw, 0);
+        } else {
+          camera.lookAt(cameraDirector.currentLookAt);
+        }
       } else {
         controls.update(); // damping (recomputes camera.position)
       }
