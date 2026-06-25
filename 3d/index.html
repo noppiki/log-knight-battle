@@ -11743,6 +11743,16 @@
       window._matchIntroActive  = true;
       window._matchIntroStartMs = performance.now();
 
+      // r129: azure spawn entrance flash — cyan emissive glow fades out over 600ms
+      // at t=200ms when azure first appears in the cinematic intro camera sweep.
+      // flashWinnerGlow is reused (color/intensity/duration overrides) so lazy-init
+      // of _winnerGlowBase captures the true idle baseline before any combat state.
+      window._matchIntroTimers.push(setTimeout(() => {
+        if (window._matchIntroActive) {
+          try { flashWinnerGlow('azure', 600, 0x4060a0, 0.4); } catch (_e) {}
+        }
+      }, 200));
+
       // READY... — 1.0 s → fade-in, hold to 1.8 s → fade-out.
       window._matchIntroTimers.push(setTimeout(() => {
         _mitShow('READY...', false);
