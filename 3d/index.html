@@ -3054,6 +3054,111 @@
       snowGlintSystem.material.uniforms.uTime.value = time;
     }
 
+    /* ── aurora borealis ───────────────────────────────────────── */
+    // Stylized Nordic aurora — a translucent ribbon billowing across the
+    // upper sky, layered on top of the HDRI. Pure shader work (no texture
+    // dependency, no geometry animation); the shader does 2 octaves of
+    // sin-based 2D noise scrolled in U, vertical taper that fades the
+    // bottom into the horizon, and a teal→mint→magenta gradient sampled
+    // by V. AdditiveBlending so it brightens the dusk sky rather than
+    // occluding it; depthWrite:false so it never confuses the depth FX
+    // (bloom / bokeh) below. Wrapped in try/catch so a shader compile
+    // failure can never take down the render loop.
+    let auroraSystem = null;
+    try {
+      // 40 m wide × 8 m tall, tessellated lightly so the plane itself
+      // can curve in the future if we want vertex displacement. Right
+      // now the displacement is implicit through the shader, but we
+      // keep the tessellation for cheap insurance.
+      const auroraGeo = new THREE.PlaneGeometry(40, 8, 64, 16);
+      const auroraMat = new THREE.ShaderMaterial({
+        uniforms: {
+          uTime:     { value: 0.0 },
+          uColorBot: { value: new THREE.Color(0x00aa88) }, // deep teal
+          uColorMid: { value: new THREE.Color(0x88ffaa) }, // mint green
+          uColorTop: { value: new THREE.Color(0xddaaff) }, // pale magenta
+          uIntensity:{ value: 0.6 },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform vec3  uColorBot;
+          uniform vec3  uColorMid;
+          uniform vec3  uColorTop;
+          uniform float uIntensity;
+          varying vec2  vUv;
+
+          // Cheap pseudo-noise from layered sines — no texture lookup,
+          // no fancy hash. Three octaves give enough variation to read
+          // as a wavering aurora curtain without banding.
+          float auroraNoise(vec2 p, float t) {
+            float n  = sin(p.x * 3.1 + t * 1.4) * 0.50;
+                  n += sin(p.x * 7.3 - t * 0.9 + p.y * 4.7) * 0.30;
+                  n += sin(p.x * 13.1 + t * 2.1 + p.y * 9.3) * 0.20;
+            return n;
+          }
+
+          void main() {
+            // Scroll U slowly so the ribbon drifts; V stays put so the
+            // vertical band shape stays anchored to the sky.
+            float u = vUv.x + uTime * 0.05;
+            float v = vUv.y;
+
+            // Two noise layers at different scales/speeds — composited
+            // multiplicatively so the bright bands are where BOTH layers
+            // peak. Produces the characteristic narrow curtain look.
+            float n1 = auroraNoise(vec2(u * 1.0, v * 2.0), uTime * 0.8);
+            float n2 = auroraNoise(vec2(u * 2.3, v * 1.3), uTime * 0.5 + 11.7);
+            float band = smoothstep(0.10, 0.95, n1 * 0.5 + 0.5)
+                       * smoothstep(0.20, 0.90, n2 * 0.5 + 0.5);
+
+            // Vertical taper — full intensity at the top of the panel,
+            // fully transparent at the bottom so the aurora dissolves
+            // into the horizon line instead of hard-clipping.
+            float taper = smoothstep(0.0, 0.55, v);
+
+            // Color: teal at the base, mint in the middle, magenta at
+            // the top — the classic Nordic aurora gradient.
+            vec3 col = mix(uColorBot, uColorMid, smoothstep(0.0, 0.6, v));
+                 col = mix(col,       uColorTop, smoothstep(0.6, 1.0, v));
+
+            float alpha = band * taper * uIntensity;
+            gl_FragColor = vec4(col, alpha);
+          }
+        `,
+        transparent: true,
+        depthWrite:  false,
+        depthTest:   true,
+        blending:    THREE.AdditiveBlending,
+        side:        THREE.DoubleSide,
+      });
+      const auroraMesh = new THREE.Mesh(auroraGeo, auroraMat);
+      // High overhead, slightly behind so it fills the upper third of
+      // most cinematic framings without intersecting the duel envelope.
+      auroraMesh.position.set(0, 12, 8);
+      // Tilt the panel a hair toward the camera so the gradient reads
+      // as a curtain hanging from the sky rather than a flat billboard.
+      auroraMesh.rotation.x = -Math.PI / 8;
+      auroraMesh.frustumCulled = false;
+      auroraMesh.renderOrder = 2; // draw after sky/HDRI, before transparent FX
+      scene.add(auroraMesh);
+      auroraSystem = { mesh: auroraMesh, material: auroraMat };
+      window.auroraSystem = auroraSystem;
+    } catch (auroraErr) {
+      console.warn('[lkb-3d] aurora system skipped', auroraErr);
+    }
+
+    function updateAurora(delta, time) {
+      if (!auroraSystem) return;
+      auroraSystem.material.uniforms.uTime.value = time;
+    }
+
     /* ── ground ────────────────────────────────────────────────── */
     const groundGeo = new THREE.PlaneGeometry(40, 40);
     const texLoader = new THREE.TextureLoader();
@@ -6391,6 +6496,109 @@
       }
     );
 
+    /* ── Spectator NPCs ─────────────────────────────────────────────
+       Three KayKit roster characters placed at a distance, watching the
+       duel. Pure environment props — NOT registered in `combatants`,
+       never receive damage or combat-loop animation overrides. Each
+       gets its own AnimationMixer pushed into `mixers` so the render
+       loop's mixer.update(dt) keeps their baked idle clips ticking.
+
+       Layout (duel anchor is roughly the log at world origin):
+         - Mage          (-6, 0, 5)  cool-side, facing the duel
+         - Rogue         ( 7, 0, 5)  warm-side, facing the duel
+         - Rogue_Hooded  ( 0, 0, 9)  behind/center, facing the duel
+
+       Scale 0.55 — smaller than the main combatants for depth/scale
+       relative to the centre log. Parented to a single `Spectators`
+       Group so future teardown is one scene.remove() away. Each load
+       is independently try/catch'd so one failure doesn't take the
+       others (or the scene) down. Idle clip lookup is tolerant:
+       findClip() already falls back from exact name → case-insensitive
+       substring, so 'IDLE' / '2H_Melee_Idle' / 'Idle' all resolve. */
+    const spectatorsGroup = new THREE.Group();
+    spectatorsGroup.name = 'Spectators';
+    scene.add(spectatorsGroup);
+
+    // Each entry: file path, world position, Y-rotation (radians) so
+    // the NPC faces the duel anchor near the log at the origin, and a
+    // list of candidate idle clip names tried in order.
+    const SPECTATOR_DEFS = [
+      {
+        file: 'assets/roster/Mage.glb',
+        pos:  new THREE.Vector3(-6, 0, 5),
+        rotY: Math.atan2(0 - (-6), 0 - 5), // face toward origin
+        idleCandidates: ['IDLE', '2H_Melee_Idle', 'Idle', 'Spellcast_Shoot'],
+        label: 'spectator-mage',
+      },
+      {
+        file: 'assets/roster/Rogue.glb',
+        pos:  new THREE.Vector3(7, 0, 5),
+        rotY: Math.atan2(0 - 7, 0 - 5),
+        idleCandidates: ['IDLE', '2H_Melee_Idle', 'Idle', 'Dualwield_Melee_Idle'],
+        label: 'spectator-rogue',
+      },
+      {
+        file: 'assets/roster/Rogue_Hooded.glb',
+        pos:  new THREE.Vector3(0, 0, 9),
+        rotY: Math.atan2(0 - 0, 0 - 9),
+        idleCandidates: ['IDLE', '2H_Melee_Idle', 'Idle', 'Dualwield_Melee_Idle'],
+        label: 'spectator-hooded',
+      },
+    ];
+
+    const SPECTATOR_SCALE = 0.55;
+
+    SPECTATOR_DEFS.forEach((def) => {
+      loader.load(
+        def.file,
+        (gltf) => {
+          try {
+            const root = gltf.scene;
+            root.position.copy(def.pos);
+            root.rotation.y = def.rotY;
+            root.scale.setScalar(SPECTATOR_SCALE);
+            applyShadows(root, true, true);
+            spectatorsGroup.add(root);
+
+            // Pick an idle clip — tolerant: walk the candidate list,
+            // and if none match, fall back to the first animation clip
+            // the GLB ships with. If the GLB has no animations at all,
+            // the spectator just stands as a static prop.
+            if (gltf.animations && gltf.animations.length > 0) {
+              const mixer = new THREE.AnimationMixer(root);
+              let clip = null;
+              for (const name of def.idleCandidates) {
+                clip = findClip(gltf.animations, name);
+                if (clip) break;
+              }
+              if (!clip) clip = gltf.animations[0];
+              if (clip) {
+                const action = mixer.clipAction(clip);
+                action.setLoop(THREE.LoopRepeat, Infinity);
+                // Tiny offset so the three spectators don't loop in
+                // perfect lock-step — staggers the breath cycle.
+                action.time = Math.random() * clip.duration;
+                action.play();
+                console.log(`[lkb-3d] ${def.label}: idle "${clip.name}"`);
+              }
+              mixers.push(mixer);
+            } else {
+              console.log(`[lkb-3d] ${def.label}: no animations baked, static prop`);
+            }
+          } catch (innerErr) {
+            // Single-spectator setup failure must not break the others
+            // or the scene. Log and move on.
+            console.warn(`[lkb-3d] ${def.label}: setup failed`, innerErr);
+          }
+        },
+        undefined,
+        (err) => {
+          console.warn(`[lkb-3d] failed to load ${def.file} (spectator)`, err);
+          // Spectators are not counted in TOTAL — no markLoaded() here.
+        }
+      );
+    });
+
     /* ── ROSTER opponent switching ──────────────────────────────────
        Lets the user swap the azure (right-hand) knight for any KayKit
        character bundled under assets/roster/. Boot default remains the
@@ -7127,6 +7335,7 @@
       updateEmbers(delta, time);
       updateTorches(delta, time);
       try { updateSnowGlint(delta, time); } catch (e) {}
+      try { updateAurora(delta, time); } catch (e) {}
 
       // ── CINEMA: combat sync ─────────────────────────────────────
       // Poll combat state and translate edges into director overrides:
