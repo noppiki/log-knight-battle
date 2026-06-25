@@ -4336,6 +4336,25 @@
       // (it just gets read by the renderer), so ensure it is now.
       if (!camera.parent) scene.add(camera);
       fpSwordClone = clone;
+      // r59: capture emissive baseline so setSwordEmissive can reliably restore
+      // to true defaults rather than whatever the live value happens to be at
+      // restore time (which would be wrong after rapid re-entry).
+      fpSwordClone._emissiveBase = [];
+      fpSwordClone.traverse((o) => {
+        if (o.isMesh && o.material) {
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (m.emissive) {
+              fpSwordClone._emissiveBase.push({
+                m,
+                color: m.emissive.getHex(),
+                intensity: m.emissiveIntensity != null ? m.emissiveIntensity : 1,
+              });
+            }
+          });
+        }
+      });
+      fpSwordClone._glowGen = 0; // re-entry token for glow cleanup
       // Wire up the sword-tip trail. We pass `scene` (not `camera`)
       // because we sample tip *world* positions and draw the line in
       // world space — anchoring under the camera would also rotate
@@ -6590,6 +6609,26 @@
       }
       // Wipe footprint decals from previous round so the ground reads clean.
       try { FootprintSystem.clearAllFootprints(); } catch (e) {}
+      // r59: dispose any in-flight sword afterimage ghosts left from the
+      // previous round (e.g. if round ended mid-fade). Walk scene top-level
+      // children so we don't chase into deeply nested groups.
+      try {
+        const ghosts = scene.children.filter((o) => o.name === 'sword_ghost');
+        ghosts.forEach((g) => {
+          scene.remove(g);
+          g.traverse((o) => {
+            if (!o.isMesh) return;
+            const mats = Array.isArray(o.material) ? o.material : [o.material];
+            mats.forEach((m) => { try { m.dispose(); } catch (_) {} });
+          });
+        });
+        // Also reset any stale emissive glow by bumping the generation token.
+        if (fpSwordClone) fpSwordClone._glowGen = (fpSwordClone._glowGen || 0) + 1;
+        (fpSwordClone?._emissiveBase || []).forEach((p) => {
+          p.m.emissive.setHex(p.color);
+          p.m.emissiveIntensity = p.intensity;
+        });
+      } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -7763,6 +7802,83 @@
       }, 1000);
     }
 
+    // ── r59: Sword swing afterimage + emissive glow ───────────────────────────
+    // spawnSwingAfterimage — clones fpSwordClone in world space (camera child)
+    // and fades it out over 300ms. 4 ghosts at 50ms intervals create a "heavy
+    // one-slash" motion smear typical of AAA fighters.
+    // Only spawned on tier 2 charge — tier 1/0 use emissive glow only.
+    function spawnSwingAfterimage() {
+      if (!fpSwordClone) return;
+      const ghost = fpSwordClone.clone(true);
+      ghost.name = 'sword_ghost'; // tag for resetMatch cleanup
+      ghost.traverse((o) => {
+        if (!o.isMesh) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        o.material = mats.map((m) => {
+          const mc = m.clone();
+          mc.transparent = true;
+          mc.opacity = 0.5;
+          mc.depthWrite = false;
+          mc.color = new THREE.Color(0xaaccff); // cyan tint
+          return mc;
+        });
+      });
+      // Snapshot world matrix: fpSwordClone is a camera child, so its
+      // matrixWorld holds the combined camera+local transform at this instant.
+      fpSwordClone.updateMatrixWorld(true);
+      ghost.matrixAutoUpdate = false;
+      ghost.matrix.copy(fpSwordClone.matrixWorld);
+      ghost.matrixWorldNeedsUpdate = true;
+      scene.add(ghost);
+      const start = performance.now();
+      const fade = () => {
+        const t = (performance.now() - start) / 300;
+        if (t >= 1) {
+          scene.remove(ghost);
+          ghost.traverse((o) => {
+            if (!o.isMesh) return;
+            const mats = Array.isArray(o.material) ? o.material : [o.material];
+            mats.forEach((m) => m.dispose());
+          });
+          return;
+        }
+        ghost.traverse((o) => {
+          if (!o.isMesh) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => { m.opacity = 0.5 * (1 - t); });
+        });
+        requestAnimationFrame(fade);
+      };
+      requestAnimationFrame(fade);
+    }
+
+    // setSwordEmissive — sets fpSwordClone's emissive color+intensity for
+    // durationMs, then restores to the true baseline captured at attachFpSword.
+    // Uses a generation token so rapid re-entry (two tier releases ~100ms apart)
+    // never restores to a mid-glow "prev" snapshot — same pattern as r56/r63.
+    function setSwordEmissive(color, intensity, durationMs) {
+      if (!fpSwordClone) return;
+      const gen = ++(fpSwordClone._glowGen);
+      fpSwordClone.traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach((m) => {
+          if (m.emissive) {
+            m.emissive.setHex(color);
+            m.emissiveIntensity = intensity;
+          }
+        });
+      });
+      setTimeout(() => {
+        // Only restore if no newer glow has been started since this call.
+        if (!fpSwordClone || fpSwordClone._glowGen !== gen) return;
+        (fpSwordClone._emissiveBase || []).forEach((p) => {
+          p.m.emissive.setHex(p.color);
+          p.m.emissiveIntensity = p.intensity;
+        });
+      }, durationMs);
+    }
+
     // Player-driven attack on crimson. Mirrors the swing → impact → damage
     // sequence from combatTick, but lets the defender (azure) keep whatever
     // state they're in (idle / guard / attack) so we don't yank them out
@@ -7852,6 +7968,24 @@
       // the rest pose to the first swing frame.
       if (weaponTrail) {
         try { weaponTrail.activate(); } catch (e) {}
+      }
+      // r59: sword emissive glow on charge release (tier 1 amber, tier 2 cyan).
+      // Emissive runs on top of the weapon trail — different blend path, no conflict.
+      if (myChargeTier >= 1) {
+        try {
+          if (myChargeTier >= 2) {
+            setSwordEmissive(0x4080aa, 0.7, 500); // cyan-white, 500ms
+          } else {
+            setSwordEmissive(0x442200, 0.4, 350); // amber, 350ms
+          }
+        } catch (e) {}
+      }
+      // r59: swing afterimage — tier 2 only: 4 ghost clones at 50ms intervals.
+      // Each freezes the sword's world matrix at spawn time → motion smear trail.
+      if (myChargeTier >= 2) {
+        for (let i = 0; i < 4; i++) {
+          setTimeout(() => { try { spawnSwingAfterimage(); } catch (e) {} }, i * 50);
+        }
       }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
