@@ -590,6 +590,103 @@
         rgba(110, 10, 10, 0.85) 100%);
       transition: opacity 400ms linear;
     }
+
+    /* Stamina (STM) bar — sits directly under the SP bar. Same chassis
+       as .sp-bar (300×8 px, inset shadow, dark border) but a green-
+       gradient fill so it reads as a separate resource at a glance.
+       Drained by attacks/guard, regen'd while idle (see animate()).
+       Iter-66: new survivability resource gating offence + defence. */
+    #game-hud .stm-bar {
+      width: 300px;
+      height: 8px;
+      background: #1f3520;
+      border: 3px solid #142014;
+      border-radius: 2px;
+      box-shadow:
+        inset 0 1px 2px rgba(0, 0, 0, 0.7),
+        0 2px 6px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+      position: relative;
+      margin-top: 3px;
+    }
+    #game-hud .stm-fill {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(to right, #4abb3a, #88e872);
+      transition: width 0.18s ease-out;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    }
+    #game-hud .player-card.right .stm-fill {
+      background: linear-gradient(to left, #4abb3a, #88e872);
+      margin-left: auto;
+    }
+    /* STM numeric label — small, sits to the right of the bar so the
+       row stays compact. Mirrors hp-num typography for consistency. */
+    #game-hud .stm-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 3px;
+    }
+    #game-hud .player-card.right .stm-row {
+      flex-direction: row-reverse;
+    }
+    #game-hud .stm-num {
+      color: #c8e8c0;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      text-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.9),
+        0 0 6px rgba(0, 0, 0, 0.7);
+      min-width: 64px;
+    }
+    #game-hud .player-card.right .stm-num {
+      text-align: right;
+    }
+
+    /* EXHAUSTED pill — transient center-top tooltip that flashes when
+       an action (attack / guard-enter) is blocked due to insufficient
+       stamina. JS spawns one .exhaust-pill, then strips it after 1s. */
+    .exhaust-pill {
+      position: fixed;
+      top: 22%;
+      left: 50%;
+      transform: translate(-50%, 0);
+      z-index: 60;
+      pointer-events: none;
+      padding: 6px 14px;
+      border-radius: 14px;
+      background: rgba(40, 22, 22, 0.92);
+      border: 2px solid #b85050;
+      color: #ffd6d6;
+      font: 700 13px/1 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow:
+        0 0 12px rgba(184, 80, 80, 0.55),
+        0 4px 10px rgba(0, 0, 0, 0.6);
+      animation: exhaustPillIn 1000ms ease-out forwards;
+    }
+    @keyframes exhaustPillIn {
+      0%   { opacity: 0; transform: translate(-50%, 6px) scale(0.92); }
+      15%  { opacity: 1; transform: translate(-50%, 0)   scale(1);    }
+      80%  { opacity: 1; transform: translate(-50%, 0)   scale(1);    }
+      100% { opacity: 0; transform: translate(-50%, -6px) scale(0.96);}
+    }
+
+    /* Reticle exhausted state — when stamina < ATTACK_COST the player
+       can't swing; we dim the reticle to a desaturated grey so the
+       affordance is obvious without a separate readout. Restored to
+       amber automatically once stamina recovers. */
+    #fp-reticle.exhausted::before,
+    #fp-reticle.exhausted::after,
+    #fp-reticle.exhausted #fp-reticle-dot {
+      background: rgba(150, 150, 150, 0.6);
+    }
   </style>
 
   <script type="importmap">
@@ -639,6 +736,10 @@
         <span class="hp-num" id="hp-num-crimson">100/100</span>
       </div>
       <div class="sp-bar"><div class="sp-fill" id="sp-fill-crimson"></div></div>
+      <div class="stm-row">
+        <div class="stm-bar"><div class="stm-fill" id="stm-fill-crimson"></div></div>
+        <span class="stm-num" id="stm-num-crimson">STM 100/100</span>
+      </div>
       <div class="win-pips" id="pips-crimson">
         <div class="win-pip" data-pip="0"></div>
         <div class="win-pip" data-pip="1"></div>
@@ -653,6 +754,10 @@
         <span class="hp-num" id="hp-num-azure">100/100</span>
       </div>
       <div class="sp-bar"><div class="sp-fill" id="sp-fill-azure"></div></div>
+      <div class="stm-row">
+        <div class="stm-bar"><div class="stm-fill" id="stm-fill-azure"></div></div>
+        <span class="stm-num" id="stm-num-azure">STM 100/100</span>
+      </div>
       <div class="win-pips" id="pips-azure">
         <div class="win-pip" data-pip="0"></div>
         <div class="win-pip" data-pip="1"></div>
@@ -2016,6 +2121,25 @@
     let fpSwordClone = null;
     let fpPendingAttach = false; // retry flag for boot-restore-before-load
 
+    // ── FP weapon swap (F key) ─────────────────────────────────────
+    // KayKit's crimson rig carries multiple sword meshes; we cycle through
+    // them as FP viewmodels. Names match KayKit exactly (case-sensitive on
+    // the exact-match path; the /sword/i regex fallback survives renames).
+    // Per-weapon transform tweaks live in FP_WEAPON_TRANSFORM — the 2H blade
+    // is longer so it needs more forward+down offset to read as "held".
+    const FP_WEAPONS = ['1H_Sword', '2H_Sword'];
+    const FP_WEAPON_TRANSFORM = {
+      '1H_Sword': { pos: [0.30, -0.35, -0.70], rot: [-Math.PI / 6, -Math.PI / 8, -Math.PI / 4] },
+      '2H_Sword': { pos: [0.35, -0.55, -0.95], rot: [-Math.PI / 5, -Math.PI / 9, -Math.PI / 4] },
+    };
+    const FP_WEAPON_DEFAULT_XFORM = FP_WEAPON_TRANSFORM['1H_Sword'];
+    let fpWeaponIndex = (() => {
+      try {
+        const n = parseInt(localStorage.getItem('lkb3d_fpweapon') || '0', 10);
+        return Number.isFinite(n) && n >= 0 && n < FP_WEAPONS.length ? n : 0;
+      } catch (e) { return 0; }
+    })();
+
     function setCrimsonSelfVisible(visible) {
       // TDZ guard: `combatants` is a `const` declared further down. If this
       // runs during the boot-restore path (saved viewMode === 'fp') BEFORE
@@ -2031,8 +2155,12 @@
       });
     }
 
-    function attachFpSword() {
+    function attachFpSword(weaponName) {
       if (fpSwordClone) return; // already attached
+      // Default to whichever weapon the user last picked (restored from
+      // localStorage at module init). Callers may override explicitly
+      // (e.g. swapFpWeapon passes the next entry directly).
+      const wantName = weaponName || FP_WEAPONS[fpWeaponIndex] || FP_WEAPONS[0];
       // TDZ guard mirrors setCrimsonSelfVisible — see comment there.
       let root = null;
       try { root = combatants?.crimson?.root; } catch (e) { /* TDZ — combatants not yet declared */ }
@@ -2052,24 +2180,33 @@
           fpPendingAttach = false;
           // Re-apply both sides (visibility + sword) now that the rig exists.
           setCrimsonSelfVisible(false);
-          attachFpSword();
+          attachFpSword(wantName);
         };
         setTimeout(tryLater, 150);
         return;
       }
-      // Find the first sword mesh by name (case-insensitive substring match).
+      // Prefer an exact name match (KayKit ships 1H_Sword / 2H_Sword as
+      // discrete meshes); if that fails — e.g. an asset rename — fall back
+      // to the round-20 behavior of "first mesh whose name contains sword".
       let swordSrc = null;
       root.traverse((o) => {
-        if (!swordSrc && o.isMesh && /sword/i.test(o.name)) swordSrc = o;
+        if (!swordSrc && o.isMesh && o.name === wantName) swordSrc = o;
       });
+      if (!swordSrc) {
+        root.traverse((o) => {
+          if (!swordSrc && o.isMesh && /sword/i.test(o.name)) swordSrc = o;
+        });
+      }
       if (!swordSrc) {
         console.warn('[fp] no Sword mesh found in crimson rig');
         return;
       }
       const clone = swordSrc.clone();
-      // Reset to a camera-local rest pose (right-hand grip, blade out & up).
-      clone.position.set(0.3, -0.35, -0.7);
-      clone.rotation.set(-Math.PI / 6, -Math.PI / 8, -Math.PI / 4);
+      // Per-weapon rest pose (right-hand grip, blade out & up). 2H needs
+      // more forward+down because the blade is longer.
+      const xform = FP_WEAPON_TRANSFORM[wantName] || FP_WEAPON_DEFAULT_XFORM;
+      clone.position.set(xform.pos[0], xform.pos[1], xform.pos[2]);
+      clone.rotation.set(xform.rot[0], xform.rot[1], xform.rot[2]);
       clone.scale.set(1.0, 1.0, 1.0);
       clone.visible = true;
       // Suppress self-shadowing of the world by the viewmodel.
@@ -2109,6 +2246,59 @@
       try { fpSwordClone.geometry?.dispose?.(); } catch (e) {}
       try { fpSwordClone.material?.dispose?.(); } catch (e) {}
       fpSwordClone = null;
+    }
+
+    // ── FP weapon-swap HUD pill ────────────────────────────────────
+    // Tiny dark-amber pill (matches #view-toggle styling) that fades in
+    // for ~1.5s when F is pressed. Lazily created on first use so the
+    // DOM stays clean for users who never swap.
+    let _fpWeaponPillEl = null;
+    let _fpWeaponPillTimer = 0;
+    function showFpWeaponPill(text) {
+      if (!_fpWeaponPillEl) {
+        const el = document.createElement('div');
+        el.id = 'fp-weapon-pill';
+        // Inline styles — keeps the change to a single block of code.
+        Object.assign(el.style, {
+          position: 'fixed',
+          top: '52px',
+          right: '14px',
+          zIndex: '30',
+          pointerEvents: 'none',
+          color: '#e8dcc0',
+          background: 'rgba(20, 20, 30, 0.85)',
+          border: '1px solid rgba(216, 164, 90, 0.8)',
+          borderRadius: '4px',
+          padding: '6px 12px',
+          font: "bold 11px/1.2 'Trebuchet MS', Verdana, sans-serif",
+          letterSpacing: '0.08em',
+          textShadow: '0 1px 2px rgba(0, 0, 0, 0.9)',
+          boxShadow: '0 4px 16px rgba(0, 0, 0, 0.6)',
+          whiteSpace: 'nowrap',
+          opacity: '0',
+          transition: 'opacity 0.18s ease-out',
+        });
+        document.body.appendChild(el);
+        _fpWeaponPillEl = el;
+      }
+      _fpWeaponPillEl.textContent = text;
+      _fpWeaponPillEl.style.opacity = '1';
+      if (_fpWeaponPillTimer) clearTimeout(_fpWeaponPillTimer);
+      _fpWeaponPillTimer = setTimeout(() => {
+        if (_fpWeaponPillEl) _fpWeaponPillEl.style.opacity = '0';
+        _fpWeaponPillTimer = 0;
+      }, 1500);
+    }
+
+    // swapFpWeapon — F-key handler. Only meaningful in FP mode; the
+    // keydown listener gates this on fpInputActive() already.
+    function swapFpWeapon() {
+      detachFpSword();
+      fpWeaponIndex = (fpWeaponIndex + 1) % FP_WEAPONS.length;
+      try { localStorage.setItem('lkb3d_fpweapon', String(fpWeaponIndex)); } catch (e) {}
+      const name = FP_WEAPONS[fpWeaponIndex];
+      attachFpSword(name);
+      showFpWeaponPill('WEAPON: ' + name);
     }
 
     // Cycle order: A → B → A → C → A → D (loops back to A).
@@ -2978,8 +3168,12 @@
        cycle when a knight falls. The combat tick (below) calls into
        applyDamage and bumps SP on every contact frame. */
     window.gameState = {
-      crimson: { hp: 100, sp: 0, dead: false, wins: 0 },
-      azure:   { hp: 100, sp: 0, dead: false, wins: 0 },
+      // stamina: iter-66 third resource. Drained by attacks (-20 per
+      // swing) and guard (-10/s while held); regenerates +25/s while
+      // idle. Tracked on both knights for parity even though the CPU
+      // azure currently ignores it (no cost gating on combatTick).
+      crimson: { hp: 100, sp: 0, stamina: 100, dead: false, wins: 0 },
+      azure:   { hp: 100, sp: 0, stamina: 100, dead: false, wins: 0 },
       // Round counter — starts at 1 on initial load, incremented by
       // resetMatch() on each new round, and forced back to 1 by
       // resetFullMatch() after a MATCH WON.
@@ -2987,6 +3181,11 @@
     };
     const HP_MAX = 100;
     const SP_MAX = 100;
+    const STM_MAX = 100;
+    // Stamina tuning — see playerAttack / playerGuardEnter / animate().
+    const STM_ATTACK_COST = 20;       // per swing
+    const STM_GUARD_DRAIN = 10;       // per second while guarding
+    const STM_IDLE_REGEN  = 25;       // per second while not attacking/guarding
     const WINS_MAX = 3;
     const koOverlay = document.getElementById('ko-overlay');
     const matchWonOverlay = document.getElementById('match-won-overlay');
@@ -2998,6 +3197,14 @@
     const spFill = {
       crimson: document.getElementById('sp-fill-crimson'),
       azure:   document.getElementById('sp-fill-azure'),
+    };
+    const stmFill = {
+      crimson: document.getElementById('stm-fill-crimson'),
+      azure:   document.getElementById('stm-fill-azure'),
+    };
+    const stmNum = {
+      crimson: document.getElementById('stm-num-crimson'),
+      azure:   document.getElementById('stm-num-azure'),
     };
     const hpNum = {
       crimson: document.getElementById('hp-num-crimson'),
@@ -3013,6 +3220,12 @@
         const s = window.gameState[id];
         if (hpFill[id]) hpFill[id].style.width = (s.hp / HP_MAX * 100) + '%';
         if (spFill[id]) spFill[id].style.width = (s.sp / SP_MAX * 100) + '%';
+        // Stamina bar + numeric "STM xx/100" readout. Clamped so the
+        // float values produced by the per-frame drain/regen tween
+        // never render a "100.4" or negative width.
+        const stmClamped = Math.max(0, Math.min(STM_MAX, s.stamina != null ? s.stamina : STM_MAX));
+        if (stmFill[id]) stmFill[id].style.width = (stmClamped / STM_MAX * 100) + '%';
+        if (stmNum[id])  stmNum[id].textContent  = 'STM ' + Math.round(stmClamped) + '/' + STM_MAX;
         // HP numeric readout
         if (hpNum[id]) hpNum[id].textContent = Math.ceil(s.hp) + '/' + HP_MAX;
         // Win pips — fill each pip up to wins count
@@ -3084,9 +3297,10 @@
     function resetMatch() {
       for (const id of ['crimson', 'azure']) {
         const s = window.gameState[id];
-        s.hp   = HP_MAX;
-        s.sp   = 0;
-        s.dead = false;
+        s.hp      = HP_MAX;
+        s.sp      = 0;
+        s.stamina = STM_MAX;  // iter-66: refill stamina between rounds
+        s.dead    = false;
         // wins is intentionally NOT reset here — persists until match end
       }
       updateGaugeDOM();
@@ -3436,6 +3650,30 @@
       return cameraDirector && cameraDirector.viewMode === 'fp' && window._mouseLocked;
     }
 
+    // ── stamina FX ──────────────────────────────────────────────
+    // showExhaustPill — transient center-top "EXHAUSTED" badge that
+    // flashes whenever an action is blocked by zero/low stamina. We
+    // dedupe by holding at most one live pill at a time: a fresh
+    // call replaces the in-flight one so rapid mashing doesn't stack.
+    let _exhaustPillEl = null;
+    let _exhaustPillTimer = null;
+    function showExhaustPill(label) {
+      if (_exhaustPillTimer) { clearTimeout(_exhaustPillTimer); _exhaustPillTimer = null; }
+      if (_exhaustPillEl && _exhaustPillEl.parentNode) {
+        _exhaustPillEl.parentNode.removeChild(_exhaustPillEl);
+      }
+      const el = document.createElement('div');
+      el.className = 'exhaust-pill';
+      el.textContent = label || 'EXHAUSTED';
+      document.body.appendChild(el);
+      _exhaustPillEl = el;
+      _exhaustPillTimer = setTimeout(() => {
+        if (el.parentNode) el.parentNode.removeChild(el);
+        if (_exhaustPillEl === el) _exhaustPillEl = null;
+        _exhaustPillTimer = null;
+      }, 1000);
+    }
+
     // Player-driven attack on crimson. Mirrors the swing → impact → damage
     // sequence from combatTick, but lets the defender (azure) keep whatever
     // state they're in (idle / guard / attack) so we don't yank them out
@@ -3447,6 +3685,16 @@
       if (window.gameState.crimson.dead || window.gameState.azure.dead) return;
       // Debounce — ignore if already mid-swing or guarding.
       if (attacker.state === 'attack' || attacker.state === 'guard') return;
+      // Iter-66: stamina gate. Cheap clack + "EXHAUSTED" pill when the
+      // player tries to swing under the cost floor; no state change.
+      const stmState = window.gameState.crimson;
+      if (stmState.stamina < STM_ATTACK_COST) {
+        showExhaustPill('EXHAUSTED');
+        try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
+        return;
+      }
+      stmState.stamina = Math.max(0, stmState.stamina - STM_ATTACK_COST);
+      try { updateGaugeDOM(); } catch (e) {}
 
       try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
       // Footstep thud — adds weight to the player's windup plant.
@@ -3525,6 +3773,14 @@
       if (!c) return;
       if (window.gameState.crimson.dead) return;
       if (c.state === 'attack') return; // can't guard mid-swing
+      // Iter-66: stamina gate — can't raise guard at zero stamina.
+      // The per-frame drain in animate() handles auto-release if the
+      // guard exhausts mid-hold; this block only catches fresh presses.
+      const stmState = window.gameState.crimson;
+      if (stmState.stamina <= 0) {
+        showExhaustPill('EXHAUSTED');
+        return;
+      }
       c.state = 'guard';
       playClip(c, CLIP_NAMES.BLOCK, { fadeIn: 0.12, loop: true, weight: 1.0 });
     }
@@ -3554,6 +3810,10 @@
         if (playerInput.eHeld) return;
         playerInput.eHeld = true;
         playerGuardEnter();
+      } else if (e.code === 'KeyF') {
+        if (e.repeat) return;
+        e.preventDefault();
+        swapFpWeapon();
       }
     });
 
@@ -3758,6 +4018,47 @@
       // Advance every animation mixer (knights' idle, log if anim'd, etc.)
       if (mixers.length > 0) {
         mixers.forEach(m => m.update(delta));
+      }
+      // ── stamina tick ─────────────────────────────────────────────
+      // Per-frame stamina drain/regen for both knights. Costs:
+      //   guard  → -STM_GUARD_DRAIN/s, auto-release at 0 + exhaust pill
+      //   else   → +STM_IDLE_REGEN/s (capped at STM_MAX)
+      // Attack cost (-20) is consumed at swing-start in playerAttack().
+      // We process both sides for parity even though CPU azure never
+      // hits exhaustion at current pacing; future CPU tuning can read
+      // window.gameState.azure.stamina without code changes here.
+      if (window.gameState && combatants) {
+        let stmDirty = false;
+        for (const id of ['crimson', 'azure']) {
+          const s = window.gameState[id];
+          if (!s || s.dead) continue;
+          const c = combatants[id];
+          const cstate = c ? c.state : null;
+          const before = s.stamina;
+          if (cstate === 'guard') {
+            s.stamina = Math.max(0, s.stamina - STM_GUARD_DRAIN * delta);
+            if (s.stamina <= 0 && id === 'crimson') {
+              // Force-release the player's guard when fully exhausted
+              // and surface the "EXHAUSTED" pill. playerInput.eHeld is
+              // kept true so the player must re-press E once stamina
+              // recovers — same affordance as the attack gate.
+              try { playerGuardExit(); } catch (e) {}
+              showExhaustPill('EXHAUSTED');
+            }
+          } else if (cstate !== 'attack' && cstate !== 'hit' && cstate !== 'dead') {
+            s.stamina = Math.min(STM_MAX, s.stamina + STM_IDLE_REGEN * delta);
+          }
+          if (s.stamina !== before) stmDirty = true;
+        }
+        if (stmDirty) {
+          try { updateGaugeDOM(); } catch (e) {}
+        }
+        // Reticle exhausted dimming — driven off crimson's stamina vs
+        // the attack cost so the visual matches the gate in playerAttack.
+        if (FpPolish && FpPolish.reticleEl) {
+          const exh = window.gameState.crimson.stamina < STM_ATTACK_COST;
+          FpPolish.reticleEl.classList.toggle('exhausted', exh);
+        }
       }
       updateDust(delta);
       updateEmbers(delta, time);
