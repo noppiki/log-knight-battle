@@ -32,19 +32,21 @@
       right: 18px;
       z-index: 20;
       color: #e8dcc0;
-      background: rgba(26, 31, 46, 0.72);
-      border: 1px solid rgba(216, 164, 90, 0.38);
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.7);
       border-radius: 4px;
-      padding: 5px 12px;
+      padding: 8px 14px;
       font-size: 12px;
       font-family: 'Trebuchet MS', Verdana, sans-serif;
       font-weight: bold;
       letter-spacing: 0.04em;
       text-decoration: none;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
       transition: background 0.15s, color 0.15s;
     }
     #back-link:hover {
-      background: rgba(216, 164, 90, 0.22);
+      background: rgba(40, 40, 55, 0.9);
       color: #d8a45a;
     }
 
@@ -55,21 +57,45 @@
       left: 18px;
       z-index: 20;
       color: #e8dcc0;
-      background: rgba(26, 31, 46, 0.72);
-      border: 1px solid rgba(216, 164, 90, 0.28);
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.8);
       border-radius: 4px;
-      padding: 6px 13px;
+      padding: 8px 14px;
       font-size: 11px;
       font-weight: bold;
       letter-spacing: 0.06em;
       line-height: 1.5;
       pointer-events: none;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
     }
     #hud .label {
       color: #d8a45a;
       font-size: 10px;
-      letter-spacing: 0.1em;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
+    }
+
+    /* ── vignette anchors ───────────────────────────────────────── */
+    #vignette-bottom {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      z-index: 10;
+      pointer-events: none;
+      background: linear-gradient(to top, rgba(0, 0, 0, 0.5), transparent);
+    }
+    #vignette-top-right {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 200px;
+      height: 80px;
+      z-index: 10;
+      pointer-events: none;
+      background: linear-gradient(to bottom left, rgba(0, 0, 0, 0.45), transparent);
     }
 
     /* ── loading overlay ────────────────────────────────────────── */
@@ -121,6 +147,9 @@
 
   <div id="canvas-host"></div>
 
+  <div id="vignette-bottom"></div>
+  <div id="vignette-top-right"></div>
+
   <a id="back-link" href="../index.html">&#x2190; back to 2D</a>
 
   <div id="hud">
@@ -145,11 +174,11 @@
 
     /* ── renderer ──────────────────────────────────────────────── */
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
     renderer.toneMapping       = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.35;  // HDRI envs tend to need slight lift
+    renderer.toneMappingExposure = 1.5;   // warmer dusk lift
     renderer.outputColorSpace  = THREE.SRGBColorSpace;
 
     const host = document.getElementById('canvas-host');
@@ -171,7 +200,8 @@
 
     /* ── scene ─────────────────────────────────────────────────── */
     const scene = new THREE.Scene();
-    scene.environment = fallbackEnvTex;  // will be replaced by HDR PMREM on success
+    scene.environment  = fallbackEnvTex;  // will be replaced by HDR PMREM on success
+    scene.background   = fallbackEnvTex;  // show env as visible sky; replaced by HDRI on load
     scene.environmentIntensity = 1.0;    // Three r150+ scene-level prop
 
     // Async HDRI load — non-blocking; falls back gracefully on 404 / parse fail.
@@ -181,13 +211,14 @@
         hdrTex.mapping = THREE.EquirectangularReflectionMapping;
         const pmremTex = pmrem.fromEquirectangular(hdrTex).texture;
         scene.environment = pmremTex;
+        scene.background  = pmremTex;  // HDRI becomes the visible sky
         hdrTex.dispose();
         console.log('[lkb-3d] HDRI env_dusk.hdr loaded');
       },
       undefined,
       (err) => {
         console.warn('[lkb-3d] env_dusk.hdr load failed, keeping RoomEnvironment fallback', err);
-        // fallbackEnvTex already assigned to scene.environment — nothing to do.
+        // fallbackEnvTex already assigned to scene.environment / scene.background — nothing to do.
       }
     );
 
@@ -234,10 +265,11 @@
       `
     });
     const skyDome = new THREE.Mesh(skyGeo, skyMat);
-    scene.add(skyDome);
+    // scene.add(skyDome); // disabled: HDRI (scene.background = pmremTex) is now the visible sky.
+    //                      // The gradient skydome was competing with the HDRI horizon.
 
-    // Fog for depth
-    scene.fog = new THREE.FogExp2(0x3a3548, 0.018);
+    // Cool dusk fog — fades the far end of the log into atmosphere.
+    scene.fog = new THREE.FogExp2(0x9098a8, 0.006);
 
     /* ── lighting ──────────────────────────────────────────────── */
     // Hemisphere: sky cool-blue, ground warm terracotta
@@ -248,14 +280,14 @@
     const sun = new THREE.DirectionalLight(0xffc88a, 2.2);
     sun.position.set(6, 5, -4);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far  = 50;
-    sun.shadow.camera.left   = -12;
-    sun.shadow.camera.right  =  12;
-    sun.shadow.camera.top    =  12;
-    sun.shadow.camera.bottom = -12;
-    sun.shadow.bias = -0.001;
+    sun.shadow.mapSize.set(4096, 4096); // high-res shadow map
+    sun.shadow.camera.near   = 0.5;
+    sun.shadow.camera.far    = 30;      // tightened from 50 to reduce bias artifacts
+    sun.shadow.camera.left   = -10;
+    sun.shadow.camera.right  =  10;
+    sun.shadow.camera.top    =  10;
+    sun.shadow.camera.bottom = -10;
+    sun.shadow.bias = -0.0003;          // tightened from -0.001
     scene.add(sun);
 
     // Warm rim fill from front-left
@@ -265,10 +297,24 @@
 
     /* ── ground ────────────────────────────────────────────────── */
     const groundGeo = new THREE.PlaneGeometry(40, 40);
+    const texLoader = new THREE.TextureLoader();
+    function loadGroundTex(path) {
+      const t = texLoader.load(path);
+      t.wrapS = THREE.RepeatWrapping;
+      t.wrapT = THREE.RepeatWrapping;
+      t.repeat.set(8, 8);
+      return t;
+    }
+    const groundColorTex    = loadGroundTex('assets/tex/ground_color.jpg');
+    const groundNormalTex   = loadGroundTex('assets/tex/ground_normal.jpg');
+    const groundRoughTex    = loadGroundTex('assets/tex/ground_roughness.jpg');
+    groundColorTex.colorSpace = THREE.SRGBColorSpace;
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0x2c3848,
-      roughness: 0.92,
-      metalness: 0.0,
+      map:         groundColorTex,
+      normalMap:   groundNormalTex,
+      roughnessMap: groundRoughTex,
+      roughness:   1.0,
+      metalness:   0.0,
     });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
@@ -276,22 +322,24 @@
     scene.add(ground);
 
     /* ── camera ────────────────────────────────────────────────── */
-    // Iter 67: reframed for duel staging — symmetric centred composition,
-    // mild tele compression (fov 35) for cinematic feel.
-    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 200);
-    camera.position.set(0, 2.0, -7.5);
-    camera.lookAt(0, 1.0, 0);
+    // Iter 69: pull back to frame both knights (±2 m spread) comfortably
+    // in 1600×900. fov 38 gives breathing room; target raised to 1.1 so
+    // the log dominates the lower third.
+    const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 200);
+    camera.position.set(0, 2.0, -7.0);
+    camera.lookAt(0, 1.1, 0);
+    camera.updateProjectionMatrix();
 
     /* ── orbit controls (inspection helper) ────────────────────── */
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0, 1.0, 0);
+    controls.target.set(0, 1.1, 0);
     controls.enableDamping   = true;
     controls.dampingFactor   = 0.07;
-    controls.minDistance     = 1.5;
-    controls.maxDistance     = 20;
+    controls.minDistance     = 3.5;
+    controls.maxDistance     = 16;
     controls.maxPolarAngle   = Math.PI * 0.78; // don't go below ground
     controls.autoRotate      = true;
-    controls.autoRotateSpeed = 0.3;
+    controls.autoRotateSpeed = 0.0; // static for capture clarity
     controls.update();
 
     /* ── post-processing chain (EffectComposer) ────────────────── */
@@ -309,8 +357,8 @@
 
     // SSAO — contact occlusion for grounded look. Specs don't matter, keep ON.
     const ssaoPass = new SSAOPass(scene, camera, initialW, initialH);
-    ssaoPass.kernelRadius = 6;
-    ssaoPass.minDistance  = 0.005;
+    ssaoPass.kernelRadius = 5;
+    ssaoPass.minDistance  = 0.003;
     ssaoPass.maxDistance  = 0.1;
     composer.addPass(ssaoPass);
 
@@ -319,9 +367,9 @@
     // over-bloom blurs sprite/edge detail.
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(initialW, initialH),
-      0.45,  // strength
+      0.5,   // strength
       0.6,   // radius
-      0.82   // threshold
+      0.78   // threshold
     );
     composer.addPass(bloomPass);
 
@@ -456,7 +504,7 @@
     let dustParticles = null;
     let dustVelocities = null;
     try {
-      const DUST_COUNT = 800;
+      const DUST_COUNT = 1500;
       const dustGeo = new THREE.BufferGeometry();
       const positions = new Float32Array(DUST_COUNT * 3);
       dustVelocities = new Float32Array(DUST_COUNT);
@@ -473,10 +521,10 @@
 
       const dustMat = new THREE.PointsMaterial({
         color: 0xd8c8b8,
-        size: 0.05,
+        size: 0.07,
         sizeAttenuation: true,
         transparent: true,
-        opacity: 0.75,
+        opacity: 0.85,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
