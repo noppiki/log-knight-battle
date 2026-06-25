@@ -10174,6 +10174,48 @@
       azure:   document.querySelectorAll('#pips-azure   .win-pip'),
     };
 
+    // r152: azure HP fill 3-tone color shift — smoothly lerps between
+    //   blue (>50%) → amber (25-50%) → red (≤25%) via CSS background inline.
+    //   Uses smooth continuous interpolation so the shift is never abrupt.
+    //   box-shadow (desperate-pulse / hit-flash / heal-pulse) is untouched.
+    function _lerpHex(a, b, t) {
+      // Linearly interpolate each RGB channel between two [r,g,b] arrays.
+      return [
+        Math.round(a[0] + (b[0] - a[0]) * t),
+        Math.round(a[1] + (b[1] - a[1]) * t),
+        Math.round(a[2] + (b[2] - a[2]) * t),
+      ];
+    }
+    function _rgb(c) { return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+    // Palette: [highlight, shadow] for each tier (to/from direction = left)
+    const _AZ_HP_COL = {
+      blue:  { hi: [104, 128, 255], sh: [48, 80, 168] },  // normal (≥50%)
+      amber: { hi: [220, 160, 80],  sh: [176, 112, 36] }, // warning (25-50%)
+      red:   { hi: [220, 60,  60],  sh: [138, 24,  24] }, // desperate (≤25%)
+    };
+    function updateAzureHpFillColor(ratio) {
+      const el = hpFill.azure;
+      if (!el) return;
+      let hi, sh;
+      if (ratio >= 0.5) {
+        // full blue — no tint needed; removing inline style lets CSS rule take over
+        el.style.background = '';
+        return;
+      } else if (ratio >= 0.25) {
+        // blue → amber lerp within [0.25, 0.5]
+        const t = 1 - (ratio - 0.25) / 0.25; // 0 at 0.5, 1 at 0.25
+        hi = _lerpHex(_AZ_HP_COL.blue.hi, _AZ_HP_COL.amber.hi, t);
+        sh = _lerpHex(_AZ_HP_COL.blue.sh, _AZ_HP_COL.amber.sh, t);
+      } else {
+        // amber → red lerp within [0, 0.25]
+        const t = 1 - ratio / 0.25; // 0 at 0.25, 1 at 0
+        hi = _lerpHex(_AZ_HP_COL.amber.hi, _AZ_HP_COL.red.hi, t);
+        sh = _lerpHex(_AZ_HP_COL.amber.sh, _AZ_HP_COL.red.sh, t);
+      }
+      // azure bar shrinks from the right (margin-left:auto), gradient direction to left
+      el.style.background = 'linear-gradient(to left, ' + _rgb(sh) + ', ' + _rgb(hi) + ')';
+    }
+
     function updateGaugeDOM() {
       for (const id of ['crimson', 'azure']) {
         const s = window.gameState[id];
@@ -10194,6 +10236,9 @@
           });
         }
       }
+      // r152: update azure HP bar fill color based on current HP ratio
+      const azRatio = Math.max(0, Math.min(1, window.gameState.azure.hp / HP_MAX));
+      updateAzureHpFillColor(azRatio);
     }
     updateGaugeDOM();
 
