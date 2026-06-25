@@ -11755,6 +11755,9 @@
               tone({ freq: 76, freq2: 48, dur: 0.065, type: 'sawtooth', vol: 0.06, attack: 0.005 });
             } catch (e) {}
           }, 125);
+          // r138: approach hiss sfx — 3-5kHz bandpass noise, 200ms "ザザッ" air-rush layer.
+          // attack 30ms / long fade-out / vol 0.04 — sfxGain → globalGain (mute-compliant).
+          noise({ dur: 0.20, vol: 0.04, type: 'bandpass', freqStart: 5000, freqEnd: 3000, q: 0.7, attack: 0.03 });
 
           // State guard: mark 'moving' so combatTick defers re-entry.
           attacker.state = 'moving';
