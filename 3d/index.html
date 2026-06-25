@@ -802,6 +802,46 @@
       18%  { transform: translate(-50%, -8px)  scale(1.0);  opacity: 1; }
       100% { transform: translate(-50%, -60px) scale(0.95); opacity: 0; }
     }
+    /* ── r58: kind-specific floater modifiers ─────────────────────────
+       Modifier classes override the base .dmg-floater color/size.
+       Specificity 0-2-0 beats base 0-1-0 → always wins.             */
+    .dmg-floater.kind-normal {
+      color: #ffffff;
+      font-size: 32px;
+      text-shadow: 0 0 8px rgba(0,0,0,0.7);
+    }
+    .dmg-floater.kind-charge1 {
+      color: #ffb060;
+      font-size: 36px;
+      font-weight: bold;
+      text-shadow: 0 0 12px rgba(255,144,40,0.8), 0 3px 0 #1a0800;
+    }
+    .dmg-floater.kind-charge2 {
+      color: #c6f0ff;
+      font-size: 42px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      text-shadow: 0 0 18px rgba(180,230,255,0.95), 0 0 6px rgba(100,200,255,0.7), 0 4px 0 #001a2a;
+    }
+    .dmg-floater.kind-parry {
+      color: #66ddff;
+      font-size: 28px;
+      font-style: italic;
+      text-shadow: 0 0 10px rgba(102,221,255,0.85), 0 2px 0 #001520;
+    }
+    .dmg-floater.kind-taken {
+      color: #ff5555;
+      font-size: 32px;
+      text-shadow: 0 0 10px rgba(255,80,80,0.8), 0 3px 0 #1a0000;
+    }
+    .dmg-floater .caption {
+      font-size: 0.55em;
+      opacity: 0.85;
+      margin-top: 2px;
+      letter-spacing: 0.08em;
+      display: block;
+      font-style: normal;
+    }
 
     /* ── ROUND N banner — center overlay shown on each round start
          (and on initial page load). Engraved-metal palette matches the
@@ -4672,8 +4712,8 @@
       attacker.state = 'idle';
       try { playClip(attacker, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true }); } catch (e) {}
 
-      // ── 4) Counter damage to azure (3 HP) ───────────────────────────
-      try { window.applyDamage(attackerLabel, 3); } catch (e) {}
+      // ── 4) Counter damage to azure (3 HP) — r58: parry kind + RIPOSTE caption
+      try { window.applyDamage(attackerLabel, 3, { kind: 'parry', caption: 'RIPOSTE' }); } catch (e) {}
 
       // ── 5) Cyan-white parry flash ────────────────────────────────────
       const flashEl = FpPolish.parryFlashEl;
@@ -6441,7 +6481,9 @@
     // animation (0.6s) plus a small safety margin. Skipped silently if
     // the defender root isn't ready yet (e.g. mid-load).
     const _DMG_FLOAT_LIFE_MS = 650;
-    function showDamageFloater(defenderId, amount) {
+    // r58: opts = { kind: 'normal'|'charge1'|'charge2'|'parry'|'taken', caption: string|null }
+    // Backward-compatible: showDamageFloater(id, amount) still works (opts omitted → kind-normal).
+    function showDamageFloater(defenderId, amount, opts) {
       const c = combatants[defenderId];
       const root = c && c.root;
       if (!root) return;
@@ -6454,8 +6496,12 @@
       const sx = (ndc.x * 0.5 + 0.5) * rect.width  + rect.left;
       const sy = (-ndc.y * 0.5 + 0.5) * rect.height + rect.top - 100; // -100px above head
       const el = document.createElement('span');
-      el.className = 'dmg-floater';
-      el.textContent = '-' + Math.ceil(amount);
+      const kind    = (opts && opts.kind)    || 'normal';
+      const caption = (opts && opts.caption) || null;
+      el.className = 'dmg-floater kind-' + kind;
+      // Build inner HTML: number span + optional caption line.
+      el.innerHTML = '-' + Math.ceil(amount) +
+        (caption ? '<span class="caption">' + caption + '</span>' : '');
       el.style.left = sx + 'px';
       el.style.top  = sy + 'px';
       document.body.appendChild(el);
@@ -6793,7 +6839,10 @@
     // applyDamage — single source of truth for HP changes. Skips if
     // the defender is already down so a late-arriving impact doesn't
     // re-fire Death_A on the same knight.
-    window.applyDamage = function applyDamage(defenderId, amount) {
+    // r58: opts = { kind: 'normal'|'charge1'|'charge2'|'parry'|'taken', caption: string|null }
+    // Backward-compatible — existing 2-arg callers continue to work; kind defaults to 'normal'.
+    // 'taken' is auto-forced when defenderId === 'crimson' so all call-sites self-correct.
+    window.applyDamage = function applyDamage(defenderId, amount, opts) {
       const s = window.gameState[defenderId];
       if (!s || s.dead) return;
       // Guard absorbs the hit — chip damage only (20%) plus a clang sfx
@@ -6844,7 +6893,11 @@
       updateGaugeDOM();
       // Spawn a floating "-N" above the defender's head. Best-effort —
       // bails internally if the combatant root isn't ready yet.
-      showDamageFloater(defenderId, amount);
+      // r58: resolve kind — crimson always shows 'taken'; otherwise use
+      // caller-supplied kind (charge tier diff or parry) or 'normal'.
+      const _floatKind    = defenderId === 'crimson' ? 'taken' : ((opts && opts.kind) || 'normal');
+      const _floatCaption = (opts && opts.caption) || null;
+      showDamageFloater(defenderId, amount, { kind: _floatKind, caption: _floatCaption });
       // r54: combo counter — increment when player (crimson) lands an
       // unguarded hit on azure. Guarded hits reset the chain because
       // guard-absorbed damage breaks the "clean" streak feel.
@@ -7839,9 +7892,9 @@
         }
         // r47: microshake — boost shake amplitude when the PLAYER lands a hit
         // so the impact feels meatier than the baseline triggerImpact shake.
-        // r55: tier2 = extra hard shake
-        const shakeAmp = myChargeTier >= 2 ? 0.20 : (myChargeTier >= 1 ? 0.15 : 0.12);
-        const shakeDur = myChargeTier >= 2 ? 0.18 : 0.09;
+        // r55: tier2 = extra hard shake; r58: tier2 amplitude bumped 0.20→0.26 (crit)
+        const shakeAmp = myChargeTier >= 2 ? 0.26 : (myChargeTier >= 1 ? 0.15 : 0.12);
+        const shakeDur = myChargeTier >= 2 ? 0.22 : 0.09;
         try {
           if (impactSystem && impactSystem.shake) {
             impactSystem.shake.amplitude = shakeAmp;
@@ -7850,9 +7903,11 @@
           }
         } catch (e) {}
         // r55: tier-scaled damage: tier0=8, tier1=12, tier2=16
+        // r58: pass kind so floater shows correct color/size (charge1/charge2/normal)
         const tierDamage = myChargeTier === 2 ? 16 : (myChargeTier === 1 ? 12 : 8);
+        const hitKind    = myChargeTier >= 2 ? 'charge2' : (myChargeTier >= 1 ? 'charge1' : 'normal');
         try {
-          window.applyDamage('azure', tierDamage);
+          window.applyDamage('azure', tierDamage, { kind: hitKind });
           gainSP('crimson', 5);
           gainSP('azure', 5);
         } catch (err) { console.warn('[lkb-3d] HUD update threw', err); }
