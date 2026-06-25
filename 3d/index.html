@@ -220,6 +220,49 @@
       background: rgba(60, 45, 25, 1);
       border-color: rgba(255, 196, 120, 1);
     }
+    /* ── r69: difficulty selector ─────────────────────────────── */
+    #sp-difficulty-btns {
+      display: flex;
+      gap: 8px;
+      flex: 1 1 auto;
+    }
+    .sp-diff-btn {
+      flex: 1 1 0;
+      padding: 5px 4px;
+      background: rgba(30, 24, 18, 0.9);
+      color: rgba(232, 220, 192, 0.65);
+      border: 1px solid rgba(216, 164, 90, 0.35);
+      border-radius: 4px;
+      font: 700 10px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
+    }
+    .sp-diff-btn:hover {
+      background: rgba(50, 38, 24, 0.95);
+      border-color: rgba(216, 164, 90, 0.65);
+      color: #e8dcc0;
+    }
+    .sp-diff-btn.selected {
+      background: rgba(60, 44, 20, 0.95);
+      border-color: rgba(216, 164, 90, 1.0);
+      color: #f0e0a8;
+      box-shadow: 0 0 6px rgba(216, 164, 90, 0.4);
+    }
+    /* In-match difficulty pill (FP mode) */
+    #fp-diff-pill {
+      position: fixed;
+      bottom: 200px;
+      right: 24px;
+      z-index: 24;
+      pointer-events: none;
+      font: 700 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.10em;
+      color: rgba(216, 164, 90, 0.70);
+      text-transform: uppercase;
+    }
+    body:not(.fp-mode) #fp-diff-pill { display: none; }
 
     /* ── bottom-left HUD strip ──────────────────────────────────── */
     #hud {
@@ -1693,6 +1736,15 @@
       <input type="checkbox" id="sp-mute">
       <span class="sp-value" id="sp-mute-val">OFF</span>
     </div>
+    <!-- r69: difficulty selector -->
+    <div class="sp-row">
+      <span class="sp-label">Difficulty</span>
+      <div id="sp-difficulty-btns">
+        <button type="button" class="sp-diff-btn" data-diff="easy">Easy</button>
+        <button type="button" class="sp-diff-btn" data-diff="normal">Normal</button>
+        <button type="button" class="sp-diff-btn" data-diff="hard">Hard</button>
+      </div>
+    </div>
     <div class="sp-row" style="margin-top:18px;">
       <span class="sp-label">Record</span>
       <button type="button" id="sp-reset-record-btn"
@@ -1823,6 +1875,9 @@
   <!-- r64: FP control hints — fade out when each action is first performed.
        Shown only in FP mode (body.fp-mode). JS drives markHintDone(key).
        resetMatch() restores all hints for fresh rounds. -->
+  <!-- r69: difficulty pill — shown in FP mode below control hints -->
+  <div id="fp-diff-pill" aria-hidden="true">NORMAL</div>
+
   <div id="fp-control-hints" aria-hidden="true">
     <div class="hint" data-hint="attack"><kbd>Space</kbd><span class="hint-label">Attack (hold to charge)</span></div>
     <div class="hint" data-hint="guard"><kbd>E</kbd><span class="hint-label">Guard / Parry</span></div>
@@ -5631,6 +5686,44 @@
     const outputPass = new OutputPass();
     composer.addPass(outputPass);
 
+    /* ── r69: difficulty levels ─────────────────────────────────────
+       Three tiers that scale AI challenge without changing map/mechanics.
+       Stored in localStorage["lkb3d_difficulty"]; survives matches and
+       resets. combatTick() reads window._lkbDiffCfg each tick so a change
+       in the settings panel takes effect from the very next AI attack. */
+    const DIFFICULTIES = {
+      easy:   { damage: 3, interval: 5500, parryEarly:   0, parryLate: 350, label: 'EASY'   },
+      normal: { damage: 5, interval: 4500, parryEarly: 150, parryLate: 350, label: 'NORMAL' },
+      hard:   { damage: 7, interval: 3500, parryEarly: 200, parryLate: 350, label: 'HARD'   },
+    };
+    const DIFFICULTY_STORAGE_KEY = 'lkb3d_difficulty';
+    (function bootDifficulty() {
+      const saved = localStorage.getItem(DIFFICULTY_STORAGE_KEY) || 'normal';
+      window._lkbDifficulty = DIFFICULTIES[saved] ? saved : 'normal';
+      window._lkbDiffCfg = DIFFICULTIES[window._lkbDifficulty];
+    })();
+
+    function setDifficulty(tier) {
+      if (!DIFFICULTIES[tier]) return;
+      window._lkbDifficulty = tier;
+      window._lkbDiffCfg    = DIFFICULTIES[tier];
+      try { localStorage.setItem(DIFFICULTY_STORAGE_KEY, tier); } catch (e) {}
+      // Update settings-panel buttons
+      document.querySelectorAll('.sp-diff-btn').forEach(function (btn) {
+        btn.classList.toggle('selected', btn.dataset.diff === tier);
+      });
+      // Update combat loop interval — clear + restart with new interval.
+      // Harmless if called while no match is running (combatLoopHandle null).
+      if (typeof combatLoopHandle !== 'undefined' && combatLoopHandle) {
+        clearInterval(combatLoopHandle);
+        combatLoopHandle = setInterval(combatTick, window._lkbDiffCfg.interval);
+      }
+      // Update FP difficulty pill
+      const pill = document.getElementById('fp-diff-pill');
+      if (pill) pill.textContent = window._lkbDiffCfg.label;
+      console.log('[lkb-3d] r69 difficulty →', tier, window._lkbDiffCfg);
+    }
+
     /* ── settings panel ─────────────────────────────────────────────
        window.settings is the single source of truth for runtime-tunable
        knobs (FOV, mouse sensitivity, bloom strength, SSAO on/off, mute).
@@ -5754,12 +5847,29 @@
       const muteInput   = document.getElementById('sp-mute');
       const muteVal     = document.getElementById('sp-mute-val');
 
+      // r69: wire difficulty buttons
+      document.querySelectorAll('.sp-diff-btn').forEach(function (btn) {
+        btn.classList.toggle('selected', btn.dataset.diff === window._lkbDifficulty);
+        btn.addEventListener('click', function () {
+          setDifficulty(btn.dataset.diff);
+        });
+      });
+      // Sync FP pill on boot
+      (function () {
+        const pill = document.getElementById('fp-diff-pill');
+        if (pill) pill.textContent = window._lkbDiffCfg.label;
+      })();
+
       function syncUiFromSettings() {
         if (fovInput)   { fovInput.value   = String(window.settings.fov);          fovVal.textContent   = String(window.settings.fov); }
         if (sensInput)  { sensInput.value  = String(window.settings.mouseSens);    sensVal.textContent  = window.settings.mouseSens.toFixed(4); }
         if (bloomInput) { bloomInput.value = String(window.settings.bloomStrength); bloomVal.textContent = window.settings.bloomStrength.toFixed(2); }
         if (ssaoInput)  { ssaoInput.checked = !!window.settings.ssaoEnabled;       ssaoVal.textContent  = window.settings.ssaoEnabled ? 'ON' : 'OFF'; }
         if (muteInput)  { muteInput.checked = !!window.settings.muted;             muteVal.textContent  = window.settings.muted ? 'ON' : 'OFF'; }
+        // r69: sync difficulty button highlight when panel reopens
+        document.querySelectorAll('.sp-diff-btn').forEach(function (btn) {
+          btn.classList.toggle('selected', btn.dataset.diff === window._lkbDifficulty);
+        });
       }
       syncUiFromSettings();
 
@@ -8438,8 +8548,9 @@
           // HUD wiring: damage the defender, +5 SP to both sides per
           // combat tick. applyDamage handles death + reset internally.
           // r47: AI (azure) damage reduced 8→5 for better balance.
+          // r69: damage driven by difficulty (Easy=3 / Normal=5 / Hard=7).
           try {
-            window.applyDamage(defenderLabel, 5);
+            window.applyDamage(defenderLabel, (window._lkbDiffCfg || DIFFICULTIES.normal).damage);
             gainSP(attackerLabel, 5);
             gainSP(defenderLabel, 5);
           } catch (err) {
@@ -8664,8 +8775,8 @@
       startMatchIntro();
       _combatGraceUntil = performance.now() + 3000;
       setTimeout(combatTick, 1200);
-      // r47: interval extended 3000→4500ms — gives the player room to attack.
-      combatLoopHandle = setInterval(combatTick, 4500);
+      // r47: interval extended 3000→4500ms. r69: interval driven by difficulty.
+      combatLoopHandle = setInterval(combatTick, (window._lkbDiffCfg || DIFFICULTIES.normal).interval);
     }
     const combatBootWatcher = setInterval(() => {
       if (combatants.crimson && combatants.azure) {
@@ -9147,12 +9258,13 @@
         return;
       }
       // r52: check perfect parry window — azure's telegraph must be active
-      // (azure.state === 'windup') and E must be pressed in the FINAL 200ms
-      // of the 350ms telegraph (elapsed ≥ 150ms). Only in FP mode.
+      // (azure.state === 'windup') and E must be pressed inside the window.
+      // r69: parry window driven by difficulty (Easy: 0-350ms / Normal: 150-350ms / Hard: 200-350ms).
       const azure = combatants.azure;
       if (azure && azure.state === 'windup' && azure._telegraphAt) {
         const elapsed = performance.now() - azure._telegraphAt;
-        if (elapsed >= 150 && elapsed <= 350) {
+        const _dc = window._lkbDiffCfg || DIFFICULTIES.normal;
+        if (elapsed >= _dc.parryEarly && elapsed <= _dc.parryLate) {
           // Perfect parry window hit!
           triggerPerfectParry('azure');
           // No guard state needed — parry already cancelled the attack.
