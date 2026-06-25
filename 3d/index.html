@@ -5622,6 +5622,9 @@
       // r98: snapshot rest-pose baseline for idle weapon micro-sway.
       // Must be captured after rotation.set() so sway adds onto the correct base.
       clone._baseRotation = { x: xform.rot[0], y: xform.rot[1], z: xform.rot[2] };
+      // r116: snapshot rest-pose position baseline for idle weapon position breath.
+      // Must be captured after position.set() so breath adds onto the correct base.
+      clone._basePosition = clone.position.clone();
       clone.scale.set(1.0, 1.0, 1.0);
       clone.visible = true;
       // Suppress self-shadowing of the world by the viewmodel.
@@ -6876,6 +6879,38 @@
       fpSwordClone.rotation.x = base.x;
       fpSwordClone.rotation.y = base.y + swayY;
       fpSwordClone.rotation.z = base.z + swayZ;
+    }
+
+    // ── r116: updateWeaponPositionBreath ────────────────────────────────
+    // Additive idle position micro-sway on fpSwordClone, phase-locked with
+    // r97 updateBreatheFov (same 8s period / same performance.now() time base).
+    //   Y-axis: ±0.005 unit — vertical float (primary breathing axis)
+    //   Z-axis: ±0.003 unit — forward/back nudge at 75% freq (asymmetric feel)
+    // X is intentionally untouched to avoid clashing with swing-driven lateral.
+    // Guards mirror r98 updateWeaponSway exactly so both systems activate /
+    // deactivate in lock-step. _basePosition captured at attachFpSword (r116).
+    const WEAPON_POS_BREATH_PERIOD_MS = 8000; // matches BREATHE_FOV_PERIOD_MS
+    const WEAPON_POS_BREATH_Y         = 0.005; // units — below motion-sickness threshold
+    const WEAPON_POS_BREATH_Z         = 0.003; // units
+    function updateWeaponPositionBreath() {
+      if (!fpSwordClone) return;
+      if (cameraDirector.viewMode !== 'fp') return;
+      if (window._finisherCamActive) return;
+      if (window._matchIntroActive)  return;
+      if (FpPolish.dodge.active)     return;
+      if (FpPolish.parryKick.active) return;
+      if (playerInput._isCharging)   return;
+      const cs = combatants?.crimson?.state;
+      if (cs === 'attack' || cs === 'windup' || cs === 'dodge' || cs === 'hit' || cs === 'dead') return;
+
+      const base = fpSwordClone._basePosition;
+      if (!base) return;
+      const t       = performance.now() / WEAPON_POS_BREATH_PERIOD_MS;
+      const offsetY = Math.sin(t * Math.PI * 2) * WEAPON_POS_BREATH_Y;
+      const offsetZ = Math.cos(t * Math.PI * 2 * 0.75) * WEAPON_POS_BREATH_Z;
+      fpSwordClone.position.x = base.x; // x: keep authoritative (swing-driven)
+      fpSwordClone.position.y = base.y + offsetY;
+      fpSwordClone.position.z = base.z + offsetZ;
     }
 
     // ── r111: updateWeaponGlint ──────────────────────────────────────────
@@ -13613,6 +13648,9 @@
       // r98: idle weapon micro-sway — 8s sin-wave ±0.5°/0.3° on Y/Z axes.
       // Phase-locked with updateBreatheFov so sword and FOV breathe together.
       updateWeaponSway();
+      // r116: idle weapon position breath — 8s sin-wave ±0.005/0.003 unit Y/Z.
+      // Phase-locked with r97/r98; additive onto _basePosition captured at attach.
+      updateWeaponPositionBreath();
       // r111: idle weapon glint — warm-white emissive flash every ~10s when idle.
       updateWeaponGlint();
       // FP lock-on bracket — world→screen projection of azure's AABB.
