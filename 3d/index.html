@@ -9417,6 +9417,19 @@
       } catch (e) {}
       // r75: force-remove range ring so it never leaks into the next round.
       try { if (typeof _removeAzureRangeRingNow === 'function') _removeAzureRangeRingNow(); } catch (e) {}
+      // r108: restore azure root.position to its pre-approach snapshot so it
+      // doesn't creep inward across rounds. Also clear 'moving' state so
+      // combatTick doesn't stay deferred heading into the new round.
+      try {
+        const _azR108 = combatants && combatants.azure && combatants.azure.root;
+        if (_azR108 && _azR108._approachOrigin) {
+          _azR108.position.copy(_azR108._approachOrigin);
+          _azR108._approachOrigin = null; // allow fresh capture next round
+        }
+        if (combatants && combatants.azure && combatants.azure.state === 'moving') {
+          combatants.azure.state = 'idle';
+        }
+      } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -10558,8 +10571,10 @@
       }
       // r51: also defer if azure is already in windup (telegraph pending)
       // or attack — prevents a re-entrant second telegraph from stacking.
+      // r108: also defer if azure is 'moving' (approach lunge in progress).
       if (combatants.azure &&
-          (combatants.azure.state === 'windup' || combatants.azure.state === 'attack')) {
+          (combatants.azure.state === 'windup' || combatants.azure.state === 'attack' ||
+           combatants.azure.state === 'moving')) {
         setTimeout(combatTick, 800);
         return;
       }
@@ -10856,7 +10871,65 @@
       // then fire the swing. Non-FP / non-azure → immediate (no delay).
       const fpModeForTelegraph = isFpMode && attackerLabel === 'azure';
       if (fpModeForTelegraph) {
-        triggerEnemyTelegraph(attackerLabel, defenderLabel, runCombatSwing);
+        // ── r108: approach lunge — close gap before telegraphing ──────────────
+        // Measure world-space XZ distance between azure root and crimson root.
+        // Both roots have a pivot-compensated offset (not zero), so we use the
+        // actual root positions for the delta (the delta == visual gap / scale).
+        const _azRoot  = attacker && attacker.root;
+        const _crRoot  = defender && defender.root;
+        const _azDist  = (_azRoot && _crRoot)
+          ? Math.hypot(_azRoot.position.x - _crRoot.position.x,
+                       _azRoot.position.z - _crRoot.position.z)
+          : 0;
+        // Threshold in root-space. At 1.4× scale the root-to-root gap is
+        // ~0.57× the visual gap (e.g. visual 4m → root ≈ 2.3m). We target
+        // visual ~3m → root ≈ 1.7m as the approach trigger, and want to
+        // close to visual ~1.8m → root ≈ 1.0m. Both thresholds chosen to
+        // be safely above the resting visual gap (~4m / root ~2.3m) so the
+        // lunge fires most attacks, but not so tight it causes overlap.
+        const _approachTriggerDist = 2.0;  // root-space, ≈ visual 3.5m
+        const _approachTargetDist  = 0.9;  // root-space, ≈ visual 1.6m
+
+        if (_azRoot && _crRoot && _azDist > _approachTriggerDist) {
+          // Snapshot origin so resetMatch can restore position on round end.
+          if (!_azRoot._approachOrigin) {
+            _azRoot._approachOrigin = _azRoot.position.clone();
+          }
+          // Compute destination: move azure toward crimson until target gap.
+          const _dir = new THREE.Vector3(
+            _crRoot.position.x - _azRoot.position.x,
+            0,
+            _crRoot.position.z - _azRoot.position.z,
+          ).normalize();
+          const _approachDelta = _azDist - _approachTargetDist;
+          const _dest = _azRoot.position.clone().addScaledVector(_dir, _approachDelta);
+
+          // State guard: mark 'moving' so combatTick defers re-entry.
+          attacker.state = 'moving';
+
+          // Micro-lunge: 250ms ease-out tween (no Walk clip needed — short
+          // enough that the idle pose reads as a surge rather than a glide).
+          const _approachStart    = performance.now();
+          const _approachDuration = 250;
+          const _startPos         = _azRoot.position.clone();
+
+          const _approachTick = () => {
+            if (window.gameState.azure.dead) return; // round ended mid-lunge
+            const _t = Math.min((performance.now() - _approachStart) / _approachDuration, 1);
+            const _ease = 1 - (1 - _t) * (1 - _t); // ease-out quad
+            _azRoot.position.lerpVectors(_startPos, _dest, _ease);
+            if (_t < 1) {
+              requestAnimationFrame(_approachTick);
+            } else {
+              // Lunge complete → restore idle state → then telegraph.
+              attacker.state = 'idle';
+              triggerEnemyTelegraph(attackerLabel, defenderLabel, runCombatSwing);
+            }
+          };
+          requestAnimationFrame(_approachTick);
+        } else {
+          triggerEnemyTelegraph(attackerLabel, defenderLabel, runCombatSwing);
+        }
       } else {
         runCombatSwing();
       }
