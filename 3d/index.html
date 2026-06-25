@@ -3444,6 +3444,22 @@
       function sfxSelect()  { _sfxSelect();  netRecordSfx("select"); }
       function sfxLock()    { _sfxLock();    netRecordSfx("lock"); }
 
+      // r146: azure death body fall thud — low sawtooth double-thud
+      // layered on top of sfxFall to add "body hitting the floor" weight.
+      function playDeathBodyThud() {
+        if (!actx) return;
+        try {
+          // Initial body impact thud (70→40 Hz sawtooth, 250ms)
+          tone({ freq: 70, freq2: 40, dur: 0.25, type: 'sawtooth', vol: 0.12, attack: 0.015 });
+          // Secondary settle thud at 500ms (~"body hits floor" timing in Death_A)
+          setTimeout(function () {
+            try {
+              tone({ freq: 50, freq2: 30, dur: 0.20, type: 'sawtooth', vol: 0.08, attack: 0.015 });
+            } catch (e) {}
+          }, 500);
+        } catch (e) {}
+      }
+
       // ───────────── First-gesture init + DOM wiring ─────────────
       // Browsers refuse to start an AudioContext until a real user gesture
       // happens, so we only call initAudio() from a click/keydown listener
@@ -10563,6 +10579,8 @@
       // KO cinematic. deactivateAzureDesperate() is idempotent.
       if (defenderId === 'azure') {
         try { if (typeof deactivateAzureDesperate === 'function') deactivateAzureDesperate(); } catch (e) {}
+        // r146: azure-specific body fall thud sfx (parallel layer with sfxFall).
+        try { playDeathBodyThud(); } catch (e) {}
       }
       // Race fix: invalidate any pending swing-impact timeouts on the
       // dying knight (and, for safety, the winner — round is over).
