@@ -20,6 +20,7 @@
         20    #back-link, #mute-btn,             top-right chrome buttons (spatially disjoint)
                #settings-btn, #hud,
                #game-hud, #record-hud
+        21    #fp-stamina-warn                   orange edge pulse when stamina ≤ 15 (r96); below danger vignette
         22    #weather-pill, #fp-danger-vignette (r72) persistent low-HP red rim; below one-shot flashes
         23    #fp-tg-warn                        amber telegraph vignette (r51); below hit flash
         24    #fp-damage-vignette, #fp-dmg-border, hit flash vignette (r49); border pulse (r92);
@@ -2228,6 +2229,33 @@
       transition: opacity 0.4s ease-out;
     }
 
+    /* r96: stamina depletion warning vignette — persistent orange edge pulse
+       when crimson stamina ≤ 15. Warn before the next attack (cost 20) or
+       dodge (cost 8) becomes impossible. Sits at z-21, below the red danger
+       vignette (z-22) so both can coexist; exhausted reticle (.exhausted CSS)
+       is a separate element and has no z-index conflict. Orange vs the red
+       danger vignette: spatially identical layering, chromatically distinct.
+       JS toggles .active to start/stop the CSS keyframe; resetMatch() removes
+       .active to prevent inter-round leakage. */
+    #fp-stamina-warn {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 21;
+      opacity: 0;
+      transition: opacity 0.3s ease-out;
+      box-shadow: inset 0 0 50px 16px rgba(220, 130, 30, 0.45);
+      border: 2px solid rgba(255, 160, 60, 0.35);
+    }
+    #fp-stamina-warn.active {
+      opacity: 1;
+      animation: stmWarnPulse 1.5s ease-in-out infinite;
+    }
+    @keyframes stmWarnPulse {
+      0%,  100% { opacity: 0.6; }
+      50%        { opacity: 0.95; }
+    }
+
     /* ── r85: mobile touch controls overlay ─────────────────────────
        Visible only on touch devices in FP mode.
        body.touch-device class set at boot; body.fp-mode set by
@@ -2554,6 +2582,14 @@
 
   <!-- r51: FP attack telegraph — ⚠ GUARD alert above reticle. -->
   <div id="fp-tg-alert">⚠ GUARD</div>
+
+  <!-- r96: stamina depletion warning vignette — orange edge pulse when
+       crimson stamina ≤ 15 (next attack costs 20, next dodge costs 8 —
+       both would exhaust or be gated). CSS @keyframes (1.5s) drives opacity;
+       JS toggles .active; resetMatch() removes .active for clean rounds.
+       z-index 21 sits below fp-danger-vignette (22), ensuring both can
+       coexist without stomp if low-HP and low-STM occur simultaneously. -->
+  <div id="fp-stamina-warn"></div>
 
   <!-- r72: low-HP danger vignette — ambient red pulse when crimson HP ≤ 25%.
        CSS @keyframes (2s) drives opacity; JS toggles .active class.
@@ -5744,6 +5780,22 @@
 
     const _dangerVigEl   = document.getElementById('fp-danger-vignette');
     const _dangerReticle = document.getElementById('fp-reticle');
+
+    // r96: stamina depletion warning — orange edge pulse when crimson stamina ≤ 15.
+    // Threshold chosen so at least one attack (cost 20) or dodge (cost 8) is impossible
+    // unless stamina regens. Active only when stamina > 0 (exhausted state takes over at 0).
+    // JS owns only the .active toggle; CSS @keyframes drives the 1.5s opacity pulse.
+    const STM_WARN_THRESHOLD = 15;
+    const _staminaWarnEl = document.getElementById('fp-stamina-warn');
+
+    function updateStaminaWarn() {
+      if (!_staminaWarnEl) return;
+      const stm = window.gameState?.crimson?.stamina ?? STM_MAX;
+      // Active band: 0 < stm ≤ 15. At stm 0 the .exhausted reticle already signals
+      // full exhaustion; we deactivate warn so the two states don't compete visually.
+      const active = stm <= STM_WARN_THRESHOLD && stm > 0;
+      _staminaWarnEl.classList.toggle('active', active);
+    }
 
     // Lerp helper for 0-255 integer channel
     function _lerpCh(a, b, t) { return Math.round(a + (b - a) * t); }
@@ -9038,6 +9090,8 @@
         }
         if (FpPolish.dmgBorderEl) FpPolish.dmgBorderEl.classList.remove('flash');
       } catch (e) {}
+      // r96: clear stamina warning vignette so orange pulse never leaks into next round.
+      try { if (_staminaWarnEl) _staminaWarnEl.classList.remove('active'); } catch (e) {}
       // r63: clear retreat dodge state so cooldown/i-frame/camera don't leak between rounds.
       try {
         FpPolish.dodge.active  = false;
@@ -12652,6 +12706,8 @@
           const exh = window.gameState.crimson.stamina < STM_ATTACK_COST;
           FpPolish.reticleEl.classList.toggle('exhausted', exh);
         }
+        // r96: stamina depletion warning vignette — per-frame toggle.
+        try { updateStaminaWarn(); } catch (e) {}
 
         // r55: charge-swing per-frame tick
         // (a) drain stamina during hold (CHARGE_STM_DRAIN/s) + auto-release
