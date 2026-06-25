@@ -773,21 +773,56 @@
         0 4px 14px rgba(0, 0, 0, 0.85);
     }
 
-    /* ── r66: post-match stats block ─────────────────────────── */
-    /* Sits below mw-winner inside match-won-overlay. Session +
-       lifetime summary; 18 px, subdued warm-grey, opacity 0.75. */
+    /* ── r80: post-match stats — 3-column card UI ─────────────── */
+    /* Replaces the r66 single-line text with three raised stat cards:
+       SESSION (gold border) / LIFETIME (gold border) / PEAK (cyan border).
+       Each card reveals with scale + opacity animation staggered 100ms. */
     #post-match-stats {
-      color: #c8b98a;
-      font-size: 18px;
-      font-weight: 400;
-      letter-spacing: 0.05em;
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      align-items: flex-start;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+    .stat-card {
+      background: rgba(14, 16, 22, 0.78);
+      border: 1px solid rgba(216, 164, 90, 0.55);
+      border-radius: 6px;
+      padding: 14px 22px;
+      min-width: 132px;
       text-align: center;
-      line-height: 1.55;
-      opacity: 0.75;
-      text-shadow:
-        0 1px 0 #1a1f2e,
-        0 2px 8px rgba(0, 0, 0, 0.8);
-      margin-top: 8px;
+      opacity: 0;
+      transform: scale(0.85);
+      transition: opacity 0.3s ease-out, transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+      box-shadow:
+        0 2px 16px rgba(0, 0, 0, 0.7),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    .stat-card.reveal { opacity: 1; transform: scale(1); }
+    .stat-card[data-card="peak"] { border-color: rgba(102, 214, 255, 0.65); }
+    .stat-title {
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      color: rgba(200, 185, 138, 0.65);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .stat-row {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      color: #e8dfc8;
+      margin: 0 0 4px;
+      line-height: 1.1;
+      text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9);
+    }
+    .stat-num { color: #d8a45a; }
+    .stat-card[data-card="peak"] .stat-num { color: #66d6ff; }
+    .stat-sub {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: rgba(200, 185, 138, 0.55);
     }
 
     /* ── r70: rematch hotkey hint ─────────────────────────────── */
@@ -2097,8 +2132,24 @@
   <div id="match-won-overlay">
     <div class="mw-label">MATCH WON</div>
     <div class="mw-winner" id="mw-winner-text"></div>
-    <!-- r66: post-match stats — filled by refreshPostMatchStats() -->
-    <div id="post-match-stats" aria-live="polite"></div>
+    <!-- r80: post-match stats — 3-column card UI, populated by refreshPostMatchStats() -->
+    <div id="post-match-stats" aria-live="polite">
+      <div class="stat-card" data-card="session">
+        <div class="stat-title">SESSION</div>
+        <div class="stat-row"><span class="stat-num" id="sc-sessionW">0</span>W&nbsp;<span class="stat-num" id="sc-sessionL">0</span>L</div>
+        <div class="stat-sub"><span id="sc-sessionRate">—</span> win rate</div>
+      </div>
+      <div class="stat-card" data-card="lifetime">
+        <div class="stat-title">LIFETIME</div>
+        <div class="stat-row"><span class="stat-num" id="sc-lifetimeW">0</span>W&nbsp;<span class="stat-num" id="sc-lifetimeL">0</span>L</div>
+        <div class="stat-sub">streak&nbsp;<span id="sc-bestStreak">0</span></div>
+      </div>
+      <div class="stat-card" data-card="peak">
+        <div class="stat-title">PEAK</div>
+        <div class="stat-row">×<span class="stat-num" id="sc-bestCombo">0</span></div>
+        <div class="stat-sub"><span id="sc-parries">0</span> parries</div>
+      </div>
+    </div>
   </div>
   <!-- r70: rematch hotkey hint — shown when match-won-overlay is active -->
   <div id="match-hotkey-hint" aria-hidden="true">
@@ -2869,17 +2920,45 @@
       el.textContent = 'Streak: ' + r.currentStreak + '  Best ×' + r.bestCombo;
     };
 
-    // r66: refreshPostMatchStats — fills the post-match stats block inside
-    // the match-won-overlay. Reads session + lifetime from window.record.
+    // r80: refreshPostMatchStats — fills the 3-column stat-card UI inside
+    // the match-won-overlay. Reads session counters + window.record for
+    // lifetime / peak data. Cards reveal with a left→mid→right stagger.
     window.refreshPostMatchStats = function refreshPostMatchStats() {
-      var el = document.getElementById('post-match-stats');
-      if (!el) return;
-      var r = window.record;
-      el.innerHTML =
-        'Session: ' + window._sessionWins + 'W ' + window._sessionLosses + 'L' +
-        '<br>Lifetime: ' + r.wins + 'W ' + r.losses + 'L' +
-        ' &nbsp;·&nbsp; Best Combo ×' + r.bestCombo +
-        ' &nbsp;·&nbsp; ' + r.parries + ' Parries';
+      var r  = window.record;
+      var sw = window._sessionWins   || 0;
+      var sl = window._sessionLosses || 0;
+
+      // SESSION card
+      var elSW = document.getElementById('sc-sessionW');
+      var elSL = document.getElementById('sc-sessionL');
+      var elSR = document.getElementById('sc-sessionRate');
+      if (elSW) elSW.textContent = sw;
+      if (elSL) elSL.textContent = sl;
+      if (elSR) {
+        var total = sw + sl;
+        elSR.textContent = total > 0 ? Math.round((sw / total) * 100) + '%' : '—';
+      }
+
+      // LIFETIME card
+      var elLW = document.getElementById('sc-lifetimeW');
+      var elLL = document.getElementById('sc-lifetimeL');
+      var elBS = document.getElementById('sc-bestStreak');
+      if (elLW) elLW.textContent = r.wins;
+      if (elLL) elLL.textContent = r.losses;
+      if (elBS) elBS.textContent = r.bestStreak || 0;
+
+      // PEAK card
+      var elBC = document.getElementById('sc-bestCombo');
+      var elPR = document.getElementById('sc-parries');
+      if (elBC) elBC.textContent = r.bestCombo || 0;
+      if (elPR) elPR.textContent = r.parries   || 0;
+
+      // Staggered reveal: reset then re-trigger so animation replays each match
+      var cards = document.querySelectorAll('#post-match-stats .stat-card');
+      cards.forEach(function (card) { card.classList.remove('reveal'); });
+      cards.forEach(function (card, i) {
+        setTimeout(function () { card.classList.add('reveal'); }, 120 + i * 110);
+      });
     };
 
     // Wire the "Reset Record" button in the settings panel.
