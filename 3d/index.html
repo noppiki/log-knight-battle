@@ -10902,6 +10902,12 @@
       const cHp = window.gameState.crimson.hp;
       const aHp = window.gameState.azure.hp;
       console.log('[lkb-3d] r91 TIME UP — crimson HP:', cHp, 'azure HP:', aHp);
+      // r106: camera shake on time-up banner — heavier than parry (0.10/0.15s) to convey finality
+      if (impactSystem && impactSystem.shake) {
+        impactSystem.shake.amplitude = Math.max(impactSystem.shake.amplitude || 0, 0.15);
+        impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining || 0, 0.20);
+        impactSystem.shake.duration  = Math.max(impactSystem.shake.duration  || 0, 0.20);
+      }
       setTimeout(() => {
         // Race fix: a real KO may have landed during the 1200ms banner window
         if (window.gameState.crimson.dead || window.gameState.azure.dead) return;
