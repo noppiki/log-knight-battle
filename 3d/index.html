@@ -273,6 +273,53 @@
     }
     #weather-pill.visible { display: block; opacity: 1; }
 
+    /* ── r64: FP control hints overlay ───────────────────────────
+       Shown only in FP mode (body.fp-mode). Each hint fades out when
+       the player first performs that action. Positioned above azure's
+       FP-mode player card (bottom:32px + ~160px card height + margin). */
+    #fp-control-hints {
+      position: fixed;
+      bottom: 204px;
+      right: 24px;
+      z-index: 25;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 5px;
+      font: 12px/1.3 'Trebuchet MS', Verdana, sans-serif;
+    }
+    /* Hidden when not in FP mode */
+    body:not(.fp-mode) #fp-control-hints { display: none; }
+    #fp-control-hints .hint {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: rgba(232, 220, 192, 0.75);
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      transition: opacity 0.6s ease;
+      white-space: nowrap;
+    }
+    #fp-control-hints .hint.done {
+      opacity: 0;
+    }
+    #fp-control-hints kbd {
+      display: inline-block;
+      padding: 1px 5px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: bold;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 3px;
+      color: rgba(232, 220, 192, 0.9);
+      letter-spacing: 0.04em;
+    }
+    #fp-control-hints .hint-label {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+    }
+
     /* ── CINEMA mode toggle (auto camera cycle) ──────────────────
        Lives top-right of the canvas. pointer-events:auto so clicks
        land (parent #hud has pointer-events:none — overridden here). */
@@ -1673,6 +1720,16 @@
        animation completes (~1.5s). Pointer-events: none keeps it from
        blocking the canvas. -->
   <div id="round-banner" aria-live="polite"></div>
+
+  <!-- r64: FP control hints — fade out when each action is first performed.
+       Shown only in FP mode (body.fp-mode). JS drives markHintDone(key).
+       resetMatch() restores all hints for fresh rounds. -->
+  <div id="fp-control-hints" aria-hidden="true">
+    <div class="hint" data-hint="attack"><kbd>Space</kbd><span class="hint-label">Attack (hold to charge)</span></div>
+    <div class="hint" data-hint="guard"><kbd>E</kbd><span class="hint-label">Guard / Parry</span></div>
+    <div class="hint" data-hint="dodge"><kbd>Shift</kbd><span class="hint-label">Dodge</span></div>
+    <div class="hint" data-hint="aim"><kbd>Mouse</kbd><span class="hint-label">Aim</span></div>
+  </div>
 
   <!-- FP Pointer Lock hint — visible only when viewMode==='fp' AND
        pointer is NOT locked. Click on the canvas grabs the lock; ESC
@@ -5004,6 +5061,8 @@
     // (azure is hardcoded at +X; no live vector math needed).
     function triggerRetreatDodge() {
       if (!fpInputActive()) return;
+      // r64: dismiss dodge hint on first Shift press in FP mode
+      try { window.markHintDone('dodge'); } catch (_) {}
       const gs = window.gameState.crimson;
       if (!gs) return;
       if (gs.stamina < STM_DODGE_COST) {
@@ -5161,6 +5220,19 @@
       refreshFpOverlays();
     });
 
+    // ── r64: control hints — markHintDone(key) ────────────────────────
+    // Fades out individual hints when each action is first performed.
+    // Stored in window so playerAttack / playerGuardEnter / triggerRetreatDodge
+    // can reach it without closure issues. _aimAccum tracks cumulative
+    // mouse movement (radians) to gate the aim hint dismissal.
+    window._r64AimAccum = 0;
+    window.markHintDone = function (key) {
+      const el = document.querySelector('#fp-control-hints .hint[data-hint="' + key + '"]');
+      if (!el || el.classList.contains('done')) return;
+      el.classList.add('done');
+      setTimeout(function () { el.style.display = 'none'; }, 700);
+    };
+
     document.addEventListener('mousemove', (e) => {
       if (!window._mouseLocked) return;
       if (cameraDirector.viewMode !== 'fp') return;
@@ -5168,6 +5240,10 @@
       cameraDirector.fpPitch -= e.movementY * FP_MOUSE_SENS;
       if (cameraDirector.fpPitch < FP_PITCH_MIN) cameraDirector.fpPitch = FP_PITCH_MIN;
       if (cameraDirector.fpPitch > FP_PITCH_MAX) cameraDirector.fpPitch = FP_PITCH_MAX;
+      // r64: accumulate aim movement for the aim hint threshold (0.1 rad)
+      window._r64AimAccum += Math.abs(e.movementX * FP_MOUSE_SENS) +
+                              Math.abs(e.movementY * FP_MOUSE_SENS);
+      if (window._r64AimAccum >= 0.1) window.markHintDone('aim');
     });
 
     // Hint also needs to react to view-mode changes (button click,
@@ -7050,6 +7126,14 @@
           FpPolish.dodgeFlashEl.style.opacity = '0';
         }
       } catch (e) {}
+      // r64: restore all control hints for the new round
+      try {
+        document.querySelectorAll('#fp-control-hints .hint').forEach(function (el) {
+          el.classList.remove('done');
+          el.style.display = '';
+        });
+        window._r64AimAccum = 0;
+      } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -8424,6 +8508,8 @@
     // state they're in (idle / guard / attack) so we don't yank them out
     // of their own animation mid-swing.
     function playerAttack(opts) {
+      // r64: dismiss attack hint on first press (before any early return)
+      try { window.markHintDone('attack'); } catch (_) {}
       // r55: chargeTier defaults to 0 (normal attack) for all no-arg callers
       // (QA bridge, MP guest forward, etc.).
       const chargeTier = (opts && opts.chargeTier != null) ? opts.chargeTier : 0;
@@ -8639,6 +8725,8 @@
     }
 
     function playerGuardEnter() {
+      // r64: dismiss guard hint on first E press (before any early return)
+      try { window.markHintDone('guard'); } catch (_) {}
       // MP phase-3: guest forwards guard-press intent to host.
       if (window.mp && window.mp.peerReady && window.mp.role === 'guest') {
         sendGuestInput({ attack: false, guard: true, weaponSwap: false });
