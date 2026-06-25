@@ -85,6 +85,142 @@
       border-color: rgba(162, 48, 48, 0.7);
     }
 
+    /* ── settings gear button (sits to the LEFT of #mute-btn) ────
+       Same plate as the mute/back buttons so the trio reads as one
+       cluster. Opens #settings-panel; P key also toggles it.       */
+    #settings-btn {
+      position: fixed;
+      top: 14px;
+      right: 354px;
+      z-index: 20;
+      width: 38px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.7);
+      border-radius: 4px;
+      font-size: 17px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      user-select: none;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    #settings-btn:hover {
+      background: rgba(40, 40, 55, 0.9);
+      color: #d8a45a;
+    }
+
+    /* ── settings panel (modal-ish; toggled by P key or gear btn) ─
+       Sits dead-center, above everything except the loading screen.
+       Backdrop dims the canvas; panel itself is dark amber-bordered. */
+    #settings-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 95;
+      background: rgba(8, 8, 14, 0.55);
+      display: none;
+    }
+    #settings-backdrop.is-open { display: block; }
+    #settings-panel {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 100;
+      width: 400px;
+      max-width: calc(100vw - 32px);
+      min-height: 440px;
+      padding: 24px;
+      background: rgba(20, 20, 30, 0.94);
+      border: 2px solid rgba(216, 164, 90, 0.8);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
+      color: #e8dcc0;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      display: none;
+    }
+    #settings-panel.is-open { display: block; }
+    #settings-panel .sp-title {
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: 0.16em;
+      text-align: center;
+      margin: 0 0 18px 0;
+      color: #e8dcc0;
+      text-transform: uppercase;
+      text-shadow:
+        0 -1px 0 rgba(255, 235, 200, 0.55),
+        0 1px 0 rgba(20, 16, 24, 0.95),
+        0 2px 0 rgba(20, 16, 24, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 4px 8px rgba(0, 0, 0, 0.7);
+    }
+    #settings-panel .sp-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 12px 0;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+    }
+    #settings-panel .sp-row .sp-label {
+      flex: 0 0 110px;
+      color: #d8a45a;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    #settings-panel .sp-row input[type="range"] {
+      flex: 1 1 auto;
+      accent-color: #d8a45a;
+      cursor: pointer;
+    }
+    #settings-panel .sp-row .sp-value {
+      flex: 0 0 56px;
+      text-align: right;
+      color: #e8dcc0;
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    #settings-panel .sp-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: #d8a45a;
+      cursor: pointer;
+    }
+    #settings-panel .sp-hint {
+      margin-top: 14px;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      color: #8a8070;
+      text-align: center;
+      text-transform: uppercase;
+    }
+    #settings-panel .sp-close {
+      display: block;
+      margin: 18px auto 0 auto;
+      padding: 8px 22px;
+      background: rgba(40, 30, 20, 0.9);
+      color: #e8dcc0;
+      border: 1px solid rgba(216, 164, 90, 0.8);
+      border-radius: 4px;
+      font: bold 12px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      cursor: pointer;
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #settings-panel .sp-close:hover {
+      background: rgba(60, 45, 25, 1);
+      border-color: rgba(255, 196, 120, 1);
+    }
+
     /* ── bottom-left HUD strip ──────────────────────────────────── */
     #hud {
       position: fixed;
@@ -575,6 +711,35 @@
       pointer-events: none;
     }
 
+    /* ── record pill — top-right, below the button cluster ────────
+       Shows "RECORD: NW·NL · BEST N". Same dark+amber chip palette
+       as #back-link / #mute-btn so the cluster reads as one family.
+       pointer-events: none — display only, no interaction. */
+    #record-hud {
+      position: fixed;
+      top: 90px;
+      right: 14px;
+      z-index: 20;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.7);
+      border-radius: 4px;
+      padding: 5px 10px;
+      font-size: 10px;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-weight: bold;
+      letter-spacing: 0.07em;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    #record-hud .rec-label {
+      color: #d8a45a;
+      text-transform: uppercase;
+      margin-right: 4px;
+    }
+
     /* FP red damage vignette — radial gradient flash on player HP loss.
        Opacity is driven by JS flashDamageVignette() (1.0 → 0 over 0.4s
        via CSS transition). Pointer-events: none so it never blocks input. */
@@ -711,8 +876,60 @@
   <div id="vignette-bottom"></div>
   <div id="vignette-top-right"></div>
 
+  <button id="settings-btn" type="button" aria-label="Settings" title="Settings (P)">&#x2699;</button>
   <button id="mute-btn" type="button" aria-label="Toggle sound" title="Mute / Unmute (M)">&#x1F50A;</button>
   <a id="back-link" href="../index.html">&#x2190; back to 2D</a>
+
+  <!-- Settings panel (hidden by default; toggled via P key or #settings-btn).
+       Game pauses while open via window._gamePaused. Backdrop dims canvas. -->
+  <div id="settings-backdrop"></div>
+  <div id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="sp-title">
+    <h2 class="sp-title" id="sp-title">SETTINGS</h2>
+    <div class="sp-row">
+      <span class="sp-label">FOV</span>
+      <input type="range" id="sp-fov"   min="50" max="100" step="2" value="70">
+      <span class="sp-value" id="sp-fov-val">70</span>
+    </div>
+    <div class="sp-row">
+      <span class="sp-label">Mouse Sens</span>
+      <input type="range" id="sp-sens"  min="0.0005" max="0.005" step="0.0005" value="0.0022">
+      <span class="sp-value" id="sp-sens-val">0.0022</span>
+    </div>
+    <div class="sp-row">
+      <span class="sp-label">Bloom</span>
+      <input type="range" id="sp-bloom" min="0" max="1.5" step="0.05" value="0.55">
+      <span class="sp-value" id="sp-bloom-val">0.55</span>
+    </div>
+    <div class="sp-row">
+      <span class="sp-label">SSAO</span>
+      <input type="checkbox" id="sp-ssao" checked>
+      <span class="sp-value" id="sp-ssao-val">ON</span>
+    </div>
+    <div class="sp-row">
+      <span class="sp-label">Mute</span>
+      <input type="checkbox" id="sp-mute">
+      <span class="sp-value" id="sp-mute-val">OFF</span>
+    </div>
+    <div class="sp-row" style="margin-top:18px;">
+      <span class="sp-label">Record</span>
+      <button type="button" id="sp-reset-record-btn"
+        style="flex:1 1 auto;padding:5px 10px;background:rgba(40,22,22,0.9);
+               color:#e8dcc0;border:1px solid rgba(162,48,48,0.7);border-radius:4px;
+               font:700 11px/1.2 'Trebuchet MS',Verdana,sans-serif;letter-spacing:0.1em;
+               text-transform:uppercase;cursor:pointer;transition:background 0.15s,border-color 0.15s;"
+        onmouseover="this.style.background='rgba(70,30,30,0.95)';this.style.borderColor='rgba(220,80,80,0.9)'"
+        onmouseout="this.style.background='rgba(40,22,22,0.9)';this.style.borderColor='rgba(162,48,48,0.7)'">
+        Reset Record
+      </button>
+    </div>
+    <button type="button" class="sp-close" id="sp-close-btn">CLOSE (P)</button>
+    <div class="sp-hint">Game paused while open</div>
+  </div>
+
+  <!-- Record tracker pill — top-right below the button cluster.
+       JS initialises window.record from localStorage["lkb3d_record"]
+       on boot and calls updateRecordHUD() after each match win/loss. -->
+  <div id="record-hud"><span class="rec-label">RECORD</span><span id="record-text">0W·0L · BEST 0</span></div>
 
   <div id="hud">
     <div class="label">iter 66 vertical slice</div>
@@ -1386,6 +1603,68 @@
       // Audio block failure must NEVER take down the visual scene.
       console.warn("[lkb-3d] audio init failed; muted scene", bootErr);
     }
+  })();
+  </script>
+
+  <!-- ── Record tracker ─────────────────────────────────────────────
+       Plain (non-module) script so window.record and updateRecordHUD
+       are available to the type=module block below without any import.
+       Persistence key: "lkb3d_record" (namespaced, separate from 2D). -->
+  <script>
+  (function () {
+    "use strict";
+    // Load + validate from localStorage. Falls back to a fresh record
+    // if the stored value is absent, malformed, or has wrong types.
+    var _RECORD_KEY = "lkb3d_record";
+    function _loadRecord() {
+      try {
+        var raw = localStorage.getItem(_RECORD_KEY);
+        if (!raw) return null;
+        var obj = JSON.parse(raw);
+        if (typeof obj.wins          !== 'number' ||
+            typeof obj.losses        !== 'number' ||
+            typeof obj.bestStreak    !== 'number' ||
+            typeof obj.currentStreak !== 'number') return null;
+        return obj;
+      } catch (e) { return null; }
+    }
+    function _saveRecord(rec) {
+      try { localStorage.setItem(_RECORD_KEY, JSON.stringify(rec)); } catch (e) {}
+    }
+    var loaded = _loadRecord();
+    window.record = loaded || { wins: 0, losses: 0, bestStreak: 0, currentStreak: 0 };
+
+    // updateRecordHUD — reads window.record and refreshes the pill text.
+    // Called on boot and after every match-end result.
+    window.updateRecordHUD = function updateRecordHUD() {
+      var el = document.getElementById('record-text');
+      if (!el) return;
+      var r = window.record;
+      el.textContent =
+        r.wins + 'W·' + r.losses + 'L · BEST ' + r.bestStreak;
+    };
+
+    // Wire the "Reset Record" button in the settings panel.
+    // The button is in the DOM right now (non-deferred script order),
+    // so we can bind immediately.
+    document.addEventListener('DOMContentLoaded', function () {
+      var btn = document.getElementById('sp-reset-record-btn');
+      if (btn) {
+        btn.addEventListener('click', function () {
+          window.record = { wins: 0, losses: 0, bestStreak: 0, currentStreak: 0 };
+          _saveRecord(window.record);
+          window.updateRecordHUD();
+        });
+      }
+    });
+
+    // Expose save helper so the module script can call it after each match.
+    window._saveRecord = _saveRecord;
+
+    // Initial HUD paint — runs once the DOM is ready.
+    document.addEventListener('DOMContentLoaded', window.updateRecordHUD);
+    // Also call immediately in case DOMContentLoaded already fired.
+    if (document.readyState !== 'loading') window.updateRecordHUD();
   })();
   </script>
 
@@ -2467,7 +2746,9 @@
     // trackpads and gaming mice without further tuning.
     // Pitch clamp keeps us just shy of straight up/down so the YXZ
     // gimbal never degenerates (and the helm-cam never flips).
-    const FP_MOUSE_SENS = 0.0022;
+    // Mutable (let, not const) so the Settings panel can rebind it live
+    // without forcing every mousemove site to read window.settings each frame.
+    let   FP_MOUSE_SENS = 0.0022;
     const FP_PITCH_MIN  = -Math.PI / 2 + 0.05;
     const FP_PITCH_MAX  =  Math.PI / 2 - 0.05;
     const fpLockHint = document.getElementById('fp-lock-hint');
@@ -2725,6 +3006,210 @@
     // OutputPass — handles tone mapping + color space conversion at the end.
     const outputPass = new OutputPass();
     composer.addPass(outputPass);
+
+    /* ── settings panel ─────────────────────────────────────────────
+       window.settings is the single source of truth for runtime-tunable
+       knobs (FOV, mouse sensitivity, bloom strength, SSAO on/off, mute).
+       Persisted to localStorage["lkb3d_settings"] on every change; loaded
+       + validated on boot. The panel is hidden by default; P key or the
+       gear button (#settings-btn) toggles it. While open, _gamePaused is
+       true and combatTick() / playerInput handlers early-return. */
+    (function bootSettings() {
+      const SETTINGS_KEY = 'lkb3d_settings';
+      const DEFAULTS = {
+        fov: 70, mouseSens: 0.0022, bloomStrength: 0.55,
+        ssaoEnabled: true, muted: false,
+      };
+      // Schema clamps — validate everything coming out of localStorage.
+      const SCHEMA = {
+        fov:           { min: 50,     max: 100,   type: 'num'  },
+        mouseSens:     { min: 0.0005, max: 0.005, type: 'num'  },
+        bloomStrength: { min: 0,      max: 1.5,   type: 'num'  },
+        ssaoEnabled:   { type: 'bool' },
+        muted:         { type: 'bool' },
+      };
+      function clampNum(v, min, max, fallback) {
+        v = Number(v);
+        if (!Number.isFinite(v)) return fallback;
+        if (v < min) return min;
+        if (v > max) return max;
+        return v;
+      }
+      function loadSettings() {
+        let raw = null;
+        try { raw = localStorage.getItem(SETTINGS_KEY); } catch (e) {}
+        let parsed = {};
+        if (raw) { try { parsed = JSON.parse(raw) || {}; } catch (e) {} }
+        const out = {};
+        for (const k in DEFAULTS) {
+          const s = SCHEMA[k];
+          if (s.type === 'num') {
+            out[k] = clampNum(parsed[k] != null ? parsed[k] : DEFAULTS[k], s.min, s.max, DEFAULTS[k]);
+          } else {
+            out[k] = (parsed[k] != null) ? !!parsed[k] : DEFAULTS[k];
+          }
+        }
+        return out;
+      }
+      function saveSettings() {
+        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(window.settings)); } catch (e) {}
+      }
+
+      window.settings    = loadSettings();
+      window._gamePaused = false;
+
+      // ── apply each setting to its live target ────────────────────
+      function applyFov(v) {
+        window.settings.fov = v;
+        // FP_SHOT.fov is the canonical FP baseline; the camera reads it
+        // when entering FP and via the FOV-punch tween (FpPolish.fovPunch).
+        FP_SHOT.fov = v;
+        FpPolish.fovPunch.restFov = v;
+        FpPolish.fovPunch.peakFov = v + 8;
+        camera.fov = v;
+        camera.updateProjectionMatrix();
+      }
+      function applyMouseSens(v) {
+        window.settings.mouseSens = v;
+        FP_MOUSE_SENS = v;
+      }
+      function applyBloom(v) {
+        window.settings.bloomStrength = v;
+        if (bloomPass) {
+          bloomPass.strength = v;
+          // ImpactSystem captured _baseBloomStrength at construction; update
+          // it so flash returns to the new baseline, not the old 0.55.
+          if (window.impactSystem && '_baseBloomStrength' in window.impactSystem) {
+            window.impactSystem._baseBloomStrength = v;
+            if (window.impactSystem.flash) {
+              window.impactSystem.flash.baseStrength = v;
+              window.impactSystem.flash.peakStrength = v + 0.6;
+            }
+          }
+        }
+      }
+      function applySsao(on) {
+        window.settings.ssaoEnabled = !!on;
+        if (ssaoPass) ssaoPass.enabled = !!on;
+      }
+      function applyMuted(on) {
+        window.settings.muted = !!on;
+        // Defer to the existing audio module (handles globalGain + DOM).
+        if (typeof window.setMuted === 'function') {
+          window.setMuted(!!on);
+        }
+      }
+
+      // ── boot-apply (sets initial state from persisted settings) ──
+      applyFov(window.settings.fov);
+      applyMouseSens(window.settings.mouseSens);
+      applyBloom(window.settings.bloomStrength);
+      applySsao(window.settings.ssaoEnabled);
+      // Mute is already wired by the audio script on boot via lkb3d_muted;
+      // sync our value to that pre-existing state instead of overwriting it.
+      try {
+        const muteBtn = document.getElementById('mute-btn');
+        if (muteBtn) {
+          window.settings.muted = muteBtn.classList.contains('is-muted');
+        }
+      } catch (e) {}
+
+      // ── DOM wiring ───────────────────────────────────────────────
+      const panel       = document.getElementById('settings-panel');
+      const backdrop    = document.getElementById('settings-backdrop');
+      const btn         = document.getElementById('settings-btn');
+      const closeBtn    = document.getElementById('sp-close-btn');
+      const fovInput    = document.getElementById('sp-fov');
+      const fovVal      = document.getElementById('sp-fov-val');
+      const sensInput   = document.getElementById('sp-sens');
+      const sensVal     = document.getElementById('sp-sens-val');
+      const bloomInput  = document.getElementById('sp-bloom');
+      const bloomVal    = document.getElementById('sp-bloom-val');
+      const ssaoInput   = document.getElementById('sp-ssao');
+      const ssaoVal     = document.getElementById('sp-ssao-val');
+      const muteInput   = document.getElementById('sp-mute');
+      const muteVal     = document.getElementById('sp-mute-val');
+
+      function syncUiFromSettings() {
+        if (fovInput)   { fovInput.value   = String(window.settings.fov);          fovVal.textContent   = String(window.settings.fov); }
+        if (sensInput)  { sensInput.value  = String(window.settings.mouseSens);    sensVal.textContent  = window.settings.mouseSens.toFixed(4); }
+        if (bloomInput) { bloomInput.value = String(window.settings.bloomStrength); bloomVal.textContent = window.settings.bloomStrength.toFixed(2); }
+        if (ssaoInput)  { ssaoInput.checked = !!window.settings.ssaoEnabled;       ssaoVal.textContent  = window.settings.ssaoEnabled ? 'ON' : 'OFF'; }
+        if (muteInput)  { muteInput.checked = !!window.settings.muted;             muteVal.textContent  = window.settings.muted ? 'ON' : 'OFF'; }
+      }
+      syncUiFromSettings();
+
+      if (fovInput) fovInput.addEventListener('input', (e) => {
+        const v = clampNum(e.target.value, SCHEMA.fov.min, SCHEMA.fov.max, DEFAULTS.fov);
+        applyFov(v); fovVal.textContent = String(v); saveSettings();
+      });
+      if (sensInput) sensInput.addEventListener('input', (e) => {
+        const v = clampNum(e.target.value, SCHEMA.mouseSens.min, SCHEMA.mouseSens.max, DEFAULTS.mouseSens);
+        applyMouseSens(v); sensVal.textContent = v.toFixed(4); saveSettings();
+      });
+      if (bloomInput) bloomInput.addEventListener('input', (e) => {
+        const v = clampNum(e.target.value, SCHEMA.bloomStrength.min, SCHEMA.bloomStrength.max, DEFAULTS.bloomStrength);
+        applyBloom(v); bloomVal.textContent = v.toFixed(2); saveSettings();
+      });
+      if (ssaoInput) ssaoInput.addEventListener('change', (e) => {
+        const on = !!e.target.checked;
+        applySsao(on); ssaoVal.textContent = on ? 'ON' : 'OFF'; saveSettings();
+      });
+      if (muteInput) muteInput.addEventListener('change', (e) => {
+        const on = !!e.target.checked;
+        applyMuted(on); muteVal.textContent = on ? 'ON' : 'OFF'; saveSettings();
+      });
+
+      function openPanel() {
+        if (!panel) return;
+        // Re-sync from current settings + mute-btn state (the M key may
+        // have toggled mute while the panel was closed).
+        try {
+          const muteBtn = document.getElementById('mute-btn');
+          if (muteBtn) window.settings.muted = muteBtn.classList.contains('is-muted');
+        } catch (e) {}
+        syncUiFromSettings();
+        panel.classList.add('is-open');
+        if (backdrop) backdrop.classList.add('is-open');
+        window._gamePaused = true;
+        // Drop FP pointer-lock so the cursor reaches the panel.
+        try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
+      }
+      function closePanel() {
+        if (!panel) return;
+        panel.classList.remove('is-open');
+        if (backdrop) backdrop.classList.remove('is-open');
+        window._gamePaused = false;
+      }
+      function togglePanel() {
+        if (!panel) return;
+        if (panel.classList.contains('is-open')) closePanel(); else openPanel();
+      }
+      window._togglePanel = togglePanel;
+      window._closeSettingsPanel = closePanel;
+
+      if (btn) btn.addEventListener('click', (ev) => {
+        ev.preventDefault(); ev.stopPropagation(); togglePanel();
+      });
+      if (closeBtn) closeBtn.addEventListener('click', (ev) => {
+        ev.preventDefault(); ev.stopPropagation(); closePanel();
+      });
+      if (backdrop) backdrop.addEventListener('click', closePanel);
+
+      // P key toggles; Escape closes when open. Both gated so they don't
+      // collide with the FP pointer-lock release (browser-owned ESC).
+      window.addEventListener('keydown', (ev) => {
+        if (ev.key === 'p' || ev.key === 'P') {
+          // Skip when the user is typing in a text field.
+          const t = ev.target;
+          if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+          ev.preventDefault();
+          togglePanel();
+        } else if (ev.key === 'Escape') {
+          if (panel && panel.classList.contains('is-open')) closePanel();
+        }
+      });
+    })();
 
     /* ── GLB loader ─────────────────────────────────────────────── */
     const loader = new GLTFLoader();
@@ -3136,6 +3621,10 @@
     }
 
     const impactSystem = new ImpactSystem(scene, camera, bloomPass);
+    // Expose so the settings panel can keep _baseBloomStrength in sync
+    // when the user drags the Bloom slider (otherwise an impact flash
+    // would restore to the boot-time baseline, not the live setting).
+    window.impactSystem = impactSystem;
 
     /* ── WeaponTrail ────────────────────────────────────────────────
        A brief glowing arc the FP sword tip leaves behind during a
@@ -3500,6 +3989,24 @@
         }
         console.log(`[lkb-3d] MATCH WON by ${winnerId}`);
 
+        // ── Record tracker update ────────────────────────────────────
+        // P1 is crimson; a crimson win = player win, azure win = loss.
+        try {
+          if (window.record) {
+            if (winnerId === 'crimson') {
+              window.record.wins++;
+              window.record.currentStreak++;
+              window.record.bestStreak = Math.max(
+                window.record.bestStreak, window.record.currentStreak);
+            } else {
+              window.record.losses++;
+              window.record.currentStreak = 0;
+            }
+            if (window._saveRecord) window._saveRecord(window.record);
+            if (window.updateRecordHUD) window.updateRecordHUD();
+          }
+        } catch (e) { console.warn('[lkb-3d] record update failed', e); }
+
         // ── KO_REPLAY cinematic ──────────────────────────────────────
         // Match-deciding KO only (NOT every round KO). Swing the camera
         // to a tight close-up of the winner and dilate time on the skeletal
@@ -3671,6 +4178,11 @@
     // IDLE just after the attack finishes (~105%).
     let combatTickCount = 0;
     function combatTick() {
+      // Pause guard — when the Settings panel is open (or any future
+      // pause source flips _gamePaused), skip this tick entirely. The
+      // outer setInterval keeps running, so combat resumes on the next
+      // tick after the panel closes.
+      if (window._gamePaused) return;
       // In FP mode, the player owns crimson — CPU only auto-attacks on
       // azure. Outside FP mode, keep the original 50/50 random attacker.
       let attackerLabel;
