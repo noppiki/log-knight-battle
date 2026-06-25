@@ -1438,6 +1438,11 @@
     scene.background   = fallbackEnvTex;  // show env as visible sky; replaced by HDRI on load
     scene.environmentIntensity = 1.0;    // Three r150+ scene-level prop
 
+    // Track the currently-applied HDRI PMREM so subsequent rotations can dispose it.
+    // (RoomEnvironment fallback texture is kept alive in fallbackEnvTex.)
+    let currentHdriPmrem = null;
+    let currentHdriIndex = -1;  // -1 == default local env_dusk.hdr
+
     // Async HDRI load — non-blocking; falls back gracefully on 404 / parse fail.
     new RGBELoader().load(
       'assets/env_dusk.hdr',
@@ -1446,6 +1451,7 @@
         const pmremTex = pmrem.fromEquirectangular(hdrTex).texture;
         scene.environment = pmremTex;
         scene.background  = pmremTex;  // HDRI becomes the visible sky
+        currentHdriPmrem = pmremTex;
         hdrTex.dispose();
         console.log('[lkb-3d] HDRI env_dusk.hdr loaded');
       },
@@ -1455,6 +1461,106 @@
         // fallbackEnvTex already assigned to scene.environment / scene.background — nothing to do.
       }
     );
+
+    /* ── HDRI rotation pool ───────────────────────────────────────
+     * Per-match arena ambience: after a MATCH WON, pick a random
+     * Polyhaven HDRI (CC0) different from the current one and swap
+     * it into scene.environment + scene.background. The default
+     * local env_dusk.hdr loaded above remains the boot fallback;
+     * a remote fetch failure quietly leaves the current HDRI in place.
+     *
+     * Pool: Nordic dusk / cold winter / sunset moods, matching the
+     * existing arena palette (cool zenith + warm horizon glow).
+     */
+    const HDRI_POOL = [
+      'pisztyk_polonyna',
+      'kloofendal_misty_morning_puresky',
+      'evening_road_01_puresky',
+      'fouriesburg_mountain_lookout',
+      'winter_evening',
+    ];
+    function hdriUrlFor(id) {
+      return 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/' + id + '_4k.hdr';
+    }
+
+    // Load a pool HDRI by index. Async; on success dispose the prior
+    // PMREM texture and apply the new one. On failure log + keep current.
+    function hdriRotate(idx) {
+      if (idx < 0 || idx >= HDRI_POOL.length) return;
+      const id  = HDRI_POOL[idx];
+      const url = hdriUrlFor(id);
+      console.log('[lkb-3d] hdriRotate → ' + id + ' (' + url + ')');
+      new RGBELoader().load(
+        url,
+        (hdrTex) => {
+          hdrTex.mapping = THREE.EquirectangularReflectionMapping;
+          const pmremTex = pmrem.fromEquirectangular(hdrTex).texture;
+          // Dispose the prior PMREM texture (but never the RoomEnvironment fallback).
+          if (currentHdriPmrem && currentHdriPmrem !== fallbackEnvTex) {
+            try { currentHdriPmrem.dispose(); } catch (e) {}
+          }
+          scene.environment = pmremTex;
+          scene.background  = pmremTex;
+          currentHdriPmrem  = pmremTex;
+          currentHdriIndex  = idx;
+          hdrTex.dispose();
+          showHdriToast(id);
+          console.log('[lkb-3d] HDRI rotated → ' + id);
+        },
+        undefined,
+        (err) => {
+          console.warn('[lkb-3d] HDRI rotate failed for ' + id + ' — keeping current env', err);
+        }
+      );
+    }
+
+    // Pick a random HDRI different from the current one and rotate to it.
+    // Called from resetFullMatch() after MATCH WON.
+    function rotateHdriForNextMatch() {
+      if (HDRI_POOL.length <= 1) return;
+      let idx;
+      let guard = 8;  // bounded retry — pool is small, prevents infinite loop on degenerate cases
+      do {
+        idx = Math.floor(Math.random() * HDRI_POOL.length);
+      } while (idx === currentHdriIndex && --guard > 0);
+      hdriRotate(idx);
+    }
+
+    // Small DOM toast ("ARENA: <id>") shown for ~2s when the new HDRI lands.
+    function showHdriToast(id) {
+      let host = document.getElementById('hdri-toast');
+      if (!host) {
+        host = document.createElement('div');
+        host.id = 'hdri-toast';
+        host.style.cssText = [
+          'position:fixed', 'left:50%', 'top:14%', 'transform:translateX(-50%)',
+          'z-index:9999', 'pointer-events:none',
+          'padding:8px 18px',
+          'font:600 14px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace',
+          'letter-spacing:0.18em', 'text-transform:uppercase',
+          'color:#e8d9b0',
+          'background:rgba(20,18,26,0.78)',
+          'border:1px solid rgba(216,164,90,0.55)',
+          'border-radius:2px',
+          'box-shadow:0 2px 18px rgba(0,0,0,0.5)',
+          'opacity:0', 'transition:opacity 220ms ease-out',
+        ].join(';');
+        document.body.appendChild(host);
+      }
+      host.textContent = 'ARENA: ' + id;
+      // Force reflow so the transition runs on re-show.
+      void host.offsetWidth;
+      host.style.opacity = '1';
+      if (host._hideTimer) clearTimeout(host._hideTimer);
+      host._hideTimer = setTimeout(() => {
+        host.style.opacity = '0';
+      }, 2000);
+    }
+
+    // Expose for debugging from devtools.
+    window.hdriRotate            = hdriRotate;
+    window.rotateHdriForNextMatch = rotateHdriForNextMatch;
+    window.HDRI_POOL             = HDRI_POOL;
 
     // Dusk gradient background via a sky-dome mesh (large inverted sphere)
     // Fragment shader maps vertical position to a warm dusk gradient:
@@ -3295,6 +3401,17 @@
     // NOTE: mutates fields in place so `wins` is preserved across rounds.
     let resetTimerHandle = null;
     function resetMatch() {
+      // Defensive: if a KO_REPLAY slow-mo is still pending when a reset
+      // arrives, run the restore now so we don't enter the next round with
+      // mixers stuck at 0.5x.
+      if (window._koReplayHandle) {
+        clearTimeout(window._koReplayHandle);
+        window._koReplayHandle = null;
+      }
+      if (window._koReplayRestoreFn) {
+        try { window._koReplayRestoreFn(); } catch (e) {}
+        window._koReplayRestoreFn = null;
+      }
       for (const id of ['crimson', 'azure']) {
         const s = window.gameState[id];
         s.hp      = HP_MAX;
@@ -3321,11 +3438,19 @@
     }
 
     // Full match reset — zeroes wins on both sides, then does normal round reset.
+    // Also kicks off an async HDRI rotation so the arena ambience shifts
+    // between matches. The new env pops in when the HDR finishes loading
+    // (non-blocking); the round reset proceeds immediately.
     function resetFullMatch() {
       window.gameState.crimson.wins = 0;
       window.gameState.azure.wins   = 0;
       // Force round back to 1: resetMatch() below will pre-increment to 1.
       window.gameState.round = 0;
+      // Per-match arena rotation — defensive try/catch so a load error
+      // here can never block the match reset.
+      try { rotateHdriForNextMatch(); } catch (e) {
+        console.warn('[lkb-3d] HDRI rotation skipped:', e);
+      }
       resetMatch();
       console.log('[lkb-3d] full match reset (wins + round cleared)');
     }
@@ -3374,6 +3499,64 @@
           matchWonOverlay.classList.add('visible');
         }
         console.log(`[lkb-3d] MATCH WON by ${winnerId}`);
+
+        // ── KO_REPLAY cinematic ──────────────────────────────────────
+        // Match-deciding KO only (NOT every round KO). Swing the camera
+        // to a tight close-up of the winner and dilate time on the skeletal
+        // mixers for 3.0s so the killing pose reads as a punctuated beat.
+        // Restores the prior viewMode (FP / manual / cinematic) after the
+        // replay so the player lands back where they were before the match
+        // ended. Idempotent + cancel-safe via _koReplayHandle.
+        try {
+          if (window._koReplayHandle) clearTimeout(window._koReplayHandle);
+          if (window._koReplayRestoreFn) {
+            // A previous replay never ran its restore (shouldn't happen, but
+            // defensive — invoke it now so we don't leak slow-mo / view state).
+            try { window._koReplayRestoreFn(); } catch (e) {}
+            window._koReplayRestoreFn = null;
+          }
+          const savedViewMode = cameraDirector ? cameraDirector.viewMode : null;
+          // Switch to cinematic and jumpTo the close-up of the WINNER.
+          // CINEMA_SHOTS index in the director's `shots` list:
+          //   0=SIDE_WIDE  1=CLOSE_CRIMSON  2=SIDE_WIDE  3=CLOSE_AZURE  4=SIDE_WIDE  5=HIGH_WIDE
+          if (cameraDirector) {
+            cameraDirector.setViewMode('cinematic');
+            const winnerShot = (winnerId === 'crimson')
+              ? CINEMA_SHOTS.CLOSE_CRIMSON
+              : CINEMA_SHOTS.CLOSE_AZURE;
+            cameraDirector.jumpTo(winnerShot, 'KO_REPLAY');
+          }
+          // Slow-mo on all skeletal mixers (Death_A fall, idle, etc.).
+          // Save the per-mixer prior timeScale so the hit-lag system
+          // (which also touches timeScale briefly) and any other consumer
+          // remain unaffected if they ran a custom scale.
+          const _savedScales = (mixers && mixers.length)
+            ? mixers.map(m => m.timeScale)
+            : [];
+          if (mixers && mixers.length) {
+            mixers.forEach(m => { m.timeScale = 0.5; });
+          }
+          const KO_REPLAY_DURATION_MS = 3000;
+          window._koReplayRestoreFn = function () {
+            // Restore mixer timeScales.
+            if (mixers && mixers.length) {
+              for (let i = 0; i < mixers.length; i++) {
+                mixers[i].timeScale = (_savedScales[i] != null) ? _savedScales[i] : 1.0;
+              }
+            }
+            // Restore the prior viewMode (only if it differs — setViewMode
+            // early-returns on no-op, but being explicit is cheap).
+            if (cameraDirector && savedViewMode && cameraDirector.viewMode !== savedViewMode) {
+              cameraDirector.setViewMode(savedViewMode);
+            }
+            window._koReplayRestoreFn = null;
+            window._koReplayHandle    = null;
+          };
+          window._koReplayHandle = setTimeout(window._koReplayRestoreFn, KO_REPLAY_DURATION_MS);
+        } catch (e) {
+          console.warn('[lkb-3d] KO_REPLAY cinematic failed:', e);
+        }
+
         resetTimerHandle = setTimeout(resetFullMatch, 6000);
       } else {
         // Round over — normal KO overlay, then round reset (wins preserved)
