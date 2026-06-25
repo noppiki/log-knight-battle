@@ -610,6 +610,28 @@
         0 4px 14px rgba(0, 0, 0, 0.85);
     }
 
+    /* ── cinematic letterbox bars (KO_REPLAY slow-mo) ─────────── */
+    /* z-index 95 — above all HUD layers (max 80) but below settings panel
+       (95 backdrop / 100 panel) and below KO / MATCH WON text (25-26).
+       Wait — KO/MATCH WON are z-index 25-26 which is below 95.  We want
+       bars ABOVE the canvas/HUD but BELOW the match text overlays, so
+       z-index 24 keeps them sandwiched correctly. */
+    #letterbox-top,
+    #letterbox-bottom {
+      position: fixed;
+      left: 0;
+      width: 100%;
+      height: 0;
+      background: #000;
+      z-index: 24;
+      pointer-events: none;
+      transition: height 0.4s ease-out;
+    }
+    #letterbox-top    { top: 0; }
+    #letterbox-bottom { bottom: 0; }
+    #letterbox-top.active,
+    #letterbox-bottom.active { height: 12vh; }
+
     /* ── full-screen radial vignette ───────────────────────────── */
     #vignette {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -1224,6 +1246,9 @@
       </div>
     </div>
   </div>
+  <!-- Cinematic letterbox bars — slide in during KO_REPLAY slow-mo -->
+  <div id="letterbox-top"></div>
+  <div id="letterbox-bottom"></div>
   <div id="ko-overlay">K.O.</div>
   <div id="match-won-overlay">
     <div class="mw-label">MATCH WON</div>
@@ -2374,6 +2399,15 @@
     import { SSAOPass }        from 'three/addons/postprocessing/SSAOPass.js';
     import { OutlinePass }     from 'three/addons/postprocessing/OutlinePass.js';
     import { BokehPass }       from 'three/addons/postprocessing/BokehPass.js';
+    // Lensflare: optional, wrapped in try/catch at usage site (older three may not expose this path)
+    let Lensflare = null, LensflareElement = null;
+    try {
+      const lf = await import('three/addons/objects/Lensflare.js');
+      Lensflare        = lf.Lensflare;
+      LensflareElement = lf.LensflareElement;
+    } catch (e) {
+      console.warn('Lensflare module unavailable:', e);
+    }
 
     /* ── renderer ──────────────────────────────────────────────── */
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -2600,6 +2634,72 @@
     sun.shadow.camera.bottom = -10;
     sun.shadow.bias = -0.0003;          // tightened from -0.001
     scene.add(sun);
+
+    // ── Lensflare on the sun (procedural canvas textures, no external assets) ──
+    try {
+      if (Lensflare && LensflareElement) {
+        // Helper: build a CanvasTexture from a draw callback
+        const makeFlareTex = (size, draw) => {
+          const c = document.createElement('canvas');
+          c.width = c.height = size;
+          const ctx = c.getContext('2d');
+          draw(ctx, size);
+          const tex = new THREE.CanvasTexture(c);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          return tex;
+        };
+
+        // Sun disc: radial gradient white -> amber -> transparent
+        const sunDiscTex = makeFlareTex(256, (ctx, s) => {
+          const r = s / 2;
+          const g = ctx.createRadialGradient(r, r, 0, r, r, r);
+          g.addColorStop(0.00, 'rgba(255,255,255,1)');
+          g.addColorStop(0.18, 'rgba(255,240,210,0.95)');
+          g.addColorStop(0.45, 'rgba(255,208,137,0.55)');
+          g.addColorStop(0.80, 'rgba(255,160,90,0.10)');
+          g.addColorStop(1.00, 'rgba(255,140,80,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, s, s);
+        });
+
+        // Halo ring: thin amber ring
+        const haloTex = makeFlareTex(256, (ctx, s) => {
+          const r = s / 2;
+          ctx.clearRect(0, 0, s, s);
+          // Soft outer falloff
+          const g = ctx.createRadialGradient(r, r, r * 0.78, r, r, r * 0.96);
+          g.addColorStop(0.00, 'rgba(255,200,138,0)');
+          g.addColorStop(0.55, 'rgba(255,200,138,0.55)');
+          g.addColorStop(1.00, 'rgba(255,200,138,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, s, s);
+        });
+
+        // Small dot: tiny white-ish circle
+        const dotTex = makeFlareTex(64, (ctx, s) => {
+          const r = s / 2;
+          const g = ctx.createRadialGradient(r, r, 0, r, r, r);
+          g.addColorStop(0.00, 'rgba(255,255,255,1)');
+          g.addColorStop(0.40, 'rgba(255,220,180,0.7)');
+          g.addColorStop(1.00, 'rgba(255,180,120,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, s, s);
+        });
+
+        const lensflare = new Lensflare();
+        // Main sun disc — anchored on the light
+        lensflare.addElement(new LensflareElement(sunDiscTex, 700, 0,   new THREE.Color(0xffd089)));
+        // Halo near the sun
+        lensflare.addElement(new LensflareElement(haloTex,    200, 0.4, new THREE.Color(0xffc088)));
+        // Trailing ghost dots along the screen-space line
+        lensflare.addElement(new LensflareElement(dotTex,      60, 0.6, new THREE.Color(0xffc88a)));
+        lensflare.addElement(new LensflareElement(dotTex,      80, 0.9, new THREE.Color(0xff9050)));
+        sun.add(lensflare);
+      }
+    } catch (e) {
+      console.warn('Lensflare setup failed:', e);
+    }
 
     // Warm rim fill from front-left
     const rim = new THREE.PointLight(0xff9060, 0.6, 20);
@@ -5137,6 +5237,13 @@
       updateGaugeDOM();
       if (koOverlay) koOverlay.classList.remove('visible');
       if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
+      // Ensure letterbox bars are retracted before the next round starts
+      // (defensive — restore fn above normally handles this, but guard the
+      // edge case where bars were left active without a pending restore).
+      const _lbTop2    = document.getElementById('letterbox-top');
+      const _lbBottom2 = document.getElementById('letterbox-bottom');
+      if (_lbTop2)    _lbTop2.classList.remove('active');
+      if (_lbBottom2) _lbBottom2.classList.remove('active');
       for (const id of ['crimson', 'azure']) {
         const c = combatants[id];
         if (c) {
@@ -5258,6 +5365,11 @@
               : CINEMA_SHOTS.CLOSE_AZURE;
             cameraDirector.jumpTo(winnerShot, 'KO_REPLAY');
           }
+          // Slide in cinematic letterbox bars for the slow-mo replay.
+          const _lbTop    = document.getElementById('letterbox-top');
+          const _lbBottom = document.getElementById('letterbox-bottom');
+          if (_lbTop)    _lbTop.classList.add('active');
+          if (_lbBottom) _lbBottom.classList.add('active');
           // Slow-mo on all skeletal mixers (Death_A fall, idle, etc.).
           // Save the per-mixer prior timeScale so the hit-lag system
           // (which also touches timeScale briefly) and any other consumer
@@ -5281,6 +5393,11 @@
             if (cameraDirector && savedViewMode && cameraDirector.viewMode !== savedViewMode) {
               cameraDirector.setViewMode(savedViewMode);
             }
+            // Slide letterbox bars back out after slow-mo ends.
+            const lbTop    = document.getElementById('letterbox-top');
+            const lbBottom = document.getElementById('letterbox-bottom');
+            if (lbTop)    lbTop.classList.remove('active');
+            if (lbBottom) lbBottom.classList.remove('active');
             window._koReplayRestoreFn = null;
             window._koReplayHandle    = null;
           };
