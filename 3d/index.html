@@ -501,35 +501,376 @@
     const mixers = [];
     const animClock = new THREE.Clock();
 
-    // Pick an "idle"-ish clip from a clips array. Substring-match on name
-    // (case-insensitive) for 'idle' / 'breathe' / 'stand', else fall back
-    // to clips[0]. Returns the AnimationClip or null.
-    function pickIdleClip(clips) {
-      if (!clips || clips.length === 0) return null;
-      const wanted = ['idle', 'breathe', 'stand'];
-      for (const key of wanted) {
-        const hit = clips.find(c => c.name && c.name.toLowerCase().includes(key));
-        if (hit) return hit;
-      }
-      return clips[0];
+    // ── KayKit clip names (from discovery) ───────────────────────
+    const CLIP_NAMES = {
+      IDLE:   '2H_Melee_Idle',
+      ATTACK: '2H_Melee_Attack_Chop',
+      BLOCK:  'Blocking',
+      HIT:    'Hit_A',
+    };
+
+    // Combatant registry — populated as each knight GLB loads. Each
+    // entry holds the mixer, the clips map, current action ref, state
+    // string, and a label. Used by combatTick() to drive the state
+    // machine across both knights.
+    // Shape: { crimson: combatant, azure: combatant }
+    const combatants = {};
+
+    // Find a clip by exact-name first, falling back to a case-insensitive
+    // substring search. Tolerant — returns null if no match.
+    function findClip(clips, wanted) {
+      if (!clips || clips.length === 0 || !wanted) return null;
+      const exact = clips.find(c => c.name === wanted);
+      if (exact) return exact;
+      const lower = wanted.toLowerCase();
+      return clips.find(c => c.name && c.name.toLowerCase().includes(lower)) || null;
     }
 
-    // Attach a mixer + start playing the chosen idle clip. Tolerant: if
-    // there are no clips on this GLB, returns silently.
+    // playClip — fade from the combatant's current action to a new one
+    // by clip name. Returns the new action (or null if the clip is
+    // missing). Options:
+    //   fadeIn (sec)   — crossfade duration (default 0.2)
+    //   loop  (bool)   — true → LoopRepeat, false → LoopOnce + clampWhenFinished
+    //   weight (0..1)  — action weight (default 1.0)
+    //   timeScale (n)  — playback rate (default 1.0)
+    function playClip(combatant, clipName, opts = {}) {
+      if (!combatant || !combatant.mixer) return null;
+      const { fadeIn = 0.2, loop = false, weight = 1.0, timeScale = 1.0 } = opts;
+      const clip = findClip(combatant.clips, clipName);
+      if (!clip) {
+        console.warn(`[lkb-3d] ${combatant.label}: clip "${clipName}" not found`);
+        return null;
+      }
+      const next = combatant.mixer.clipAction(clip);
+      next.reset();
+      next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
+      next.clampWhenFinished = !loop;
+      next.setEffectiveWeight(weight);
+      next.timeScale = timeScale;
+      next.enabled = true;
+
+      const prev = combatant.current;
+      if (prev && prev !== next) {
+        next.crossFadeFrom(prev, fadeIn, true);
+      }
+      next.play();
+      combatant.current = next;
+      combatant.currentClipName = clipName;
+      combatant.currentDuration = clip.duration;
+      return next;
+    }
+
+    // Register a combatant — build the mixer, cache the clips list, and
+    // start it in idle. Tolerant: if the GLB has no animations we log and
+    // return without registering (so combatTick() will just skip it).
+    function setupCombatant(gltf, label) {
+      if (!gltf.animations || gltf.animations.length === 0) {
+        console.log(`[lkb-3d] ${label}: no animations baked into GLB`);
+        return null;
+      }
+      const mixer = new THREE.AnimationMixer(gltf.scene);
+      const combatant = {
+        label,
+        mixer,
+        clips: gltf.animations,
+        current: null,
+        currentClipName: null,
+        currentDuration: 0,
+        state: 'idle',
+        impactScheduled: false,
+      };
+      // Start in idle (looping). Skip crossfade since there's no prev.
+      playClip(combatant, CLIP_NAMES.IDLE, { fadeIn: 0, loop: true });
+      combatant.state = 'idle';
+      mixers.push(mixer);
+      combatants[label] = combatant;
+      console.log(`[lkb-3d] ${label}: combatant ready (${gltf.animations.length} clips)`);
+      return combatant;
+    }
+
+    // Backwards-compatible shim — the log GLB load still calls
+    // setupMixerFor(). For non-knight GLBs (log) we just register a
+    // looping mixer on the first clip (if any). For knights we'd use
+    // setupCombatant() directly, but this keeps the call sites tidy.
     function setupMixerFor(gltf, label) {
       if (!gltf.animations || gltf.animations.length === 0) {
         console.log(`[lkb-3d] ${label}: no animations baked into GLB`);
         return;
       }
+      // For knights, route to the combat-state setup.
+      if (label === 'crimson' || label === 'azure') {
+        setupCombatant(gltf, label);
+        return;
+      }
+      // Generic fallback: play the first clip on loop (preserves log
+      // behaviour — usually no anims, but defensive if a future bake
+      // adds idle motion).
       const mixer = new THREE.AnimationMixer(gltf.scene);
-      const clip  = pickIdleClip(gltf.animations);
+      const clip = gltf.animations[0];
       if (clip) {
         const action = mixer.clipAction(clip);
+        action.setLoop(THREE.LoopRepeat, Infinity);
         action.play();
-        console.log(`[lkb-3d] ${label}: playing clip "${clip.name}"`);
+        console.log(`[lkb-3d] ${label}: playing generic clip "${clip.name}"`);
       }
       mixers.push(mixer);
     }
+
+    // ── Impact-burst FX system ───────────────────────────────────
+    // Spawns short-lived additive amber particle bursts at hit points,
+    // jitters the camera for a tactile shake, and pulses bloom for a
+    // single-frame flash. Composed so the combat loop just calls
+    // window.triggerImpact(hitPos) and the render loop ticks update().
+    class ImpactSystem {
+      constructor(scene, camera, bloomPass) {
+        this.scene       = scene;
+        this.camera      = camera;
+        this.bloomPass   = bloomPass;
+        this.bursts      = []; // active particle bursts
+        this.shake       = null; // { remaining, duration, basePos }
+        this.flash       = null; // { remaining, duration, baseStrength }
+        this._baseBloomStrength = bloomPass ? bloomPass.strength : 0;
+      }
+
+      // Spawn a single burst at hitPos. Random direction + speed per
+      // particle, gravity per frame, 0.6s lifetime, additive amber.
+      spawn(hitPos) {
+        const COUNT = 60 + Math.floor(Math.random() * 41); // 60–100
+        const LIFETIME = 0.6;
+
+        const positions  = new Float32Array(COUNT * 3);
+        const velocities = new Float32Array(COUNT * 3);
+        for (let i = 0; i < COUNT; i++) {
+          positions[i * 3 + 0] = hitPos.x;
+          positions[i * 3 + 1] = hitPos.y;
+          positions[i * 3 + 2] = hitPos.z;
+          // Random unit vector × speed in [2.5, 5.0] m/s.
+          const u = Math.random() * 2 - 1;
+          const phi = Math.random() * Math.PI * 2;
+          const s = Math.sqrt(1 - u * u);
+          const speed = 2.5 + Math.random() * 2.5;
+          velocities[i * 3 + 0] = s * Math.cos(phi) * speed;
+          velocities[i * 3 + 1] = u * speed;
+          velocities[i * 3 + 2] = s * Math.sin(phi) * speed;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+          color:           0xffd089, // amber
+          size:            0.08,
+          sizeAttenuation: true,
+          transparent:     true,
+          opacity:         1.0,
+          depthWrite:      false,
+          blending:        THREE.AdditiveBlending,
+        });
+
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        this.scene.add(points);
+
+        this.bursts.push({
+          points,
+          velocities,
+          age:       0,
+          lifetime:  LIFETIME,
+          gravity:  -3.0,
+        });
+
+        // Camera shake — 0.18s decaying jitter. basePos is captured
+        // fresh each frame in update() because OrbitControls overwrites
+        // camera.position every tick; we just offset on top of it.
+        this.shake = {
+          remaining: 0.18,
+          duration:  0.18,
+          amplitude: 0.06,
+        };
+
+        // Bloom flash — multiply strength by 2.0 for 0.15s, then lerp back.
+        if (this.bloomPass) {
+          this.flash = {
+            remaining:    0.15,
+            duration:     0.15,
+            baseStrength: this._baseBloomStrength,
+            peakStrength: this._baseBloomStrength * 2.0,
+          };
+          this.bloomPass.strength = this.flash.peakStrength;
+        }
+      }
+
+      update(delta) {
+        // ── advance particle bursts ──────────────────────────────
+        for (let i = this.bursts.length - 1; i >= 0; i--) {
+          const b = this.bursts[i];
+          b.age += delta;
+          if (b.age >= b.lifetime) {
+            this.scene.remove(b.points);
+            b.points.geometry.dispose();
+            b.points.material.dispose();
+            this.bursts.splice(i, 1);
+            continue;
+          }
+          const pos = b.points.geometry.attributes.position;
+          const arr = pos.array;
+          const n = arr.length / 3;
+          for (let p = 0; p < n; p++) {
+            // Apply gravity to vy, then integrate position.
+            b.velocities[p * 3 + 1] += b.gravity * delta;
+            arr[p * 3 + 0] += b.velocities[p * 3 + 0] * delta;
+            arr[p * 3 + 1] += b.velocities[p * 3 + 1] * delta;
+            arr[p * 3 + 2] += b.velocities[p * 3 + 2] * delta;
+          }
+          pos.needsUpdate = true;
+          // Fade opacity linearly over lifetime.
+          b.points.material.opacity = 1.0 - (b.age / b.lifetime);
+        }
+
+        // ── camera shake (linear decay) ──────────────────────────
+        // We run AFTER controls.update() each frame, so the camera's
+        // current position is the controls' computed value — offset on
+        // top of that. On expiry we just stop offsetting; next frame
+        // OrbitControls writes its own clean value.
+        if (this.shake) {
+          this.shake.remaining -= delta;
+          if (this.shake.remaining <= 0) {
+            this.shake = null;
+          } else {
+            const t = this.shake.remaining / this.shake.duration; // 1 → 0
+            const amp = this.shake.amplitude * t;
+            // Random unit vector × amp.
+            const u = Math.random() * 2 - 1;
+            const phi = Math.random() * Math.PI * 2;
+            const s = Math.sqrt(1 - u * u);
+            this.camera.position.x += s * Math.cos(phi) * amp;
+            this.camera.position.y += u * amp;
+            this.camera.position.z += s * Math.sin(phi) * amp;
+          }
+        }
+
+        // ── bloom flash (lerp back to base strength) ─────────────
+        if (this.flash && this.bloomPass) {
+          this.flash.remaining -= delta;
+          if (this.flash.remaining <= 0) {
+            this.bloomPass.strength = this.flash.baseStrength;
+            this.flash = null;
+          } else {
+            const t = this.flash.remaining / this.flash.duration; // 1 → 0
+            // peak at t=1, base at t=0 → linear lerp.
+            this.bloomPass.strength =
+              this.flash.baseStrength +
+              (this.flash.peakStrength - this.flash.baseStrength) * t;
+          }
+        }
+      }
+    }
+
+    const impactSystem = new ImpactSystem(scene, camera, bloomPass);
+
+    // Real triggerImpact — replaces the earlier stub. Accepts either a
+    // THREE.Vector3 (preferred — world-space hit position) or the legacy
+    // meta object from earlier phases (in which case we default to the
+    // midpoint of the two knights at (0, 1.3, 0)). This is the single
+    // entry point the combat loop calls on each contact frame.
+    window.triggerImpact = function triggerImpact(hitPos) {
+      let pos;
+      if (hitPos && typeof hitPos.x === 'number' && typeof hitPos.y === 'number' && typeof hitPos.z === 'number') {
+        pos = hitPos;
+      } else {
+        // Legacy meta object or undefined — use mid-knight default.
+        pos = new THREE.Vector3(0, 1.3, 0);
+      }
+      try {
+        impactSystem.spawn(pos);
+      } catch (err) {
+        console.warn('[lkb-3d] impactSystem.spawn threw', err);
+      }
+    };
+
+    // combatTick — runs every 3s. Picks a random attacker, fires the
+    // ATTACK clip on them and the BLOCK clip on the defender, schedules
+    // the impact at ~70% of the attack duration, and fades both back to
+    // IDLE just after the attack finishes (~105%).
+    let combatTickCount = 0;
+    function combatTick() {
+      const attackerLabel = Math.random() < 0.5 ? 'crimson' : 'azure';
+      const defenderLabel = attackerLabel === 'crimson' ? 'azure' : 'crimson';
+      const attacker = combatants[attackerLabel];
+      const defender = combatants[defenderLabel];
+      if (!attacker || !defender) return; // not both loaded yet
+
+      combatTickCount++;
+      console.log(`[lkb-3d] combatTick #${combatTickCount}: ${attackerLabel} → ${defenderLabel}`);
+
+      // Wind up + attack — collapsed into one for now (the chop clip has
+      // its own anticipation built in). State labels track the rough
+      // phase so future logic (HUD, sound cues) can read combatant.state.
+      attacker.state = 'attack';
+      attacker.impactScheduled = false;
+      const attackAction = playClip(attacker, CLIP_NAMES.ATTACK, {
+        fadeIn: 0.2,
+        loop: false,
+        weight: 1.0,
+      });
+
+      defender.state = 'guard';
+      playClip(defender, CLIP_NAMES.BLOCK, {
+        fadeIn: 0.2,
+        loop: false,
+        weight: 1.0,
+      });
+
+      // Duration → attack clip length (with safe fallback if missing).
+      const dur = (attackAction && attacker.currentDuration) || 1.0;
+
+      // Impact at ~70% through the swing.
+      setTimeout(() => {
+        if (attacker.state !== 'attack') return; // got interrupted
+        attacker.impactScheduled = true;
+        try {
+          window.triggerImpact({
+            attacker: attackerLabel,
+            defender: defenderLabel,
+            tick: combatTickCount,
+          });
+        } catch (err) {
+          console.warn('[lkb-3d] triggerImpact threw', err);
+        }
+      }, dur * 0.70 * 1000);
+
+      // Return both knights to idle just after the swing resolves.
+      setTimeout(() => {
+        if (combatants[attackerLabel]) {
+          playClip(combatants[attackerLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+          combatants[attackerLabel].state = 'idle';
+        }
+        if (combatants[defenderLabel]) {
+          playClip(combatants[defenderLabel], CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+          combatants[defenderLabel].state = 'idle';
+        }
+      }, dur * 1.05 * 1000);
+    }
+
+    // Boot the combat loop once both knights are ready. We poll on a
+    // short interval rather than coupling into markLoaded() so this
+    // stays decoupled from the GLB load flow.
+    let combatLoopHandle = null;
+    function maybeStartCombatLoop() {
+      if (combatLoopHandle) return;
+      if (!combatants.crimson || !combatants.azure) return;
+      console.log('[lkb-3d] both knights ready — starting combat loop');
+      // Kick off the first tick after a short beat so the idle pose
+      // reads first; then run on a 3s cadence.
+      setTimeout(combatTick, 1200);
+      combatLoopHandle = setInterval(combatTick, 3000);
+    }
+    const combatBootWatcher = setInterval(() => {
+      if (combatants.crimson && combatants.azure) {
+        clearInterval(combatBootWatcher);
+        maybeStartCombatLoop();
+      }
+    }, 200);
 
     // ── log.glb ────────────────────────────────────────────────── */
     loader.load(
@@ -672,7 +1013,9 @@
         mixers.forEach(m => m.update(delta));
       }
       updateDust(delta);
-      controls.update(); // needed for damping
+      controls.update(); // needed for damping (recomputes camera.position)
+      // Run impact FX AFTER controls so camera-shake jitter wins this frame.
+      impactSystem.update(delta);
       composer.render();
     }
     animate();
