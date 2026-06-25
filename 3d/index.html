@@ -1686,7 +1686,7 @@
     import { BokehPass }       from 'three/addons/postprocessing/BokehPass.js';
 
     /* ── renderer ──────────────────────────────────────────────── */
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
@@ -4661,10 +4661,26 @@
     }
 
     /* ── resize handler ─────────────────────────────────────────── */
+    // aspect-aware FOV: at portrait/narrow viewports we widen vertical FOV so
+    // horizontal coverage stays constant (game is tuned for 16:9 landscape).
     function onResize() {
       const w = host.clientWidth;
       const h = host.clientHeight;
-      camera.aspect = w / h;
+      const aspect = w / h;
+      camera.aspect = aspect;
+
+      // Compute base FOV from current view mode; FP uses FP_SHOT.fov, others use settings.fov.
+      const baseFov = (cameraDirector && cameraDirector.viewMode === 'fp')
+        ? FP_SHOT.fov
+        : ((window.settings && window.settings.fov) || 36);
+      const REF_ASPECT = 16 / 9; // game tuned for landscape 1600×900
+      if (aspect < REF_ASPECT) {
+        // portrait/square: widen vertical FOV so horizontal FOV matches REF_ASPECT.
+        const hFovRad = 2 * Math.atan(Math.tan(baseFov * Math.PI / 360) * REF_ASPECT);
+        camera.fov = (hFovRad * 180 / Math.PI) / aspect;
+      } else {
+        camera.fov = baseFov;
+      }
       camera.updateProjectionMatrix();
       renderer.setSize(w, h, false); // false → CSS manages element size
 
@@ -4677,6 +4693,12 @@
       if (typeof bokehPass.setSize === 'function') bokehPass.setSize(w, h);
       bloomPass.setSize(w, h);
       smaaPass.setSize(w * pr, h * pr);
+
+      // BokehPass auto-focus: track camera distance so close FP shots don't
+      // blur the subject. Clamp to [3, 15] to avoid extremes.
+      if (bokehPass && bokehPass.uniforms && bokehPass.uniforms.focus) {
+        bokehPass.uniforms.focus.value = Math.max(3.0, Math.min(15.0, camera.position.length()));
+      }
     }
     window.addEventListener('resize', onResize);
     onResize();
@@ -4841,6 +4863,11 @@
       // on the camera-parented sword reads the correct transform, and
       // BEFORE composer.render() so the new line geometry gets drawn.
       if (weaponTrail) weaponTrail.update(delta);
+      // BokehPass auto-focus per frame: track camera distance so DoF stays
+      // sharp on the knights at any view (FP close shots, cinematic far shots).
+      if (bokehPass && bokehPass.uniforms && bokehPass.uniforms.focus) {
+        bokehPass.uniforms.focus.value = Math.max(3.0, Math.min(15.0, camera.position.length()));
+      }
       composer.render();
     }
     animate();
