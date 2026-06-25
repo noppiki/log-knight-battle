@@ -27,8 +27,9 @@
                #letterbox-*                       letterbox bars (r replay)
         25    #ko-overlay, #fp-streak-hud,       KO text; FP streak; control hints; mp-bar;
                #fp-control-hints, #mp-bar,        reticle; dmg-arrow; lock-bracket;
-               #fp-reticle, #fp-dmg-arrow,        dodge cooldown ring (r76)
-               #fp-lock-bracket, #fp-dodge-cd
+               #fp-reticle, #fp-dmg-arrow,        dodge cooldown ring (r76); round hit count (r102)
+               #fp-lock-bracket, #fp-dodge-cd,
+               #fp-hit-count
         26    #match-won-overlay, #fp-tg-alert,  match-won text; guard alert; charge ring; mp-toast
                #charge-ring, #mp-toast
         27    #match-hotkey-hint, #round-banner, rematch hint; round banner; dodge flash (r63)
@@ -932,6 +933,29 @@
       opacity: 0.70;
     }
     body.fp-mode #fp-streak-hud { display: block; }
+
+    /* ── round hit count HUD (r102) ────────────────────────────── */
+    /* Displays cumulative "Hits: N" for the current round — bottom-right,
+       above the diff pill (200px) and below the control hints stack.
+       FP-mode only. Resets to 0 on each round start. */
+    #fp-hit-count {
+      position: fixed;
+      bottom: 170px;
+      right: 24px;
+      font: 11px 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.10em;
+      color: rgba(255, 255, 255, 0.50);
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      pointer-events: none;
+      z-index: 25;
+      display: none;
+      white-space: nowrap;
+    }
+    body.fp-mode #fp-hit-count { display: block; }
+    #fp-hit-count-num {
+      color: #d8a45a;
+      font-weight: 700;
+    }
 
     /* ── combo counter HUD (r54) ──────────────────────────────── */
     /* Displays "×N HIT" when the player lands 2+ consecutive unguarded
@@ -2531,6 +2555,9 @@
   </div>
   <!-- r66: FP bottom-left streak HUD — visible only in body.fp-mode -->
   <div id="fp-streak-hud" aria-hidden="true"></div>
+  <!-- r102: FP round hit count — cumulative hits landed on azure this round.
+       Visible only in body.fp-mode; resets on each round start. -->
+  <div id="fp-hit-count" aria-hidden="true">HITS:&nbsp;<span id="fp-hit-count-num">0</span></div>
   <!-- ROUND N banner host — JS injects a .rb-text child on each round
        start (and on initial load), then auto-removes after the CSS
        animation completes (~1.5s). Pointer-events: none keeps it from
@@ -9119,6 +9146,8 @@
       } catch (e) {}
       // r54: clear combo chain on round/match reset
       try { if (window._comboReset) window._comboReset(); } catch (e) {}
+      // r102: reset cumulative round hit count
+      try { if (window._resetRoundHits) window._resetRoundHits(); } catch (e) {}
       // r55: cancel any in-progress charge so ring + rumble don't leak between rounds
       try { _chargeCancelSilent(); } catch (e) {}
       // Ensure letterbox bars are retracted before the next round starts
@@ -9743,6 +9772,25 @@
     // Expose reset so resetMatch / resetFullMatch can clear the combo.
     window._comboReset = _comboReset;
 
+    // r102: round hit count — cumulative hits player lands on azure per round.
+    // Resets only in resetMatch() so it accumulates across combo breaks.
+    window._roundHits = 0;
+    function _refreshHitCount() {
+      const el = document.getElementById('fp-hit-count-num');
+      if (el) el.textContent = String(window._roundHits);
+    }
+    function _bumpRoundHits() {
+      window._roundHits += 1;
+      _refreshHitCount();
+    }
+    function _resetRoundHits() {
+      window._roundHits = 0;
+      _refreshHitCount();
+    }
+    window._resetRoundHits = _resetRoundHits;
+    // Initialise display on load.
+    _refreshHitCount();
+
     // applyDamage — single source of truth for HP changes. Skips if
     // the defender is already down so a late-arriving impact doesn't
     // re-fire Death_A on the same knight.
@@ -9816,6 +9864,8 @@
       if (defenderId === 'azure') {
         if (!guardAbsorbed) {
           try { _comboHit(); } catch (e) {}
+          // r102: bump cumulative round hit count on every clean azure hit.
+          try { _bumpRoundHits(); } catch (e) {}
           // r100: tier-2 hit-take emissive flash on azure mesh — momentary red glow
           // (300 ms) to punch home the visual impact of a heavy charged strike.
           if (opts && opts.kind === 'charge2') {
