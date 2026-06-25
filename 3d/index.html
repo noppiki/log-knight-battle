@@ -761,6 +761,58 @@
     #letterbox-top.active,
     #letterbox-bottom.active { height: 12vh; }
 
+    /* ── r65: match-start cinematic intro text ─────────────────── */
+    /* READY... and FIGHT! overlays. z-index 30 — above all HUD and
+       letterbox bars (24), below settings panel (95/100). */
+    #match-intro-text {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 30;
+      opacity: 0;
+      transition: opacity 0.25s ease-out;
+    }
+    #match-intro-text.visible {
+      opacity: 1;
+    }
+    #match-intro-text .mit-word {
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 96px;
+      font-weight: 900;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: #e8dcc0;
+      text-shadow:
+        0 -1px 0 rgba(255, 235, 200, 0.55),
+        0 1px 0 rgba(20, 16, 24, 0.95),
+        0 2px 0 rgba(20, 16, 24, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 6px 18px rgba(0, 0, 0, 0.85),
+        0 0 32px rgba(220, 170, 80, 0.8);
+    }
+    #match-intro-text .mit-word.fight {
+      font-size: 144px;
+      color: #ff6060;
+      letter-spacing: 0.18em;
+      text-shadow:
+        0 -1px 0 rgba(255, 200, 200, 0.55),
+        0 1px 0 rgba(20, 0, 0, 0.95),
+        0 2px 0 rgba(20, 0, 0, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 8px 28px rgba(0, 0, 0, 0.9),
+        0 0 48px rgba(255, 80, 40, 0.85);
+      animation: fightFlash 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
+    @keyframes fightFlash {
+      0%   { transform: scale(0.8);  opacity: 0; }
+      30%  { transform: scale(1.25); opacity: 1; }
+      65%  { transform: scale(0.95); opacity: 1; }
+      100% { transform: scale(1.0);  opacity: 1; }
+    }
+
     /* ── full-screen radial vignette ───────────────────────────── */
     #vignette {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -1720,6 +1772,10 @@
        animation completes (~1.5s). Pointer-events: none keeps it from
        blocking the canvas. -->
   <div id="round-banner" aria-live="polite"></div>
+  <!-- r65: match-start cinematic intro — READY.../FIGHT! text overlay -->
+  <div id="match-intro-text" aria-live="assertive">
+    <span class="mit-word" id="mit-word"></span>
+  </div>
 
   <!-- r64: FP control hints — fade out when each action is first performed.
        Shown only in FP mode (body.fp-mode). JS drives markHintDone(key).
@@ -5741,10 +5797,11 @@
       const overlay = document.getElementById('loading');
       overlay.classList.add('fade-out');
       setTimeout(() => overlay.remove(), 600);
-      // Initial ROUND 1 banner — fires once the loading overlay clears
-      // (slight delay so the player actually sees it appear on top of
-      // the lit scene, not under the fading LOADING screen).
-      setTimeout(() => showRoundBanner(window.gameState.round || 1), 650);
+      // Initial ROUND 1 banner — deferred until AFTER the r65 cinematic
+      // intro completes (3200ms intro + small buffer = 3500ms).
+      // This prevents the "ROUND 1" text from stacking on top of
+      // "READY..." during the opening sequence.
+      setTimeout(() => showRoundBanner(window.gameState.round || 1), 3500);
     }
 
     function markLoaded() {
@@ -7172,6 +7229,12 @@
       // Wipe footprint decals carried over from the previous match.
       try { FootprintSystem.clearAllFootprints(); } catch (e) {}
       resetMatch();
+      // r65: replay the cinematic intro for the fresh match (if both
+      // knights are already loaded; otherwise maybeStartCombatLoop handles it).
+      if (combatants && combatants.crimson && combatants.azure) {
+        startMatchIntro();
+        _combatGraceUntil = performance.now() + 3000;
+      }
       console.log('[lkb-3d] full match reset (wins + round cleared)');
     }
 
@@ -8289,14 +8352,74 @@
     // short interval rather than coupling into markLoaded() so this
     // stays decoupled from the GLB load flow.
     let combatLoopHandle = null;
+    // ── r65: match-start cinematic intro ─────────────────────────
+    // Runs ONCE when both knights are ready (maybeStartCombatLoop).
+    // Also runs on resetFullMatch so a rematch opens with the intro.
+    // Per-round resets (resetMatch) do NOT replay it.
+    //
+    // State flags:
+    //   window._matchIntroActive — true for the 3.2s intro window;
+    //     fpInputActive() returns false while this is set.
+    //   window._matchIntroStartMs — performance.now() at kick-off;
+    //     used by the animate() camera-hijack block.
+    //   window._matchIntroTimers  — all pending setTimeout ids; cleared
+    //     on re-entry so back-to-back calls never double-fire.
+    window._matchIntroActive  = false;
+    window._matchIntroStartMs = 0;
+    window._matchIntroTimers  = [];
+    const _mitEl   = document.getElementById('match-intro-text');
+    const _mitWord = document.getElementById('mit-word');
+
+    function _mitShow(word, isFight) {
+      if (!_mitEl || !_mitWord) return;
+      _mitWord.textContent = word;
+      _mitWord.className   = 'mit-word' + (isFight ? ' fight' : '');
+      _mitEl.classList.add('visible');
+    }
+    function _mitHide() {
+      if (!_mitEl) return;
+      _mitEl.classList.remove('visible');
+    }
+
+    function startMatchIntro() {
+      // Cancel any in-flight intro (re-entry guard for resetFullMatch).
+      window._matchIntroTimers.forEach(clearTimeout);
+      window._matchIntroTimers = [];
+      _mitHide();
+
+      window._matchIntroActive  = true;
+      window._matchIntroStartMs = performance.now();
+
+      // READY... — 1.0 s → fade-in, hold to 1.8 s → fade-out.
+      window._matchIntroTimers.push(setTimeout(() => {
+        _mitShow('READY...', false);
+        try { if (window.sfxCount) window.sfxCount(); } catch (e) {}
+      }, 1000));
+      window._matchIntroTimers.push(setTimeout(() => {
+        _mitHide();
+      }, 1800));
+
+      // FIGHT! — 2.5 s → flash in. 3.2 s → clear + end intro.
+      window._matchIntroTimers.push(setTimeout(() => {
+        _mitShow('FIGHT!', true);
+        try { if (window.sfxFight) window.sfxFight(); } catch (e) {}
+      }, 2500));
+      window._matchIntroTimers.push(setTimeout(() => {
+        _mitHide();
+        window._matchIntroActive = false;
+      }, 3200));
+
+      console.log('[lkb-3d] r65 match intro started');
+    }
+
     function maybeStartCombatLoop() {
       if (combatLoopHandle) return;
       if (!combatants.crimson || !combatants.azure) return;
       console.log('[lkb-3d] both knights ready — starting combat loop');
-      // Kick off the first tick after a short beat so the idle pose
-      // reads first; then run on a 4.5s cadence (r47 interval).
-      // r47: arm grace for the very first round too.
-      _combatGraceUntil = performance.now() + 2000;
+      // r65: kick off the cinematic intro; grace extended to 3000ms to
+      // cover the full 3.2s intro window with a safety margin.
+      startMatchIntro();
+      _combatGraceUntil = performance.now() + 3000;
       setTimeout(combatTick, 1200);
       // r47: interval extended 3000→4500ms — gives the player room to attack.
       combatLoopHandle = setInterval(combatTick, 4500);
@@ -8399,6 +8522,8 @@
     }
 
     function fpInputActive() {
+      // r65: block all FP input during the match-start cinematic intro.
+      if (window._matchIntroActive) return false;
       return cameraDirector && cameraDirector.viewMode === 'fp' && window._mouseLocked;
     }
 
@@ -10095,7 +10220,40 @@
       // disables controls.enabled during a shake (~0.18 s); we do NOT
       // infer cinema state from that flag — cameraDirector.active is
       // the single source of truth (see CameraDirector ownership doc).
-      if (cameraDirector.active) {
+      // ── r65: cinematic intro camera override ──────────────────────
+      // While window._matchIntroActive, hijack camera pose AFTER the
+      // director's update() so our write wins (director runs its internal
+      // cycle timers, then we overwrite camera.position and lookAt).
+      if (window._matchIntroActive) {
+        // Still advance director internal state (cycle, hold timers).
+        if (cameraDirector.active) cameraDirector.update(delta);
+        const _introElapsed = performance.now() - window._matchIntroStartMs;
+        // Azure close-up anchor — reuse CLOSE_AZURE shot coords.
+        const _introFromX = 3.5, _introFromY = 0.9, _introFromZ = -3.5;
+        const _introLookX = 2.0, _introLookY = 1.2, _introLookZ = 0;
+        if (_introElapsed < 2000) {
+          // 0-2s: static azure close-up.
+          camera.position.set(_introFromX, _introFromY, _introFromZ);
+          camera.lookAt(_introLookX, _introLookY, _introLookZ);
+        } else {
+          // 2-3.2s: smooth lerp to home position (no pop on exit).
+          const _t    = Math.min((_introElapsed - 2000) / 1200, 1);
+          const _ease = _t < 0.5 ? 4 * _t * _t * _t : 1 - Math.pow(-2 * _t + 2, 3) / 2;
+          const _isFp = cameraDirector.viewMode === 'fp';
+          const _rp   = _isFp ? FP_SHOT.getPosition()  : CINEMA_SHOTS.SIDE_WIDE.pos;
+          const _rl   = _isFp ? FP_SHOT.getLookAt()    : CINEMA_SHOTS.SIDE_WIDE.look;
+          camera.position.set(
+            _introFromX + (_rp.x - _introFromX) * _ease,
+            _introFromY + (_rp.y - _introFromY) * _ease,
+            _introFromZ + (_rp.z - _introFromZ) * _ease
+          );
+          camera.lookAt(
+            _introLookX + (_rl.x - _introLookX) * _ease,
+            _introLookY + (_rl.y - _introLookY) * _ease,
+            _introLookZ + (_rl.z - _introLookZ) * _ease
+          );
+        }
+      } else if (cameraDirector.active) {
         cameraDirector.update(delta);
         // FP: rotation owned by mouselook (camera.rotation.set on YXZ),
         // NOT by lookAt — calling lookAt() here would resnap pitch every
