@@ -22,7 +22,8 @@
                #game-hud, #record-hud
         22    #weather-pill, #fp-danger-vignette (r72) persistent low-HP red rim; below one-shot flashes
         23    #fp-tg-warn                        amber telegraph vignette (r51); below hit flash
-        24    #fp-damage-vignette, #letterbox-*  hit flash vignette (r49); letterbox bars (r replay)
+        24    #fp-damage-vignette, #fp-dmg-border, hit flash vignette (r49); border pulse (r92);
+               #letterbox-*                       letterbox bars (r replay)
         25    #ko-overlay, #fp-streak-hud,       KO text; FP streak; control hints; mp-bar;
                #fp-control-hints, #mp-bar,        reticle; dmg-arrow; lock-bracket;
                #fp-reticle, #fp-dmg-arrow,        dodge cooldown ring (r76)
@@ -1519,6 +1520,26 @@
       transition: opacity 400ms linear;
     }
 
+    /* r92: FP damage border pulse — 4-edge red glow on player HP loss.
+       Complements the radial vignette at 24 by concentrating the flash at
+       the screen perimeter. box-shadow inset produces the edge-only look
+       without filling the centre. CSS transition fades over 200ms; JS adds
+       the .flash class which snaps opacity to 1, then removes it. */
+    #fp-dmg-border {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 24;
+      opacity: 0;
+      border: 6px solid rgba(255, 60, 60, 0.50);
+      border-radius: 2px;
+      box-shadow:
+        inset 0 0 60px 20px rgba(255, 40, 40, 0.65),
+        inset 0 0  8px  2px rgba(255, 200, 200, 0.40);
+      transition: opacity 200ms ease-out;
+    }
+    #fp-dmg-border.flash { opacity: 1; }
+
     /* FP damage direction arrow — rotates to point toward the attacker's
        world direction on player HP loss in FP mode. Opacity driven by
        flashDmgArrow(); pointer-events: none so it never blocks input.
@@ -2477,6 +2498,13 @@
   <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
        JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
   <div id="fp-damage-vignette"></div>
+
+  <!-- r92: FP damage border pulse — 4-edge inset red glow on player HP loss.
+       Distinct from fp-damage-vignette (radial, centre-heavy); this fires
+       simultaneously and draws attention to the screen perimeter so a hit
+       reads in both the centre (vignette) and the edges (border). Same
+       z-index 24. JS flashDmgBorder() snaps .flash on then removes it. -->
+  <div id="fp-dmg-border"></div>
 
   <!-- FP damage direction arrow — rotates toward attacker on player HP loss.
        flashDmgArrow(yawRad) sets the CSS rotation then fades to 0 over 0.6s. -->
@@ -5573,6 +5601,8 @@
     const FpPolish = {
       reticleEl:        document.getElementById('fp-reticle'),
       vignetteEl:       document.getElementById('fp-damage-vignette'),
+      dmgBorderEl:      document.getElementById('fp-dmg-border'),   // r92 border pulse
+      _dmgBorderTimer:  0,                                            // r92 border clear timer
       dmgArrowEl:       document.getElementById('fp-dmg-arrow'),
       lockBracketEl:    document.getElementById('fp-lock-bracket'),
       tgWarnEl:         document.getElementById('fp-tg-warn'),   // r51 telegraph amber vignette
@@ -5959,6 +5989,24 @@
       FpPolish.vignetteFadeTimer = setTimeout(() => {
         FpPolish.vignetteFadeTimer = 0;
       }, 400);
+    }
+
+    // flashDmgBorder — r92: snap the 4-edge red border to opacity 1 then
+    // let CSS fade it back over 200ms.  Fires simultaneously with the radial
+    // vignette so the perimeter screams "you were hit" while the centre dims.
+    // Re-entrant: a second hit mid-fade clears the pending remove and restarts.
+    function flashDmgBorder() {
+      const el = FpPolish.dmgBorderEl;
+      if (!el) return;
+      if (FpPolish._dmgBorderTimer) {
+        clearTimeout(FpPolish._dmgBorderTimer);
+        FpPolish._dmgBorderTimer = 0;
+      }
+      el.classList.add('flash');
+      FpPolish._dmgBorderTimer = setTimeout(function () {
+        el.classList.remove('flash');
+        FpPolish._dmgBorderTimer = 0;
+      }, 200);
     }
 
     // flashDmgArrow — show the directional damage arrow pointing toward the
@@ -8911,6 +8959,14 @@
           FpPolish.edgeBlurEl.style.opacity = '0';
         }
       } catch (e) {}
+      // r92: clear damage border pulse so the .flash class never leaks between rounds.
+      try {
+        if (FpPolish._dmgBorderTimer) {
+          clearTimeout(FpPolish._dmgBorderTimer);
+          FpPolish._dmgBorderTimer = 0;
+        }
+        if (FpPolish.dmgBorderEl) FpPolish.dmgBorderEl.classList.remove('flash');
+      } catch (e) {}
       // r63: clear retreat dodge state so cooldown/i-frame/camera don't leak between rounds.
       try {
         FpPolish.dodge.active  = false;
@@ -9480,6 +9536,7 @@
           cameraDirector && cameraDirector.viewMode === 'fp') {
         if (!guardAbsorbed) {
           flashDamageVignette();
+          flashDmgBorder();   // r92: 4-edge red border pulse (complements radial vignette)
           flashDmgArrow();
           // r53: HP bar red glow flash on player hit
           try {
