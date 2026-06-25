@@ -3558,6 +3558,18 @@
         } catch (e) {}
       }
 
+      // r159: player attack land low thump — "body hit" sub-bass layer.
+      // 50→30 Hz sawtooth 80ms — shorter / lower than r146 deathBodyThud (70→40 Hz)
+      // so the two sounds are perceptually distinct.  Vol scales with attack tier.
+      function playAttackLandThump(tier) {
+        if (!actx) return;
+        try {
+          const vols = [0.08, 0.12, 0.16];
+          const vol  = vols[Math.min(tier || 0, 2)];
+          tone({ freq: 50, freq2: 30, dur: 0.08, type: 'sawtooth', vol: vol, attack: 0.005 });
+        } catch (e) {}
+      }
+
       // ───────────── First-gesture init + DOM wiring ─────────────
       // Browsers refuse to start an AudioContext until a real user gesture
       // happens, so we only call initAudio() from a click/keydown listener
@@ -11519,6 +11531,13 @@
       if (defenderId === 'azure') {
         if (!guardAbsorbed) {
           try { _comboHit(); } catch (e) {}
+          // r159: low thump sfx — "body hit" weight layer on clean azure hit.
+          // tier ladder: charge2 → tier 2 (vol 0.16), charge1 → tier 1 (0.12), else → tier 0 (0.08).
+          try {
+            const _ltt = (opts && opts.kind === 'charge2') ? 2
+                       : (opts && opts.kind === 'charge1') ? 1 : 0;
+            playAttackLandThump(_ltt);
+          } catch (e) {}
           // r102: bump cumulative round hit count on every clean azure hit.
           try { _bumpRoundHits(); } catch (e) {}
           // r100: tier-2 hit-take emissive flash on azure mesh — momentary red glow
