@@ -5592,6 +5592,8 @@
       }
       // (3) Audio rumble — guard actx null (pre-gesture) and suspended state.
       _startDangerRumble();
+      // (4) r90: first-cross sharp tone — 1000→500Hz triangle, 150ms, through sfxGain→globalGain.
+      tone({ freq: 1000, freq2: 500, dur: 0.15, type: 'triangle', vol: 0.1, attack: 0.02 });
     }
 
     // deactivateDanger — called once when HP recovers or on death/reset.
