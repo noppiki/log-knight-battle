@@ -99,6 +99,7 @@
       display: flex;
       flex-direction: column;
       gap: 6px;
+      width: 330px;
     }
     #game-hud .player-card.right {
       align-items: flex-end;
@@ -126,7 +127,7 @@
     }
     #game-hud .hp-bar,
     #game-hud .sp-bar {
-      width: 280px;
+      width: 300px;
       background: #2a3146;
       border: 3px solid #1a1f2e;
       border-radius: 2px;
@@ -159,6 +160,54 @@
       background: linear-gradient(to left, #d8a45a, #ffd089);
       margin-left: auto;
     }
+    /* hp-num: numeric HP readout at the right edge of the hp-bar row */
+    #game-hud .hp-bar-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #game-hud .player-card.right .hp-bar-row {
+      flex-direction: row-reverse;
+    }
+    #game-hud .hp-num {
+      color: #e8dcc0;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      text-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.9),
+        0 0 6px rgba(0, 0, 0, 0.7);
+      min-width: 52px;
+    }
+    #game-hud .player-card.right .hp-num {
+      text-align: right;
+    }
+    /* win pips: ○○● row below SP bar */
+    #game-hud .win-pips {
+      display: flex;
+      gap: 5px;
+      margin-top: 2px;
+    }
+    #game-hud .player-card.right .win-pips {
+      justify-content: flex-end;
+    }
+    #game-hud .win-pip {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: transparent;
+      border: 2px solid #d8a45a;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+    #game-hud .win-pip.filled {
+      background: #d8a45a;
+      box-shadow:
+        0 0 6px rgba(216, 164, 90, 0.75),
+        0 1px 3px rgba(0, 0, 0, 0.7);
+    }
     #game-hud .vs-badge {
       color: #d8a45a;
       font-size: 32px;
@@ -190,6 +239,39 @@
         0 8px 24px rgba(0, 0, 0, 0.9);
     }
     #ko-overlay.visible { display: flex; }
+
+    #match-won-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 26;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      gap: 8px;
+    }
+    #match-won-overlay.visible { display: flex; }
+    #match-won-overlay .mw-label {
+      color: #d8a45a;
+      font-size: 52px;
+      font-weight: 900;
+      letter-spacing: 0.20em;
+      text-shadow:
+        0 0 22px rgba(216, 164, 90, 0.65),
+        0 4px 0 #1a1f2e,
+        0 8px 28px rgba(0, 0, 0, 0.9);
+    }
+    #match-won-overlay .mw-winner {
+      color: #e8dcc0;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-shadow:
+        0 2px 0 #1a1f2e,
+        0 4px 14px rgba(0, 0, 0, 0.85);
+    }
 
     /* ── full-screen radial vignette ───────────────────────────── */
     #vignette {
@@ -288,17 +370,37 @@
   <div id="game-hud">
     <div class="player-card left">
       <div class="player-name"><span class="tag">P1</span>CRIMSON</div>
-      <div class="hp-bar"><div class="hp-fill" id="hp-fill-crimson"></div></div>
+      <div class="hp-bar-row">
+        <div class="hp-bar"><div class="hp-fill" id="hp-fill-crimson"></div></div>
+        <span class="hp-num" id="hp-num-crimson">100/100</span>
+      </div>
       <div class="sp-bar"><div class="sp-fill" id="sp-fill-crimson"></div></div>
+      <div class="win-pips" id="pips-crimson">
+        <div class="win-pip" data-pip="0"></div>
+        <div class="win-pip" data-pip="1"></div>
+        <div class="win-pip" data-pip="2"></div>
+      </div>
     </div>
     <div class="vs-badge">VS</div>
     <div class="player-card right">
       <div class="player-name"><span class="tag">P2</span>AZURE</div>
-      <div class="hp-bar"><div class="hp-fill" id="hp-fill-azure"></div></div>
+      <div class="hp-bar-row">
+        <div class="hp-bar"><div class="hp-fill" id="hp-fill-azure"></div></div>
+        <span class="hp-num" id="hp-num-azure">100/100</span>
+      </div>
       <div class="sp-bar"><div class="sp-fill" id="sp-fill-azure"></div></div>
+      <div class="win-pips" id="pips-azure">
+        <div class="win-pip" data-pip="0"></div>
+        <div class="win-pip" data-pip="1"></div>
+        <div class="win-pip" data-pip="2"></div>
+      </div>
     </div>
   </div>
   <div id="ko-overlay">K.O.</div>
+  <div id="match-won-overlay">
+    <div class="mw-label">MATCH WON</div>
+    <div class="mw-winner" id="mw-winner-text"></div>
+  </div>
 
   <script type="module">
     import * as THREE from 'three';
@@ -637,10 +739,20 @@
     // ── KayKit clip names (from discovery) ───────────────────────
     const CLIP_NAMES = {
       IDLE:   '2H_Melee_Idle',
-      ATTACK: '2H_Melee_Attack_Chop',
       BLOCK:  'Blocking',
       HIT:    'Hit_A',
     };
+
+    // Attack variety pool — pick one uniformly at random each combat tick.
+    const ATTACK_CLIPS = [
+      '2H_Melee_Attack_Chop',
+      '2H_Melee_Attack_Slice',
+      '2H_Melee_Attack_Stab',
+      '2H_Melee_Attack_Spin',
+    ];
+    function pickAttackClip() {
+      return ATTACK_CLIPS[Math.floor(Math.random() * ATTACK_CLIPS.length)];
+    }
 
     // Combatant registry — populated as each knight GLB loads. Each
     // entry holds the mixer, the clips map, current action ref, state
@@ -815,9 +927,15 @@
           gravity:  -3.0,
         });
 
-        // Camera shake — 0.18s decaying jitter. basePos is captured
-        // fresh each frame in update() because OrbitControls overwrites
-        // camera.position every tick; we just offset on top of it.
+        // Camera shake — 0.18s decaying jitter. Round-13 drift fix:
+        // OrbitControls is temporarily DISABLED for the duration of the
+        // shake so additive jitter cannot fight damping or drift the
+        // camera target. We snapshot the camera position at spawn,
+        // apply random offsets from that anchor each frame, then
+        // restore the original position and re-enable controls on
+        // expiry.
+        this.originalCamPos = this.camera.position.clone();
+        controls.enabled = false;
         this.shake = {
           remaining: 0.18,
           duration:  0.18,
@@ -880,22 +998,30 @@
           b.points.material.opacity = 1.0 - (b.age / b.lifetime);
         }
 
-        // ── camera shake (linear decay) ──────────────────────────
-        // We run AFTER controls.update() each frame, so the camera's
-        // current position is the controls' computed value — offset on
-        // top of that. On expiry we just stop offsetting; next frame
-        // OrbitControls writes its own clean value.
+        // ── camera shake (linear decay, anchored to snapshot) ────
+        // Round-13 drift fix: OrbitControls was disabled in spawn();
+        // we anchor every offset to the snapshot taken at spawn time
+        // (this.originalCamPos) rather than mutating camera.position
+        // additively. On expiry we restore the snapshot exactly and
+        // re-enable controls so damping continues from a clean state.
         if (this.shake) {
           this.shake.remaining -= delta;
           if (this.shake.remaining <= 0) {
+            // Restore exact pre-shake position and hand control back.
+            if (this.originalCamPos) {
+              this.camera.position.copy(this.originalCamPos);
+            }
+            controls.enabled = true;
+            this.originalCamPos = null;
             this.shake = null;
           } else {
-            const t = this.shake.remaining / this.shake.duration; // 1 → 0
-            const amp = this.shake.amplitude * t;
-            // Random unit vector × amp.
+            const alpha = this.shake.remaining / this.shake.duration; // 1 → 0
+            const amp = this.shake.amplitude * alpha;
+            // Random unit vector × amp, applied from snapshot anchor.
             const u = Math.random() * 2 - 1;
             const phi = Math.random() * Math.PI * 2;
             const s = Math.sqrt(1 - u * u);
+            this.camera.position.copy(this.originalCamPos);
             this.camera.position.x += s * Math.cos(phi) * amp;
             this.camera.position.y += u * amp;
             this.camera.position.z += s * Math.sin(phi) * amp;
@@ -982,12 +1108,15 @@
        cycle when a knight falls. The combat tick (below) calls into
        applyDamage and bumps SP on every contact frame. */
     window.gameState = {
-      crimson: { hp: 100, sp: 0, dead: false },
-      azure:   { hp: 100, sp: 0, dead: false },
+      crimson: { hp: 100, sp: 0, dead: false, wins: 0 },
+      azure:   { hp: 100, sp: 0, dead: false, wins: 0 },
     };
     const HP_MAX = 100;
     const SP_MAX = 100;
+    const WINS_MAX = 3;
     const koOverlay = document.getElementById('ko-overlay');
+    const matchWonOverlay = document.getElementById('match-won-overlay');
+    const mwWinnerText   = document.getElementById('mw-winner-text');
     const hpFill = {
       crimson: document.getElementById('hp-fill-crimson'),
       azure:   document.getElementById('hp-fill-azure'),
@@ -996,12 +1125,28 @@
       crimson: document.getElementById('sp-fill-crimson'),
       azure:   document.getElementById('sp-fill-azure'),
     };
+    const hpNum = {
+      crimson: document.getElementById('hp-num-crimson'),
+      azure:   document.getElementById('hp-num-azure'),
+    };
+    const winPips = {
+      crimson: document.querySelectorAll('#pips-crimson .win-pip'),
+      azure:   document.querySelectorAll('#pips-azure   .win-pip'),
+    };
 
     function updateGaugeDOM() {
       for (const id of ['crimson', 'azure']) {
         const s = window.gameState[id];
         if (hpFill[id]) hpFill[id].style.width = (s.hp / HP_MAX * 100) + '%';
         if (spFill[id]) spFill[id].style.width = (s.sp / SP_MAX * 100) + '%';
+        // HP numeric readout
+        if (hpNum[id]) hpNum[id].textContent = Math.ceil(s.hp) + '/' + HP_MAX;
+        // Win pips — fill each pip up to wins count
+        if (winPips[id]) {
+          winPips[id].forEach((pip, i) => {
+            pip.classList.toggle('filled', i < s.wins);
+          });
+        }
       }
     }
     updateGaugeDOM();
@@ -1009,12 +1154,19 @@
     // Reset cycle — called 5s after a KO. Restores both knights to
     // full HP/SP, hides the overlay, and forces both back to idle so
     // the next combat tick has clean state to drive.
+    // NOTE: mutates fields in place so `wins` is preserved across rounds.
     let resetTimerHandle = null;
     function resetMatch() {
-      window.gameState.crimson = { hp: HP_MAX, sp: 0, dead: false };
-      window.gameState.azure   = { hp: HP_MAX, sp: 0, dead: false };
+      for (const id of ['crimson', 'azure']) {
+        const s = window.gameState[id];
+        s.hp   = HP_MAX;
+        s.sp   = 0;
+        s.dead = false;
+        // wins is intentionally NOT reset here — persists until match end
+      }
       updateGaugeDOM();
       if (koOverlay) koOverlay.classList.remove('visible');
+      if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
       for (const id of ['crimson', 'azure']) {
         const c = combatants[id];
         if (c) {
@@ -1025,19 +1177,62 @@
       console.log('[lkb-3d] match reset');
     }
 
+    // Full match reset — zeroes wins on both sides, then does normal round reset.
+    function resetFullMatch() {
+      window.gameState.crimson.wins = 0;
+      window.gameState.azure.wins   = 0;
+      resetMatch();
+      console.log('[lkb-3d] full match reset (wins cleared)');
+    }
+
     // triggerDeath — fires Death_A on the dead knight, shows K.O.,
-    // and schedules the 5s reset. Idempotent per defender thanks to
-    // the gameState.dead flag.
+    // increments the winner's win count, and schedules the reset.
+    // Timing: 4s Death_A hold, then winner plays Cheer for 2s (overlap),
+    // total 6s before round/match reset. Idempotent per defender thanks
+    // to the gameState.dead flag.
     function triggerDeath(defenderId) {
       const c = combatants[defenderId];
       if (!c) return;
       window.gameState[defenderId].dead = true;
       c.state = 'dead';
       playClip(c, 'Death_A', { fadeIn: 0.15, loop: false });
-      if (koOverlay) koOverlay.classList.add('visible');
-      console.log(`[lkb-3d] ${defenderId} K.O.`);
+
+      // Increment winner's win count
+      const winnerId = defenderId === 'crimson' ? 'azure' : 'crimson';
+      window.gameState[winnerId].wins += 1;
+      updateGaugeDOM(); // refresh pips immediately
+
+      const winnerWins = window.gameState[winnerId].wins;
+      console.log(`[lkb-3d] ${defenderId} K.O. — ${winnerId} now has ${winnerWins} win(s)`);
+
       if (resetTimerHandle) clearTimeout(resetTimerHandle);
-      resetTimerHandle = setTimeout(resetMatch, 5000);
+
+      // Winner plays Cheer after 4s (Death_A pose held), lasting 2s before reset (6s total).
+      const cheerHandle = setTimeout(() => {
+        const winner = combatants[winnerId];
+        if (winner && !window.gameState[winnerId].dead) {
+          winner.state = 'cheer';
+          playClip(winner, 'Cheer', { fadeIn: 0.2, loop: false, weight: 1.0 });
+          console.log(`[lkb-3d] ${winnerId} Cheer`);
+        }
+      }, 4000);
+
+      if (winnerWins >= WINS_MAX) {
+        // MATCH WON — show match-won overlay, then do a full reset (clears wins)
+        if (koOverlay) koOverlay.classList.remove('visible');
+        if (matchWonOverlay) {
+          if (mwWinnerText) mwWinnerText.textContent = winnerId.toUpperCase() + ' WINS THE MATCH';
+          matchWonOverlay.classList.add('visible');
+        }
+        console.log(`[lkb-3d] MATCH WON by ${winnerId}`);
+        resetTimerHandle = setTimeout(resetFullMatch, 6000);
+      } else {
+        // Round over — normal KO overlay, then round reset (wins preserved)
+        if (koOverlay) koOverlay.classList.add('visible');
+        resetTimerHandle = setTimeout(resetMatch, 6000);
+      }
+      // Store cheer handle so resetMatch can cancel it if needed (defensive).
+      window._pendingCheerHandle = cheerHandle;
     }
 
     // applyDamage — single source of truth for HP changes. Skips if
@@ -1097,12 +1292,13 @@
       combatTickCount++;
       console.log(`[lkb-3d] combatTick #${combatTickCount}: ${attackerLabel} → ${defenderLabel}`);
 
-      // Wind up + attack — collapsed into one for now (the chop clip has
-      // its own anticipation built in). State labels track the rough
-      // phase so future logic (HUD, sound cues) can read combatant.state.
+      // Wind up + attack — randomize attack clip each tick for variety.
+      // State labels track the rough phase so future logic (HUD, sound
+      // cues) can read combatant.state.
       attacker.state = 'attack';
       attacker.impactScheduled = false;
-      const attackAction = playClip(attacker, CLIP_NAMES.ATTACK, {
+      const chosenAttack = pickAttackClip();
+      const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.2,
         loop: false,
         weight: 1.0,
