@@ -10981,10 +10981,11 @@
       try {
         const _azSlump = combatants && combatants.azure;
         if (_azSlump) {
-          _azSlump._deathSlumpStart   = null;
-          _azSlump._deathSlumpApplied = false;
-          _azSlump._deathSlumpPrevZ   = 0;
-          _azSlump._deathSlumpPrevX   = 0;
+          _azSlump._deathSlumpStart      = null;
+          _azSlump._deathSlumpApplied    = false;
+          _azSlump._deathSlumpPrevZ      = 0;
+          _azSlump._deathSlumpPrevX      = 0;
+          _azSlump._deathSlumpDustFired  = false; // r164: reset dust-burst guard
         }
       } catch (e) {}
       // Advance the round counter and announce the new round. Initial
@@ -14469,6 +14470,15 @@
       az._deathSlumpPrevZ = DEATH_SLUMP_Z_RAD * t;
       az._deathSlumpPrevX = DEATH_SLUMP_X_RAD * t;
       az._deathSlumpApplied = true;
+      // r164: dust burst at the moment the body finishes settling (~1400ms).
+      // Fires exactly once per death (guarded by _deathSlumpDustFired).
+      if (rawT >= 1 && !az._deathSlumpDustFired) {
+        az._deathSlumpDustFired = true;
+        if (typeof spawnGroundDust === 'function' && az.root) {
+          const dustPos = az.root.position.clone();
+          spawnGroundDust(dustPos, 20, 1.5);
+        }
+      }
     }
 
     /* ── resize handler ─────────────────────────────────────────── */
