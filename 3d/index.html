@@ -39,6 +39,7 @@
         30    #match-intro-text, #desperate-flash, cinematic READY/FIGHT (r65); desperate burst (r73);
                #charge-impact-flash, #loading     heavy-impact flash (r55); loading screen (startup)
         31    #fp-edge-blur                      tier-2 motion blur; above charge-impact-flash (30)
+        35    #round-transition-fade             end-of-round black fade (r143); below modal/roster
         40    #roster-popup                      opponent picker dropdown
         50    #fp-lock-hint                      FP pointer-lock instruction hint
         60    .exhaust-pill                      stamina-exhausted toast
@@ -2337,6 +2338,21 @@
     }
     #fp-edge-blur.active { opacity: 1; }
 
+    /* r143: end-of-round black transition fade — full-screen cover that fades
+       to black (200ms), holds 100ms, then fades back (200ms). Total 500ms.
+       z-35: above all HUD/cinematic overlays (z-31 max), below roster/modal (z-40+).
+       pointer-events:none so it never blocks input during the fade. */
+    #round-transition-fade {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      opacity: 0;
+      z-index: 35;
+      pointer-events: none;
+      transition: opacity 0.2s ease-in-out;
+    }
+    #round-transition-fade.show { opacity: 1; }
+
     /* r72: low-HP danger vignette — persistent red rim that pulses while
        crimson HP ≤ 25%. Distinct from #fp-damage-vignette (z-24, one-shot
        hit flash) and #fp-tg-warn (z-23, amber telegraph). Sits at z-22 so
@@ -2800,6 +2816,10 @@
 
   <!-- r61: tier-2 edge motion blur — backdrop-filter periphery burst on swing start. -->
   <div id="fp-edge-blur"></div>
+
+  <!-- r143: end-of-round transition fade — full-screen black veil (500ms total).
+       JS adds/removes .show via resetMatch(partialHeal=true). -->
+  <div id="round-transition-fade"></div>
 
   <!-- r85: mobile touch controls — attack / guard / dodge buttons.
        Visible only via body.touch-device.fp-mode CSS gate.
@@ -10018,6 +10038,18 @@
     // r89: partialHeal=true → between-round HP carry-over (+30, capped at HP_MAX).
     //      partialHeal=false (default) → full HP_MAX heal (used by resetFullMatch).
     function resetMatch(partialHeal) {
+      // r143: between-round black fade (partialHeal=true only).
+      // Sequence: fade-out 0→1 (200ms) → hold 100ms → fade-in 1→0 (200ms) = 500ms total.
+      // Full-match resets (partialHeal=false/undefined) skip this; cinematic intro covers those.
+      if (partialHeal) {
+        const _rtFade = document.getElementById('round-transition-fade');
+        if (_rtFade) {
+          _rtFade.classList.add('show');        // kick fade-out (CSS 200ms)
+          setTimeout(function () {
+            _rtFade.classList.remove('show');   // kick fade-in (CSS 200ms) after hold
+          }, 300); // 200ms fade-out + 100ms hold = 300ms before fade-in starts
+        }
+      }
       // r111: reset glint scheduler so next round starts fresh without a stale timer.
       _glintNextAt = 0;
       // r91: stop round timer immediately on any reset so it never leaks into the next round.
