@@ -1232,6 +1232,44 @@
       opacity: 1;
       transform: translate(-50%, -50%) scale(1.0);
     }
+
+    /* r52: Perfect-parry cyan-white full-screen flash. */
+    #fp-parry-flash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 28;
+      opacity: 0;
+      background: rgba(180, 230, 255, 0.55);
+      transition: opacity 150ms ease-out;
+    }
+    #fp-parry-flash.active { opacity: 1; }
+
+    /* r52: ⚡ PARRY! HUD text — appears center-top on successful parry. */
+    #fp-parry-text {
+      position: fixed;
+      left: 50%;
+      top: calc(50% - 160px);
+      transform: translate(-50%, -50%) scale(0.6);
+      pointer-events: none;
+      z-index: 29;
+      opacity: 0;
+      font-family: 'Segoe UI', 'Arial', sans-serif;
+      font-size: 32px;
+      font-weight: 900;
+      letter-spacing: 0.18em;
+      color: rgba(200, 240, 255, 1.00);
+      text-shadow:
+        0 0 20px rgba(100, 200, 255, 0.95),
+        0 0 6px  rgba(255, 255, 255, 0.90),
+        0 0 2px  rgba(0, 0, 0, 0.80);
+      transition: opacity 80ms ease-in, transform 80ms ease-in;
+      will-change: opacity, transform;
+    }
+    #fp-parry-text.active {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1.0);
+    }
   </style>
 
   <script type="importmap">
@@ -1439,6 +1477,10 @@
   <!-- FP damage direction arrow — rotates toward attacker on player HP loss.
        flashDmgArrow(yawRad) sets the CSS rotation then fades to 0 over 0.6s. -->
   <div id="fp-dmg-arrow">▲</div>
+
+  <!-- r52: perfect-parry cyan-white flash (full-screen) + HUD text. -->
+  <div id="fp-parry-flash"></div>
+  <div id="fp-parry-text">⚡ PARRY!</div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -4255,6 +4297,10 @@
       tgWarnEl:         document.getElementById('fp-tg-warn'),   // r51 telegraph amber vignette
       tgAlertEl:        document.getElementById('fp-tg-alert'),  // r51 telegraph ⚠ alert
       tgFadeTimer:      0,                                        // r51 telegraph fade-out timer
+      parryFlashEl:     document.getElementById('fp-parry-flash'),// r52 parry cyan flash
+      parryTextEl:      document.getElementById('fp-parry-text'), // r52 ⚡ PARRY! text
+      parryFlashTimer:  0,                                        // r52 parry flash fade-out timer
+      parryTextTimer:   0,                                        // r52 parry text fade-out timer
       // Pre-allocated THREE.Vector3 so updateLockBracket() never allocates
       // per-frame (avoids GC pressure in the hot animate() path).
       _lbProj:          new THREE.Vector3(),
@@ -4390,6 +4436,9 @@
       // the re-entrant defer check added to combatTick.
       const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
       attacker.state = 'windup';
+      // r52: record telegraph start time so playerGuardEnter can compute
+      // how far into the window the player pressed E (parry vs early guard).
+      attacker._telegraphAt = performance.now();
 
       // ── Visual: amber incoming vignette ──────────────────────────
       const warnEl  = FpPolish.tgWarnEl;
@@ -4409,6 +4458,8 @@
         if (warnEl)  { warnEl.classList.remove('active'); }
         if (alertEl) { alertEl.classList.remove('active'); }
         FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
+        // r52: clear parry window timestamp — attack is now launching.
+        attacker._telegraphAt = 0;
 
         // Safety checks before committing to the swing.
         if (attacker._swingId !== mySwing) return; // superseded
@@ -4417,6 +4468,81 @@
 
         runAttackFn(mySwing);
       }, TELEGRAPH_MS);
+    }
+
+    // ── r52: triggerPerfectParry ────────────────────────────────────
+    // Called from playerGuardEnter when E is pressed in the parry window
+    // (telegraph elapsed 150–350ms).
+    //
+    // Flow:
+    //   1) Bump azure._swingId → pending 350ms callback self-cancels (line 4414).
+    //   2) Clear telegraph overlays immediately.
+    //   3) Reset azure to idle (state='idle' + play idle clip) so combatTick
+    //      won't defer indefinitely on azure.state==='windup'.
+    //   4) Apply counter damage (3 HP) to azure via applyDamage.
+    //   5) Cyan-white full-screen flash (150ms) + triggerFovPunch (dip effect).
+    //   6) ⚡ PARRY! HUD text (600ms visible then fade).
+    //   7) sfxCounter audio ("ting"-like bright metallic cue).
+    function triggerPerfectParry(attackerLabel) {
+      const attacker = combatants[attackerLabel];
+      if (!attacker) return;
+
+      // ── 1) Cancel the pending swing by bumping swingId ──────────────
+      attacker._swingId = (attacker._swingId || 0) + 1;
+      attacker._telegraphAt = 0; // clear parry window
+
+      // ── 2) Clear telegraph overlays immediately ──────────────────────
+      const warnEl  = FpPolish.tgWarnEl;
+      const alertEl = FpPolish.tgAlertEl;
+      if (warnEl)  warnEl.classList.remove('active');
+      if (alertEl) alertEl.classList.remove('active');
+      if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
+
+      // ── 3) Reset attacker (azure) to idle ───────────────────────────
+      attacker.state = 'idle';
+      try { playClip(attacker, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true }); } catch (e) {}
+
+      // ── 4) Counter damage to azure (3 HP) ───────────────────────────
+      try { window.applyDamage(attackerLabel, 3); } catch (e) {}
+
+      // ── 5) Cyan-white parry flash ────────────────────────────────────
+      const flashEl = FpPolish.parryFlashEl;
+      if (flashEl) {
+        if (FpPolish.parryFlashTimer) { clearTimeout(FpPolish.parryFlashTimer); FpPolish.parryFlashTimer = 0; }
+        flashEl.style.transition = 'none';
+        void flashEl.offsetWidth;
+        flashEl.classList.add('active');
+        void flashEl.offsetWidth;
+        flashEl.style.transition = 'opacity 150ms ease-out';
+        FpPolish.parryFlashTimer = setTimeout(() => {
+          flashEl.classList.remove('active');
+          FpPolish.parryFlashTimer = 0;
+        }, 150);
+      }
+
+      // ── 6) FOV dip (reuses existing triggerFovPunch) ─────────────────
+      try { triggerFovPunch(); } catch (e) {}
+
+      // ── 7) ⚡ PARRY! HUD text ─────────────────────────────────────────
+      const textEl = FpPolish.parryTextEl;
+      if (textEl) {
+        if (FpPolish.parryTextTimer) { clearTimeout(FpPolish.parryTextTimer); FpPolish.parryTextTimer = 0; }
+        textEl.style.transition = 'none';
+        textEl.classList.remove('active');
+        void textEl.offsetWidth;
+        textEl.style.transition = 'opacity 80ms ease-in, transform 80ms ease-in';
+        textEl.classList.add('active');
+        FpPolish.parryTextTimer = setTimeout(() => {
+          textEl.style.transition = 'opacity 400ms ease-out, transform 400ms ease-out';
+          textEl.classList.remove('active');
+          FpPolish.parryTextTimer = 0;
+        }, 600);
+      }
+
+      // ── 8) SFX: sfxCounter — bright metallic "ting" ──────────────────
+      try { if (window.sfxCounter) window.sfxCounter(); } catch (e) {}
+
+      console.log('[lkb-3d] r52 perfect parry → counter 3 dmg to', attackerLabel);
     }
 
     // triggerFovPunch — kick FOV from rest → peak over 0.08s, then back
@@ -7349,6 +7475,21 @@
         showExhaustPill('EXHAUSTED');
         return;
       }
+      // r52: check perfect parry window — azure's telegraph must be active
+      // (azure.state === 'windup') and E must be pressed in the FINAL 200ms
+      // of the 350ms telegraph (elapsed ≥ 150ms). Only in FP mode.
+      const azure = combatants.azure;
+      if (azure && azure.state === 'windup' && azure._telegraphAt) {
+        const elapsed = performance.now() - azure._telegraphAt;
+        if (elapsed >= 150 && elapsed <= 350) {
+          // Perfect parry window hit!
+          triggerPerfectParry('azure');
+          // No guard state needed — parry already cancelled the attack.
+          return;
+        }
+        // Early press (elapsed < 150) falls through to normal guard below.
+      }
+
       // Race fix: invalidate any pending swing-impact timeout — guarding
       // mid-swing must not still deal damage at the 70% tick.
       c._swingId = (c._swingId || 0) + 1;
@@ -7427,6 +7568,17 @@
     window.playerGuardExit  = playerGuardExit;
     window.fpInputActive    = fpInputActive;
     window.combatants       = combatants;
+    // r52: QA hook — simulates a perfect parry without requiring real timing.
+    // Usage: window.__triggerParryTest() — arms azure as if in telegraph windup
+    // at elapsed 200ms, then calls playerGuardEnter so the parry path fires.
+    window.__triggerParryTest = function () {
+      const azure = combatants.azure;
+      if (!azure) { console.warn('[parryTest] azure not loaded'); return; }
+      azure.state = 'windup';
+      azure._swingId = (azure._swingId || 0) + 1;
+      azure._telegraphAt = performance.now() - 200; // simulate 200ms into telegraph
+      playerGuardEnter();
+    };
     window.mpForceLock = function (locked) {
       window._mouseLocked = !!locked;
       // Mirror the pointerlockchange handler's UI updates so reticle
