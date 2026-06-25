@@ -12581,6 +12581,18 @@
             if (_t < 1) {
               requestAnimationFrame(_approachTick);
             } else {
+              // r163: approach end footplant stomp sfx — heavy "ドン" on landing.
+              // 35Hz sawtooth 100ms (body weight) + 15ms later 1000Hz highpass
+              // noise 60ms (sand/dust impact). Both route through sfxGain →
+              // globalGain (mute-compliant). Distinct from r109 80Hz tap-tap.
+              try {
+                tone({ freq: 35, freq2: 25, dur: 0.10, type: 'sawtooth', vol: 0.10, attack: 0.005 });
+                setTimeout(() => {
+                  try {
+                    noise({ dur: 0.06, vol: 0.04, type: 'highpass', freqStart: 1000, freqEnd: 800, attack: 0.005 });
+                  } catch (e) {}
+                }, 15);
+              } catch (e) {}
               // Lunge complete → restore idle state → then telegraph.
               attacker.state = 'idle';
               triggerEnemyTelegraph(attackerLabel, defenderLabel, runCombatSwing);
