@@ -5875,6 +5875,8 @@
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
       showRoundBanner(window.gameState.round);
+      // r47: arm the 2s grace period so AI doesn't attack immediately.
+      _combatGraceUntil = performance.now() + 2000;
       console.log('[lkb-3d] match reset — ROUND ' + window.gameState.round);
       // Re-derive match-point tension from the freshly entered round.
       // triggerDeath() already armed it when wins hit WINS_MAX-1; this
@@ -6605,12 +6607,20 @@
     // the impact at ~70% of the attack duration, and fades both back to
     // IDLE just after the attack finishes (~105%).
     let combatTickCount = 0;
+    // r47: match-start grace period — AI won't attack for 2s after each
+    // round begins, giving the player time to orient and strike first.
+    let _combatGraceUntil = 0;
     function combatTick() {
       // Pause guard — when the Settings panel is open (or any future
       // pause source flips _gamePaused), skip this tick entirely. The
       // outer setInterval keeps running, so combat resumes on the next
       // tick after the panel closes.
       if (window._gamePaused) return;
+      // Grace-period guard — defer AI attack for 2s after round start.
+      if (performance.now() < _combatGraceUntil) {
+        setTimeout(combatTick, 200);
+        return;
+      }
       // Defer azure CPU attack when crimson is mid-swing so the CPU
       // doesn't interrupt or race the player's ongoing attack animation.
       if (combatants.crimson && combatants.crimson.state === 'attack') {
@@ -6737,8 +6747,9 @@
         }
         // HUD wiring: damage the defender, +5 SP to both sides per
         // combat tick. applyDamage handles death + reset internally.
+        // r47: AI (azure) damage reduced 8→5 for better balance.
         try {
-          window.applyDamage(defenderLabel, 8);
+          window.applyDamage(defenderLabel, 5);
           gainSP(attackerLabel, 5);
           gainSP(defenderLabel, 5);
         } catch (err) {
@@ -6772,9 +6783,12 @@
       if (!combatants.crimson || !combatants.azure) return;
       console.log('[lkb-3d] both knights ready — starting combat loop');
       // Kick off the first tick after a short beat so the idle pose
-      // reads first; then run on a 3s cadence.
+      // reads first; then run on a 4.5s cadence (r47 interval).
+      // r47: arm grace for the very first round too.
+      _combatGraceUntil = performance.now() + 2000;
       setTimeout(combatTick, 1200);
-      combatLoopHandle = setInterval(combatTick, 3000);
+      // r47: interval extended 3000→4500ms — gives the player room to attack.
+      combatLoopHandle = setInterval(combatTick, 4500);
     }
     const combatBootWatcher = setInterval(() => {
       if (combatants.crimson && combatants.azure) {
@@ -6899,6 +6913,15 @@
           ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
           : { x: 0, y: 1.0, z: 0 };
         try { window.triggerImpact(hitPos); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
+        // r47: microshake — boost shake amplitude when the PLAYER lands a hit
+        // so the impact feels meatier than the baseline triggerImpact shake.
+        try {
+          if (impactSystem && impactSystem.shake) {
+            impactSystem.shake.amplitude = 0.12;
+            impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining, 0.09);
+            impactSystem.shake.duration  = Math.max(impactSystem.shake.duration,  0.09);
+          }
+        } catch (e) {}
         try {
           window.applyDamage('azure', 8);
           gainSP('crimson', 5);
