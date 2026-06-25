@@ -1521,6 +1521,27 @@
       78%  { opacity: 1; transform: scale(1.0)  translateY(0); }
       100% { opacity: 0; transform: scale(0.97) translateY(3px); }
     }
+    /* ── r151: left-side round number — subtle amber persistent indicator.
+         Fades in on round start, holds 3s, then fades out.
+         Independent of the center #round-banner cinematic.
+         z-index 24 (below round-banner z-27, below match overlays). */
+    #round-num-side {
+      position: fixed;
+      top: 28%;
+      left: 28px;
+      font: 700 36px 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.1em;
+      color: rgba(216, 164, 90, 0.82);
+      text-shadow:
+        0 1px 0 rgba(20, 16, 24, 0.9),
+        0 0 14px rgba(216, 164, 90, 0.38);
+      opacity: 0;
+      z-index: 24;
+      pointer-events: none;
+      transition: opacity 0.35s ease-out;
+      user-select: none;
+    }
+    #round-num-side.show { opacity: 1; }
 
     /* FP pointer-lock hint — center-screen, only visible when
        viewMode==='fp' && !pointerLocked. JS toggles .visible. */
@@ -2728,6 +2749,8 @@
        animation completes (~1.5s). Pointer-events: none keeps it from
        blocking the canvas. -->
   <div id="round-banner" aria-live="polite"></div>
+  <!-- r151: left-side round number — subtle amber text, fades in on round start, holds 3s, fades out. -->
+  <div id="round-num-side" aria-hidden="true"></div>
   <!-- r112: new-challenger banner — shown on rematch when sessionWins >= 1 -->
   <div id="new-challenger-banner" aria-live="polite" aria-atomic="true">NEW CHALLENGER</div>
   <!-- r65: match-start cinematic intro — READY.../FIGHT! text overlay -->
@@ -10257,6 +10280,21 @@
         while (roundBannerHost.firstChild) roundBannerHost.removeChild(roundBannerHost.firstChild);
         _roundBannerTimer = null;
       }, _ROUND_BANNER_LIFE_MS);
+
+      // r151: left-side subtle round number — fade in, hold 3s, fade out.
+      // Independent of the center banner; shows as a persistent HUD cue.
+      try {
+        const _rnSide = document.getElementById('round-num-side');
+        if (_rnSide) {
+          if (_rnSide._r151Timer) { clearTimeout(_rnSide._r151Timer); _rnSide._r151Timer = null; }
+          _rnSide.textContent = String(n).padStart(2, '0');
+          _rnSide.classList.add('show');
+          _rnSide._r151Timer = setTimeout(function () {
+            _rnSide.classList.remove('show');
+            _rnSide._r151Timer = null;
+          }, 3000);
+        }
+      } catch (_e) {}
     }
 
     // Reset cycle — called 5s after a KO. Restores both knights to
