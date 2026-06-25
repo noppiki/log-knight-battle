@@ -247,6 +247,32 @@
       text-transform: uppercase;
     }
 
+    /* ── weather pill (bottom-right) ─────────────────────────────
+       Surfaces the current weather state (windy/blizzard only) so
+       the cape/snow/fog change reads as deliberate, not glitchy.
+       Hidden on calm so the HUD stays quiet by default. */
+    #weather-pill {
+      position: fixed;
+      bottom: 14px;
+      right: 18px;
+      z-index: 22;
+      pointer-events: none;
+      display: none;
+      color: #f0c878;
+      background: rgba(28, 18, 8, 0.85);
+      border: 1px solid rgba(240, 200, 120, 0.85);
+      border-radius: 4px;
+      padding: 6px 12px;
+      font: bold 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      opacity: 0;
+      transition: opacity 0.6s ease;
+    }
+    #weather-pill.visible { display: block; opacity: 1; }
+
     /* ── CINEMA mode toggle (auto camera cycle) ──────────────────
        Lives top-right of the canvas. pointer-events:auto so clicks
        land (parent #hud has pointer-events:none — overridden here). */
@@ -1179,6 +1205,11 @@
     <div class="label">iter 66 vertical slice</div>
     crimson astride · drag to rotate
   </div>
+
+  <!-- Weather pill — surfaces non-calm states (windy/blizzard) so
+       cape/snow/fog/light swings read as a deliberate mood shift. JS
+       driven from updateWeather() in the animate() loop. -->
+  <div id="weather-pill" aria-hidden="true">WX: CALM</div>
 
   <!-- ── Multiplayer relay (phase-1: connection only) ────────────────
        HOST opens a fresh random room. JOIN prompts for a code. Status
@@ -2410,6 +2441,18 @@
       console.warn('Lensflare module unavailable:', e);
     }
 
+    // DecalGeometry: optional, used by FootprintSystem to stamp footprint
+    // decals on the ground when knights attack. Wrapped in try/catch so a
+    // missing module path can never break combat — FootprintSystem silently
+    // disables itself when DecalGeometry is unavailable.
+    let DecalGeometry = null;
+    try {
+      const dm = await import('three/addons/geometries/DecalGeometry.js');
+      DecalGeometry = dm.DecalGeometry;
+    } catch (e) {
+      console.warn('DecalGeometry module unavailable:', e);
+    }
+
     /* ── renderer ──────────────────────────────────────────────── */
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
@@ -3317,6 +3360,134 @@
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     scene.add(ground);
+
+    /* ── FootprintSystem ───────────────────────────────────────────
+     * Stamps a single DecalGeometry footprint on the ground at the
+     * attacker's feet at attack windup. Footprint points toward the
+     * opponent. Caps at MAX_FOOTPRINTS, removing oldest first.
+     *
+     * Disabled gracefully when DecalGeometry import failed.
+     * ------------------------------------------------------------- */
+    const FootprintSystem = (function buildFootprintSystem() {
+      const MAX_FOOTPRINTS = 50;
+      const footprintDecals = [];
+
+      // Procedural footprint texture (oval/teardrop, dark brown on transparent).
+      function makeFootprintTexture() {
+        const size = 256;
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = size;
+        const ctx = cv.getContext('2d');
+        ctx.clearRect(0, 0, size, size);
+        // Soft shadow halo around the print
+        ctx.shadowColor = 'rgba(30, 20, 10, 0.55)';
+        ctx.shadowBlur  = 14;
+        ctx.fillStyle   = 'rgba(60, 40, 20, 1.0)';
+        // Heel (lower oval)
+        ctx.beginPath();
+        ctx.ellipse(size * 0.5, size * 0.66, size * 0.20, size * 0.26, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Ball / forefoot (upper oval, slightly bigger and offset toward "front")
+        ctx.beginPath();
+        ctx.ellipse(size * 0.5, size * 0.34, size * 0.22, size * 0.18, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Small toe dots in front for a touch of detail
+        ctx.shadowBlur = 6;
+        for (let i = 0; i < 4; i++) {
+          const tx = size * (0.40 + i * 0.066);
+          const ty = size * 0.20;
+          ctx.beginPath();
+          ctx.ellipse(tx, ty, size * 0.025, size * 0.030, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        const tex = new THREE.CanvasTexture(cv);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.needsUpdate = true;
+        return tex;
+      }
+
+      // Lazy-init so we never build the texture if DecalGeometry is missing.
+      let footprintTex = null;
+      function getTex() {
+        if (!footprintTex) footprintTex = makeFootprintTexture();
+        return footprintTex;
+      }
+
+      function stampFootprint(attacker, defender) {
+        if (!DecalGeometry) return;
+        if (!attacker || !attacker.root) return;
+        try {
+          const ap = attacker.root.position;
+          const dp = (defender && defender.root) ? defender.root.position : null;
+
+          // Footprint sits just above the ground plane to avoid z-fighting.
+          const position = new THREE.Vector3(ap.x, 0.01, ap.z);
+
+          // Orient the decal so its local +Y axis is the ground normal
+          // (DecalGeometry uses Euler rotation of an "orientation" object).
+          // Yaw the print so it points toward the opponent.
+          let yaw = 0;
+          if (dp) {
+            yaw = Math.atan2(dp.x - ap.x, dp.z - ap.z);
+          } else {
+            yaw = Math.random() * Math.PI * 2;
+          }
+          // ±20° jitter so successive prints don't look mechanical
+          yaw += (Math.random() - 0.5) * (Math.PI / 9) * 2;
+
+          // DecalGeometry orientation: an Euler describing the projector
+          // frame. To project straight DOWN onto the ground plane we
+          // rotate the projector -PI/2 about X (so projector +Z points
+          // down), then add yaw about Y for footprint direction.
+          const orientation = new THREE.Euler(-Math.PI / 2, 0, yaw, 'XYZ');
+
+          // Random size 0.20–0.30 m. Depth (Z of the projector box) must
+          // be large enough to actually intersect the ground geometry —
+          // a thin Z makes the decal disappear; 0.5 m is safe.
+          const s = 0.20 + Math.random() * 0.10;
+          const size = new THREE.Vector3(s, s, 0.5);
+
+          const geom = new DecalGeometry(ground, position, orientation, size);
+          const mat = new THREE.MeshBasicMaterial({
+            map: getTex(),
+            transparent: true,
+            depthTest: true,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -4,
+            polygonOffsetUnits: -4,
+            opacity: 0.85,
+          });
+          const decal = new THREE.Mesh(geom, mat);
+          decal.renderOrder = 1;
+          decal.receiveShadow = false;
+          scene.add(decal);
+          footprintDecals.push(decal);
+
+          // Cap at MAX_FOOTPRINTS; remove oldest.
+          while (footprintDecals.length > MAX_FOOTPRINTS) {
+            const old = footprintDecals.shift();
+            scene.remove(old);
+            if (old.geometry) old.geometry.dispose();
+            if (old.material) old.material.dispose();
+          }
+        } catch (err) {
+          console.warn('[lkb-3d] stampFootprint failed:', err);
+        }
+      }
+
+      function clearAllFootprints() {
+        while (footprintDecals.length) {
+          const d = footprintDecals.pop();
+          scene.remove(d);
+          if (d.geometry) d.geometry.dispose();
+          if (d.material) d.material.dispose();
+        }
+      }
+
+      return { stampFootprint, clearAllFootprints };
+    })();
+    window.FootprintSystem = FootprintSystem;
 
     /* ── camera ────────────────────────────────────────────────── */
     // Iter 69: pull back to frame both knights (±2 m spread) comfortably
@@ -5544,6 +5715,8 @@
           c.state = 'idle';
         }
       }
+      // Wipe footprint decals from previous round so the ground reads clean.
+      try { FootprintSystem.clearAllFootprints(); } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -5565,6 +5738,8 @@
       try { rotateHdriForNextMatch(); } catch (e) {
         console.warn('[lkb-3d] HDRI rotation skipped:', e);
       }
+      // Wipe footprint decals carried over from the previous match.
+      try { FootprintSystem.clearAllFootprints(); } catch (e) {}
       resetMatch();
       console.log('[lkb-3d] full match reset (wins + round cleared)');
     }
@@ -6108,6 +6283,8 @@
       try { if (window.sfxStep)  window.sfxStep();  } catch (e) {}
       // Snow puff at attacker's feet on attack windup
       try { if (window.spawnSnowPuff && attacker.root) window.spawnSnowPuff(attacker.root); } catch (e) {}
+      // Footprint decal stamped at attacker's feet, oriented toward opponent
+      try { FootprintSystem.stampFootprint(attacker, defender); } catch (e) {}
 
       attacker.state = 'attack';
       attacker.impactScheduled = false;
@@ -7075,7 +7252,11 @@
       });
 
       dustParticles = new THREE.Points(dustGeo, dustMat);
-      dustParticles.userData = { Y_MIN, Y_MAX, SPAN_X };
+      // Keep an immutable snapshot of per-point base sizes so the weather
+      // state machine can scale density up/down without permanently eroding
+      // the original distribution (we zero-out a tail subset to fake
+      // "fewer particles" then restore from this on the way back).
+      dustParticles.userData = { Y_MIN, Y_MAX, SPAN_X, baseSizes: sizes.slice() };
       scene.add(dustParticles);
     } catch (err) {
       console.warn('[lkb-3d] dust particles skipped', err);
@@ -7215,6 +7396,9 @@
       _tmpParentQ: new THREE.Quaternion(),
       _tmpVel: new THREE.Vector3(),
       _tmpLocalVel: new THREE.Vector3(),
+      // Driven by the weather state machine — 1.0 = calm baseline,
+      // higher values bend the cape harder via wind sines + inertia lean.
+      windMultiplier: 1.0,
       // Lazily walk a combatant root and register every node whose name
       // contains "Cape" (case-insensitive). Idempotent — already-known
       // nodes are skipped. Safe to call every frame.
@@ -7266,7 +7450,10 @@
 
             // Inertia lean — gentle gain so a 2 m/s sprint produces ~0.2 rad.
             // Sign flips so the cape lags BEHIND the direction of travel.
-            const leanGain = 0.10;
+            // Weather scales both lean and wind so a blizzard whips the
+            // cape ≈3x harder than calm without changing the rest pose.
+            const wm = this.windMultiplier;
+            const leanGain = 0.10 * wm;
             let targetX = st.baseX + this._tmpLocalVel.z * leanGain;
             let targetZ = st.baseZ - this._tmpLocalVel.x * leanGain;
             let targetY = st.baseY;
@@ -7274,8 +7461,8 @@
             // Ambient wind — barely-perceptible idle drift so the cape
             // never feels frozen. Independent phase per cape avoids sync.
             const t = time + st.phase;
-            targetX += Math.sin(t * 1.3) * 0.04;
-            targetZ += Math.sin(t * 1.1) * 0.03;
+            targetX += Math.sin(t * 1.3) * 0.04 * wm;
+            targetZ += Math.sin(t * 1.1) * 0.03 * wm;
 
             // Hard clamp to ±0.3 rad around the rest pose — keeps the
             // cape from flipping inside-out even at peak velocity.
@@ -7303,6 +7490,161 @@
         }
         capeVerlet.update(delta, time);
       } catch (e) { /* never let cape FX break the render loop */ }
+    }
+
+    /* ── weather state machine ─────────────────────────────────────
+       Slow-cycling mood layer that nudges snow density, fog density,
+       cape wind, and ambient tint between three preset states:
+         calm     — quiet baseline (sparse snow, thin fog, slack cape)
+         windy    — restless mid (denser snow, mid fog, busier cape)
+         blizzard — full-bore (heavy snow, thick fog, whipping cape, cool tint)
+       State picks happen every 25–40 s (random), then crossfade over
+       6 s via easeInOutCubic so transitions are never jarring. All
+       targets are *multipliers* over baseline values captured once at
+       boot — so this layer cooperates with whatever upstream code does
+       to the snow/fog/cape/ambient without permanent drift. */
+    const WEATHER_PRESETS = {
+      calm:     { snowDensityMul: 0.7, fogDensity: 0.005, capeWind: 1.0, ambientTintMul: 1.0 },
+      windy:    { snowDensityMul: 1.4, fogDensity: 0.010, capeWind: 1.8, ambientTintMul: 0.9 },
+      blizzard: { snowDensityMul: 2.2, fogDensity: 0.020, capeWind: 2.8, ambientTintMul: 0.7 },
+    };
+    const WEATHER_STATES = Object.keys(WEATHER_PRESETS);
+    // Capture immutable baselines so ambient tint multiplier always
+    // rebases off the original intensity (not the previously-tinted one).
+    const _weatherBaseHemiIntensity        = hemi.intensity;
+    const _weatherBaseAmbientFillIntensity = ambientFill.intensity;
+    // Public so console / debug overlays can poke at state.
+    window.weather = {
+      state: 'calm',
+      t: 0,
+      nextSwitch: 30,          // first switch ~30 s in
+      lerping: false,
+      lerpProgress: 0,         // 0..1 over LERP_DURATION
+      // Currently-applied (interpolated) params — drives the FX every frame.
+      current: { ...WEATHER_PRESETS.calm },
+      // Snapshot of `current` taken at the moment a lerp begins (the "from").
+      from: { ...WEATHER_PRESETS.calm },
+      target: null,            // ref to a WEATHER_PRESETS entry while lerping
+      targetName: null,        // string key — what we're heading toward
+    };
+    const _WEATHER_LERP_DURATION = 6.0;     // seconds for full crossfade
+    const _WEATHER_SWITCH_MIN    = 25;
+    const _WEATHER_SWITCH_MAX    = 40;
+
+    function _weatherEaseInOutCubic(t) {
+      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    }
+
+    function _weatherLerpParams(a, b, k) {
+      return {
+        snowDensityMul: a.snowDensityMul + (b.snowDensityMul - a.snowDensityMul) * k,
+        fogDensity:     a.fogDensity     + (b.fogDensity     - a.fogDensity)     * k,
+        capeWind:       a.capeWind       + (b.capeWind       - a.capeWind)       * k,
+        ambientTintMul: a.ambientTintMul + (b.ambientTintMul - a.ambientTintMul) * k,
+      };
+    }
+
+    // Apply the currently-resolved `cur` params to every downstream system.
+    // Pure side-effect function — called once per frame from updateWeather.
+    function _weatherApply(cur) {
+      // Snow / dust density: zero the size of a tail subset of particles
+      // so only the leading fraction renders. baseSizes is the cached
+      // immutable original distribution; sizes is the live buffer.
+      try {
+        if (dustParticles) {
+          const sizeAttr = dustParticles.geometry.attributes.size;
+          const base = dustParticles.userData.baseSizes;
+          if (sizeAttr && base) {
+            const arr = sizeAttr.array;
+            const n = arr.length;
+            // Clamp visible fraction to [0, 1.5] — values >1 just mean
+            // "show all" (we can't render more particles than exist).
+            const frac = Math.max(0, Math.min(1.5, cur.snowDensityMul));
+            const visibleN = Math.min(n, Math.round(n * frac));
+            for (let i = 0; i < n; i++) arr[i] = (i < visibleN) ? base[i] : 0;
+            sizeAttr.needsUpdate = true;
+          }
+        }
+      } catch (e) { /* never break the loop over a dust hiccup */ }
+
+      // Fog: direct write to FogExp2.density. Three.js picks this up next render.
+      try {
+        if (scene.fog && typeof scene.fog.density === 'number') {
+          scene.fog.density = cur.fogDensity;
+        }
+      } catch (e) {}
+
+      // Cape: scales the per-frame wind sines and inertia lean inside
+      // capeVerlet.update — see windMultiplier handling there.
+      try { capeVerlet.windMultiplier = cur.capeWind; } catch (e) {}
+
+      // Ambient tint: rebase off the captured originals so the multiplier
+      // is *idempotent* (re-applying never compounds the dimming).
+      try {
+        hemi.intensity        = _weatherBaseHemiIntensity        * cur.ambientTintMul;
+        ambientFill.intensity = _weatherBaseAmbientFillIntensity * cur.ambientTintMul;
+      } catch (e) {}
+    }
+
+    // HUD pill — only visible during windy/blizzard so the strip stays
+    // quiet on calm. Cached lookup, tolerant of missing element.
+    let _weatherPillEl = null;
+    function _weatherUpdateHUD(stateName) {
+      if (_weatherPillEl === null) {
+        _weatherPillEl = document.getElementById('weather-pill') || false;
+      }
+      if (!_weatherPillEl) return;
+      if (stateName === 'calm') {
+        _weatherPillEl.classList.remove('visible');
+      } else {
+        _weatherPillEl.textContent = 'WX: ' + stateName.toUpperCase();
+        _weatherPillEl.classList.add('visible');
+      }
+    }
+
+    function updateWeather(delta) {
+      const w = window.weather;
+      if (!w) return;
+      w.t += delta;
+
+      // Kick off a transition once the dwell timer expires and we're
+      // not already mid-crossfade. Pick a state different from current.
+      if (!w.lerping && w.t >= w.nextSwitch) {
+        const choices = WEATHER_STATES.filter((s) => s !== w.state);
+        const pick = choices[Math.floor(Math.random() * choices.length)];
+        w.lerping = true;
+        w.lerpProgress = 0;
+        w.from = { ...w.current };
+        w.target = WEATHER_PRESETS[pick];
+        w.targetName = pick;
+        w.t = 0;
+        w.nextSwitch = _WEATHER_SWITCH_MIN + Math.random() * (_WEATHER_SWITCH_MAX - _WEATHER_SWITCH_MIN);
+      }
+
+      // Advance crossfade: easeInOutCubic on lerpProgress, write into `current`.
+      if (w.lerping) {
+        w.lerpProgress += delta / _WEATHER_LERP_DURATION;
+        if (w.lerpProgress >= 1) {
+          w.lerpProgress = 1;
+          w.current = { ...w.target };
+          w.state = w.targetName;
+          w.lerping = false;
+          w.target = null;
+          w.targetName = null;
+          _weatherUpdateHUD(w.state);
+        } else {
+          const k = _weatherEaseInOutCubic(w.lerpProgress);
+          w.current = _weatherLerpParams(w.from, w.target, k);
+          // Mid-lerp: surface the *destination* on the pill once we cross
+          // the midpoint so the label leads the feel rather than lagging.
+          if (w.lerpProgress > 0.5 && w.targetName && w.state !== w.targetName) {
+            w.state = w.targetName;
+            _weatherUpdateHUD(w.state);
+          }
+        }
+      }
+
+      _weatherApply(w.current);
     }
 
     /* ── head IK (look-at-opponent) ──────────────────────────────────
@@ -7518,6 +7860,11 @@
         }
       }
       updateDust(delta);
+      // Weather state machine — slow crossfade between calm / windy /
+      // blizzard. Writes into snow density, fog density, cape wind, and
+      // ambient tint. Always runs AFTER updateDust so per-frame snow
+      // position advance is preserved and only the size buffer is masked.
+      try { updateWeather(delta); } catch (e) { /* never break the loop */ }
       try { snowPuffSystem.update(delta); } catch (e) {}
       try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
