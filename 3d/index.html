@@ -1180,6 +1180,13 @@
         tone({ freq: 588, freq2: 555, dur: 0.35, type: "triangle", vol: 0.03, attack: 0.010, release: 0.33 });
         noise({ dur: 0.08, vol: 0.04, type: "bandpass", freqStart: 800, freqEnd: 300, q: 1.5 });
       }
+      // sfxStep — quick low thud for attack-windup footstep impact. Gated
+      // on actx so the audio block never throws when init failed; called
+      // from combatTick + playerAttack to add weight to the swing.
+      function sfxStep() {
+        if (!actx) return;
+        blip(60, 0.08, 'triangle', 0.25);
+      }
       // Public sfx* wrappers (netRecordSfx is a no-op in 3D but kept for parity).
       function sfxSwing()   { _sfxSwing();   netRecordSfx("swing"); }
       function sfxHit()     { _sfxHit();     netRecordSfx("hit"); }
@@ -1269,6 +1276,7 @@
       window.sfxSelect     = sfxSelect;
       window.sfxLock       = sfxLock;
       window.sfxHorn       = sfxHorn;
+      window.sfxStep       = sfxStep;
     } catch (bootErr) {
       // Audio block failure must NEVER take down the visual scene.
       console.warn("[lkb-3d] audio init failed; muted scene", bootErr);
@@ -2910,6 +2918,9 @@
       }
 
       update(delta) {
+        // Frozen during hit-lag — keep visible state but skip sampling
+        // so the trail's tip doesn't smear while the swing is paused.
+        if (this.frozen) return;
         if (this.active) {
           // Push current sword-tip world position into ring buffer.
           this._tipWorld.copy(this._tipLocal);
@@ -3235,6 +3246,26 @@
       // ── SFX wiring: heavy hit on every impact frame. Guarded behind
       //    feature-detect so an audio init failure can't break combat.
       try { if (window.sfxHit) window.sfxHit(); } catch (e) {}
+
+      // ── HIT LAG (meaty-hit freeze frame). Snap all skeletal mixers to
+      //    timeScale=0 for ~100 ms, then restore. impactSystem.update
+      //    reads its own wall-clock delta so particles / shake / bloom
+      //    keep playing — only character animation freezes. WeaponTrail
+      //    is paused via a `frozen` flag the trail's update() honors.
+      try {
+        if (mixers && mixers.length > 0) {
+          const HIT_LAG_MS = 100;
+          const saved = mixers.map(m => m.timeScale);
+          mixers.forEach(m => { m.timeScale = 0; });
+          if (weaponTrail) weaponTrail.frozen = true;
+          setTimeout(() => {
+            for (let i = 0; i < mixers.length; i++) {
+              mixers[i].timeScale = (saved[i] != null) ? saved[i] : 1;
+            }
+            if (weaponTrail) weaponTrail.frozen = false;
+          }, HIT_LAG_MS);
+        }
+      } catch (e) { console.warn('[lkb-3d] hitLag threw', e); }
     };
 
     // combatTick — runs every 3s. Picks a random attacker, fires the
@@ -3246,7 +3277,8 @@
       // In FP mode, the player owns crimson — CPU only auto-attacks on
       // azure. Outside FP mode, keep the original 50/50 random attacker.
       let attackerLabel;
-      if (cameraDirector && cameraDirector.viewMode === 'fp') {
+      const isFpMode = cameraDirector && cameraDirector.viewMode === 'fp';
+      if (isFpMode) {
         attackerLabel = 'azure';
       } else {
         attackerLabel = Math.random() < 0.5 ? 'crimson' : 'azure';
@@ -3258,12 +3290,46 @@
       // Skip while a knight is dead — resetMatch() will clear the flag.
       if (window.gameState[attackerLabel].dead || window.gameState[defenderLabel].dead) return;
 
+      // ── FP-mode adaptive AI: AGGRESSIVE / DEFENSIVE behavior based on azure HP.
+      if (isFpMode) {
+        const azureHpPct = window.gameState.azure.hp / 100;
+
+        if (azureHpPct > 0.70) {
+          // AGGRESSIVE: schedule the next tick sooner (2200ms one-shot) for
+          // pressure — the regular 3000ms setInterval continues as a baseline.
+          setTimeout(combatTick, 2200);
+        } else if (azureHpPct < 0.30) {
+          // DEFENSIVE: 40% chance to dodge backward instead of attacking.
+          if (Math.random() < 0.40) {
+            // Play Dodge_Backward (LoopOnce) as a fallback — no damage this tick.
+            attacker.state = 'dodge';
+            playClip(attacker, 'Dodge_Backward', { fadeIn: 0.15, loop: false, weight: 1.0 });
+            const dodgeDur = (attacker.currentDuration) || 0.8;
+            setTimeout(() => {
+              if (combatants[attackerLabel] && !window.gameState[attackerLabel].dead) {
+                playClip(combatants[attackerLabel], CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true });
+                combatants[attackerLabel].state = 'idle';
+              }
+            }, dodgeDur * 1.05 * 1000);
+            return; // no damage to crimson this tick
+          }
+          // else: fall through to normal attack
+        }
+
+        // Low crimson HP warning: rumble / low-pitch blip when crimson is below 30%.
+        if (window.gameState.crimson.hp < 30) {
+          try { if (window.sfxClang) window.sfxClang(); } catch (e) {}
+        }
+      }
+
       combatTickCount++;
       console.log(`[lkb-3d] combatTick #${combatTickCount}: ${attackerLabel} → ${defenderLabel}`);
 
       // ── SFX wiring: swing whoosh on attack windup. The matching hit
       //    fires inside window.triggerImpact at ~70% of the swing.
       try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+      // Footstep thud — adds weight to the windup plant.
+      try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
 
       // Wind up + attack — randomize attack clip each tick for variety.
       // State labels track the rough phase so future logic (HUD, sound
@@ -3383,6 +3449,8 @@
       if (attacker.state === 'attack' || attacker.state === 'guard') return;
 
       try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+      // Footstep thud — adds weight to the player's windup plant.
+      try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
 
       attacker.state = 'attack';
       attacker.impactScheduled = false;
