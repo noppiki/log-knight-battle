@@ -2500,6 +2500,12 @@
         Reset Record
       </button>
     </div>
+    <!-- r121: KO replay duration slider -->
+    <div class="sp-row">
+      <span class="sp-label">KO Replay</span>
+      <input type="range" id="sp-koreplay" min="1500" max="5000" step="100" value="3000">
+      <span class="sp-value" id="sp-koreplay-val">3.0s</span>
+    </div>
     <button type="button" class="sp-close" id="sp-close-btn">CLOSE (P)</button>
     <div class="sp-hint">Game paused while open</div>
   </div>
@@ -7551,6 +7557,7 @@
       const DEFAULTS = {
         fov: 70, mouseSens: 0.0022, bloomStrength: 0.15,
         ssaoEnabled: true, muted: false,
+        koReplayMs: 3000,  // r121: KO replay duration (1500–5000ms)
       };
       // Schema clamps — validate everything coming out of localStorage.
       const SCHEMA = {
@@ -7559,6 +7566,7 @@
         bloomStrength: { min: 0,      max: 1.5,   type: 'num'  },
         ssaoEnabled:   { type: 'bool' },
         muted:         { type: 'bool' },
+        koReplayMs:    { min: 1500,   max: 5000,  type: 'num'  },  // r121
       };
       function clampNum(v, min, max, fallback) {
         v = Number(v);
@@ -7631,12 +7639,17 @@
           window.setMuted(!!on);
         }
       }
+      // r121: KO replay duration
+      function applyKoReplayMs(v) {
+        window.settings.koReplayMs = v;
+      }
 
       // ── boot-apply (sets initial state from persisted settings) ──
       applyFov(window.settings.fov);
       applyMouseSens(window.settings.mouseSens);
       applyBloom(window.settings.bloomStrength);
       applySsao(window.settings.ssaoEnabled);
+      applyKoReplayMs(window.settings.koReplayMs);  // r121
       // Mute is already wired by the audio script on boot via lkb3d_muted;
       // sync our value to that pre-existing state instead of overwriting it.
       try {
@@ -7659,8 +7672,10 @@
       const bloomVal    = document.getElementById('sp-bloom-val');
       const ssaoInput   = document.getElementById('sp-ssao');
       const ssaoVal     = document.getElementById('sp-ssao-val');
-      const muteInput   = document.getElementById('sp-mute');
-      const muteVal     = document.getElementById('sp-mute-val');
+      const muteInput      = document.getElementById('sp-mute');
+      const muteVal        = document.getElementById('sp-mute-val');
+      const koReplayInput  = document.getElementById('sp-koreplay');   // r121
+      const koReplayVal    = document.getElementById('sp-koreplay-val');// r121
 
       // r69: wire difficulty buttons
       document.querySelectorAll('.sp-diff-btn').forEach(function (btn) {
@@ -7681,6 +7696,8 @@
         if (bloomInput) { bloomInput.value = String(window.settings.bloomStrength); bloomVal.textContent = window.settings.bloomStrength.toFixed(2); }
         if (ssaoInput)  { ssaoInput.checked = !!window.settings.ssaoEnabled;       ssaoVal.textContent  = window.settings.ssaoEnabled ? 'ON' : 'OFF'; }
         if (muteInput)  { muteInput.checked = !!window.settings.muted;             muteVal.textContent  = window.settings.muted ? 'ON' : 'OFF'; }
+        // r121: KO replay slider
+        if (koReplayInput) { koReplayInput.value = String(window.settings.koReplayMs); koReplayVal.textContent = (window.settings.koReplayMs / 1000).toFixed(1) + 's'; }
         // r69: sync difficulty button highlight when panel reopens
         document.querySelectorAll('.sp-diff-btn').forEach(function (btn) {
           btn.classList.toggle('selected', btn.dataset.diff === window._lkbDifficulty);
@@ -7707,6 +7724,11 @@
       if (muteInput) muteInput.addEventListener('change', (e) => {
         const on = !!e.target.checked;
         applyMuted(on); muteVal.textContent = on ? 'ON' : 'OFF'; saveSettings();
+      });
+      // r121: KO replay duration slider
+      if (koReplayInput) koReplayInput.addEventListener('input', (e) => {
+        const v = clampNum(e.target.value, SCHEMA.koReplayMs.min, SCHEMA.koReplayMs.max, DEFAULTS.koReplayMs);
+        applyKoReplayMs(v); koReplayVal.textContent = (v / 1000).toFixed(1) + 's'; saveSettings();
       });
 
       function openPanel() {
@@ -10157,7 +10179,7 @@
             if (mixers && mixers.length) {
               mixers.forEach(m => { m.timeScale = 0.5; });
             }
-            const KO_REPLAY_DURATION_MS = 3000;
+            const KO_REPLAY_DURATION_MS = (window.settings && window.settings.koReplayMs) || 3000;  // r121: user-configurable
             window._koReplayRestoreFn = function () {
               if (mixers && mixers.length) {
                 for (let i = 0; i < mixers.length; i++) {
