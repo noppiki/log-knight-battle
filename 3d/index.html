@@ -306,6 +306,113 @@
       border-color: rgba(255, 196, 120, 1);
     }
 
+    /* ── ROSTER opponent picker (sits between #view-toggle and #settings-btn) */
+    #roster-toggle {
+      position: fixed;
+      top: 14px;
+      right: 270px;
+      z-index: 30;
+      pointer-events: auto;
+      cursor: pointer;
+      user-select: none;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.8);
+      border-radius: 4px;
+      padding: 6px 12px;
+      font: bold 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.08em;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    #roster-toggle:hover {
+      background: rgba(40, 30, 20, 0.95);
+      border-color: rgba(255, 196, 120, 1);
+    }
+    #roster-popup {
+      position: fixed;
+      top: 52px;
+      right: 18px;
+      z-index: 40;
+      display: none;
+      flex-direction: column;
+      gap: 4px;
+      padding: 8px;
+      min-width: 160px;
+      background: rgba(14, 14, 22, 0.96);
+      border: 1px solid rgba(216, 164, 90, 0.85);
+      border-radius: 6px;
+      box-shadow: 0 6px 22px rgba(0, 0, 0, 0.8);
+      font: bold 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.08em;
+    }
+    #roster-popup.is-open { display: flex; }
+    #roster-popup .rp-title {
+      color: #d8a45a;
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      padding: 2px 4px 6px;
+      border-bottom: 1px solid rgba(216, 164, 90, 0.25);
+      margin-bottom: 4px;
+    }
+    #roster-popup .rp-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 10px;
+      color: #e8dcc0;
+      background: rgba(28, 28, 40, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.35);
+      border-radius: 3px;
+      cursor: pointer;
+      text-transform: uppercase;
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
+    }
+    #roster-popup .rp-item:hover {
+      background: rgba(60, 44, 28, 0.95);
+      border-color: rgba(255, 196, 120, 0.95);
+      color: #ffe6b8;
+    }
+    #roster-popup .rp-item.is-active {
+      background: rgba(48, 60, 95, 0.85);
+      border-color: rgba(160, 196, 255, 0.9);
+      color: #cce0ff;
+    }
+    #roster-popup .rp-key {
+      font-size: 9px;
+      color: #8a8070;
+      letter-spacing: 0.1em;
+    }
+    .opponent-pill {
+      position: fixed;
+      top: 96px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 80;
+      pointer-events: none;
+      padding: 8px 18px;
+      background: rgba(18, 22, 38, 0.92);
+      border: 1px solid rgba(160, 196, 255, 0.85);
+      border-radius: 4px;
+      color: #cce0ff;
+      font: 900 13px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
+      animation: opponent-pill-fade 2s ease forwards;
+    }
+    @keyframes opponent-pill-fade {
+      0%   { opacity: 0; transform: translate(-50%, -8px); }
+      12%  { opacity: 1; transform: translate(-50%, 0); }
+      80%  { opacity: 1; transform: translate(-50%, 0); }
+      100% { opacity: 0; transform: translate(-50%, -4px); }
+    }
+
     /* ── game HUD (HP/SP gauges, engraved player labels, VS badge) ─
        Sits on top of the canvas, z-index above the vignette but below
        the loading overlay. Pointer-events: none on the wrapper so the
@@ -941,6 +1048,11 @@
 
   <!-- VIEW mode toggle — cycles 3rd-person (cinematic) / FP / MANUAL. JS wires click + localStorage. -->
   <button id="view-toggle" type="button" title="Cycle camera view: 3rd-person / First-person / Manual">&#x1F441; VIEW: 3rd</button>
+
+  <!-- ROSTER opponent picker — swap azure for any KayKit character.
+       JS wires click + 1-5 hotkeys + localStorage["lkb3d_opponent"]. -->
+  <button id="roster-toggle" type="button" title="Switch opponent (1-5)">&#x2694;&#xFE0F; ROSTER</button>
+  <div id="roster-popup" role="menu" aria-label="Opponent roster"></div>
 
   <!-- Game HUD: HP/SP gauges + engraved player labels + VS badge.
        JS keeps window.gameState in sync; CSS bars read width from
@@ -4573,6 +4685,10 @@
     );
 
     // ── azure.glb ───────────────────────────────────────────────── */
+    // Boot default — the hand-tuned azure (already tinted, transforms
+    // baked in at world (~2, ~0.81, 0)). Roster swaps replace this rig
+    // via switchOpponent() below; we keep the original boot path intact
+    // so FP attach / combat-loop boot keep working unchanged.
     loader.load(
       'assets/azure.glb',
       (gltf) => {
@@ -4582,6 +4698,17 @@
         outlinePass.selectedObjects.push(root);
         setupMixerFor(gltf, 'azure');
         markLoaded();
+        // After the default boots, honour any saved roster pick by
+        // swapping immediately (single deferred call — no race with
+        // markLoaded, since switchOpponent is idempotent on its own
+        // mixer/scene state).
+        try {
+          const saved = localStorage.getItem('lkb3d_opponent');
+          if (saved && saved !== 'Azure' && ROSTER.some(r => r.id === saved)) {
+            // small beat so the loading overlay fade finishes first
+            setTimeout(() => { switchOpponent(saved, { silent: true }); }, 800);
+          }
+        } catch (e) { /* localStorage unavailable — boot default stays */ }
       },
       undefined,
       (err) => {
@@ -4589,6 +4716,255 @@
         markLoaded();
       }
     );
+
+    /* ── ROSTER opponent switching ──────────────────────────────────
+       Lets the user swap the azure (right-hand) knight for any KayKit
+       character bundled under assets/roster/. Boot default remains the
+       hand-tuned `assets/azure.glb` so the FP attach / combat-loop boot
+       paths don't change; switchOpponent() is purely additive — it
+       tears down the current azure cleanly (scene.remove + mixer splice
+       + outlinePass splice + geometry/material disposal) before parsing
+       and mounting the new GLB. Keeps combatants.azure stable so
+       combatTick / floaters / FX read the swap transparently. */
+    const ROSTER = [
+      { id: 'Azure',        file: 'assets/azure.glb',                label: 'AZURE (DEFAULT)' },
+      { id: 'Knight',       file: 'assets/roster/Knight.glb',        label: 'KNIGHT' },
+      { id: 'Barbarian',    file: 'assets/roster/Barbarian.glb',     label: 'BARBARIAN' },
+      { id: 'Mage',         file: 'assets/roster/Mage.glb',          label: 'MAGE' },
+      { id: 'Rogue',        file: 'assets/roster/Rogue.glb',         label: 'ROGUE' },
+      { id: 'Rogue_Hooded', file: 'assets/roster/Rogue_Hooded.glb',  label: 'ROGUE (HOODED)' },
+    ];
+    // Default to the boot azure unless the user previously picked one.
+    window.currentOpponent = (() => {
+      try {
+        const saved = localStorage.getItem('lkb3d_opponent');
+        if (saved && ROSTER.some(r => r.id === saved)) return saved;
+      } catch (e) {}
+      return ROSTER[0].id;
+    })();
+
+    // KayKit GLBs load at identity (root at origin, scale 1, facing -Z).
+    // The hand-tuned azure.glb instead has its placement baked into mesh
+    // world-space, so for roster characters we apply the canonical pose
+    // directly on gltf.scene before adding to the world.
+    const OPPONENT_TRANSFORM = {
+      position: new THREE.Vector3(2, 0.81, 0),
+      rotationY: Math.PI,    // face crimson (-X side)
+      scale:     0.6908,
+    };
+    // Cool-steel tint so the swapped character still reads as "team blue"
+    // at a glance — applied non-destructively (we clone the material so
+    // we don't mutate the shared GLTF material pool between switches).
+    const OPPONENT_TINT = new THREE.Color(0x7090d0);
+
+    // Dispose all geometry / material / texture resources under a root.
+    // Materials are walked carefully because Three's traverse() skips
+    // detached children once we splice — we collect first, then dispose.
+    function disposeRoot(root) {
+      if (!root) return;
+      const seenMats = new Set();
+      const seenTexs = new Set();
+      root.traverse((obj) => {
+        if (obj.isMesh) {
+          try { obj.geometry?.dispose?.(); } catch (e) {}
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const m of mats) {
+            if (!m || seenMats.has(m)) continue;
+            seenMats.add(m);
+            // dispose any textures referenced by common PBR slots
+            for (const slot of ['map', 'normalMap', 'roughnessMap', 'metalnessMap',
+                                'emissiveMap', 'aoMap', 'alphaMap', 'envMap']) {
+              const t = m[slot];
+              if (t && !seenTexs.has(t)) { seenTexs.add(t); try { t.dispose(); } catch (e) {} }
+            }
+            try { m.dispose(); } catch (e) {}
+          }
+        }
+      });
+    }
+
+    // Tear down the current azure combatant in place: remove from scene,
+    // splice the mixer out of `mixers[]` (so the hit-lag and KO-replay
+    // loops at ~4040 / ~4160 don't poke a dead rig), splice the root
+    // out of `outlinePass.selectedObjects`, dispose GL resources, and
+    // null out `combatants.azure`. After this returns, combatTick will
+    // bail (it short-circuits on `!combatants.crimson || !combatants.azure`)
+    // until the new rig finishes loading.
+    function teardownAzure() {
+      const old = combatants.azure;
+      if (!old) return;
+      // 1) Stop all actions on the old mixer + remove from mixers[]
+      if (old.mixer) {
+        try { old.mixer.stopAllAction(); } catch (e) {}
+        const idx = mixers.indexOf(old.mixer);
+        if (idx !== -1) mixers.splice(idx, 1);
+      }
+      // 2) Splice root out of outlinePass selection list
+      if (old.root && outlinePass && outlinePass.selectedObjects) {
+        const oi = outlinePass.selectedObjects.indexOf(old.root);
+        if (oi !== -1) outlinePass.selectedObjects.splice(oi, 1);
+      }
+      // 3) Detach from scene & dispose
+      if (old.root) {
+        try { scene.remove(old.root); } catch (e) {}
+        disposeRoot(old.root);
+      }
+      // 4) Clear combatants slot — combatTick will short-circuit until
+      //    the new rig registers via setupCombatant().
+      combatants.azure = null;
+    }
+
+    function showOpponentPill(label) {
+      try {
+        const prev = document.querySelector('.opponent-pill');
+        if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+        const el = document.createElement('div');
+        el.className = 'opponent-pill';
+        el.textContent = 'OPPONENT: ' + label;
+        document.body.appendChild(el);
+        setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 2100);
+      } catch (e) { /* DOM not ready or pill blocked — ignore */ }
+    }
+
+    // switchOpponent — replace the right-hand combatant with the GLB at
+    // ROSTER[id]. Idempotent: same id = no-op. Persists to localStorage.
+    // opts.silent = true skips the floating pill (used by boot restore).
+    let _switchOpponentBusy = false;
+    function switchOpponent(id, opts = {}) {
+      const entry = ROSTER.find(r => r.id === id);
+      if (!entry) {
+        console.warn('[lkb-3d] switchOpponent: unknown id', id);
+        return;
+      }
+      if (_switchOpponentBusy) return;
+      if (id === window.currentOpponent && combatants.azure) {
+        // Already on this character — just refresh the popup highlight.
+        renderRosterPopup();
+        return;
+      }
+      _switchOpponentBusy = true;
+      console.log('[lkb-3d] switchOpponent →', id);
+      // Tear down first so the old rig is gone before we add the new one.
+      teardownAzure();
+      loader.load(
+        entry.file,
+        (gltf) => {
+          const root = gltf.scene;
+          // Position / scale / orient to the canonical azure pose.
+          root.position.copy(OPPONENT_TRANSFORM.position);
+          root.scale.setScalar(OPPONENT_TRANSFORM.scale);
+          root.rotation.set(0, OPPONENT_TRANSFORM.rotationY, 0);
+          applyShadows(root, true, false);
+          // Apply cool-steel tint — clone the material first so we
+          // don't poison the shared GLTF material cache between swaps.
+          // (Three reuses material refs across meshes inside one GLB.)
+          const tinted = new Set();
+          root.traverse((obj) => {
+            if (!obj.isMesh || !obj.material) return;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            const newMats = mats.map((m) => {
+              if (!m) return m;
+              if (tinted.has(m)) return m;  // already cloned-and-tinted
+              const clone = m.clone();
+              if (clone.color) {
+                clone.color.multiply(OPPONENT_TINT);
+              }
+              tinted.add(clone);
+              return clone;
+            });
+            obj.material = Array.isArray(obj.material) ? newMats : newMats[0];
+          });
+          scene.add(root);
+          outlinePass.selectedObjects.push(root);
+          // setupCombatant registers combatants.azure + pushes mixer
+          // back into mixers[]; combat loop will resume next tick.
+          // Reset its HP / SP / stamina so the swap doesn't carry over
+          // chip damage from the previous opponent.
+          setupCombatant(gltf, 'azure');
+          if (window.gameState && window.gameState.azure) {
+            window.gameState.azure.hp      = 100;
+            window.gameState.azure.sp      = 0;
+            window.gameState.azure.stamina = 100;
+            window.gameState.azure.dead    = false;
+            try { if (typeof updateGaugeDOM === 'function') updateGaugeDOM(); } catch (e) {}
+          }
+          window.currentOpponent = id;
+          try { localStorage.setItem('lkb3d_opponent', id); } catch (e) {}
+          if (!opts.silent) showOpponentPill(entry.label || id);
+          renderRosterPopup();
+          _switchOpponentBusy = false;
+        },
+        undefined,
+        (err) => {
+          console.error('[lkb-3d] switchOpponent: failed to load', entry.file, err);
+          _switchOpponentBusy = false;
+          // We tore down the previous rig already — try to fall back to
+          // the boot azure so the arena doesn't sit half-empty.
+          if (id !== 'Azure') {
+            console.warn('[lkb-3d] falling back to default azure');
+            switchOpponent('Azure', { silent: true });
+          }
+        }
+      );
+    }
+    window.switchOpponent = switchOpponent;
+
+    // ── ROSTER HUD popup wiring ─────────────────────────────────────
+    function renderRosterPopup() {
+      const popup = document.getElementById('roster-popup');
+      if (!popup) return;
+      const active = window.currentOpponent;
+      const rows = ROSTER.map((r, i) => {
+        const cls = (r.id === active) ? 'rp-item is-active' : 'rp-item';
+        const key = (i + 1) <= 9 ? String(i + 1) : '';
+        const keyHtml = key ? `<span class="rp-key">[${key}]</span>` : '';
+        return `<div class="${cls}" data-id="${r.id}" role="menuitem">${r.label}${keyHtml}</div>`;
+      }).join('');
+      popup.innerHTML = `<div class="rp-title">SWITCH OPPONENT</div>${rows}`;
+      // Re-wire click handlers — innerHTML wipes them every render.
+      popup.querySelectorAll('.rp-item').forEach((node) => {
+        node.addEventListener('click', () => {
+          const id = node.getAttribute('data-id');
+          if (id) switchOpponent(id);
+          popup.classList.remove('is-open');
+        });
+      });
+    }
+    (function wireRosterToggle() {
+      const btn   = document.getElementById('roster-toggle');
+      const popup = document.getElementById('roster-popup');
+      if (!btn || !popup) return;
+      renderRosterPopup();
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        popup.classList.toggle('is-open');
+      });
+      // Click-anywhere-else closes the popup.
+      document.addEventListener('click', (e) => {
+        if (!popup.classList.contains('is-open')) return;
+        if (popup.contains(e.target) || btn.contains(e.target)) return;
+        popup.classList.remove('is-open');
+      });
+    })();
+
+    // 1-5 hotkeys (any mode — FP, cinematic, or manual). We listen at
+    // window level so FP's pointer-lock-gated keydown handler doesn't
+    // swallow the digits. Modifier keys / text inputs guard against
+    // collisions with future browser shortcuts or HUD inputs.
+    window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // skip if focus is inside an editable element
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      // Digit1..Digit5 → ROSTER[0..4] (boot azure + 4 KayKit chars).
+      const m = e.code && e.code.match(/^Digit([1-9])$/);
+      if (!m) return;
+      const n = parseInt(m[1], 10) - 1;
+      if (n >= 0 && n < ROSTER.length) {
+        e.preventDefault();
+        switchOpponent(ROSTER[n].id);
+      }
+    });
 
     /* ── particle dust/snow (optional, fail-soft) ──────────────── */
     // Additive points drifting downward with per-particle size variation and
