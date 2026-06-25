@@ -50,6 +50,41 @@
       color: #d8a45a;
     }
 
+    /* ── top-right mute toggle (sits to the LEFT of #back-link) ──
+       Same plate/border as #back-link so the two read as a pair.
+       Larger glyph because emoji renders smaller than text caps.
+       lkb3d_muted persistence is handled by the audio script below. */
+    #mute-btn {
+      position: fixed;
+      top: 14px;
+      right: 138px;
+      z-index: 20;
+      width: 38px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.7);
+      border-radius: 4px;
+      font-size: 15px;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      user-select: none;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    #mute-btn:hover {
+      background: rgba(40, 40, 55, 0.9);
+      color: #d8a45a;
+    }
+    #mute-btn.is-muted {
+      color: #a23030;
+      border-color: rgba(162, 48, 48, 0.7);
+    }
+
     /* ── bottom-left HUD strip ──────────────────────────────────── */
     #hud {
       position: fixed;
@@ -421,6 +456,7 @@
   <div id="vignette-bottom"></div>
   <div id="vignette-top-right"></div>
 
+  <button id="mute-btn" type="button" aria-label="Toggle sound" title="Mute / Unmute (M)">&#x1F50A;</button>
   <a id="back-link" href="../index.html">&#x2190; back to 2D</a>
 
   <div id="hud">
@@ -470,6 +506,597 @@
        animation completes (~1.5s). Pointer-events: none keeps it from
        blocking the canvas. -->
   <div id="round-banner" aria-live="polite"></div>
+
+  <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
+       Plain (non-module) script so all SFX/BGM helpers live on the
+       window-scope global namespace and the type=module block below
+       can call them through `window.sfx*` / `window.initAudioOnce`.
+       AudioContext creation is gated behind the first user gesture
+       (click or keydown) — browsers block autoplay until then. All
+       failures are swallowed so the visual scene keeps running even
+       if WebAudio is unavailable (Safari private mode, etc.). -->
+  <script>
+  (function () {
+    "use strict";
+    try {
+      // ───────────── stubs the 2D code expects ─────────────
+      // applyAudioSettings reads sfxVolume / bgmVolume from the 2D
+      // SETTINGS panel (0..100). Stub at 100 here — the 3D build has
+      // no settings panel, so volume is fixed and the M button is the
+      // only user control. (The mute button drives globalGain directly.)
+      var sfxVolume = 100;
+      var bgmVolume = 100;
+      // netRecordSfx pushes events into the 2D ONLINE relay; 3D has
+      // no relay so this is a hard no-op. Kept named the same so the
+      // sfx* wrapper definitions below paste in verbatim.
+      function netRecordSfx(_id) {}
+
+      // ───────────── AUDIO INIT ─────────────
+      // One AudioContext (actx) shared by SFX + BGM. Routing:
+      //   blip() / tone() / noise() → sfxGain ──┐
+      //   bgm.* drone + bell voices  → bgmGain ─┼→ globalGain → destination
+      // globalGain is the SINGLE mute gate. Mute = ramp to 0; unmute = ramp
+      // back to GLOBAL_LEVEL. Persistence key for 3D = "lkb3d_muted" (the 2D
+      // build uses "lkb_muted" — kept separate so each scene tracks its own
+      // mute preference).
+      var actx = null;
+      var globalGain = null;
+      var sfxGain = null;
+      var arenaSendGain = null;
+      var GLOBAL_LEVEL = 0.85;
+      var muted = (function () {
+        try { return localStorage.getItem("lkb3d_muted") === "1"; } catch (e) { return false; }
+      })();
+      var audioInited = false;
+
+      function initAudio() {
+        if (audioInited) return;
+        audioInited = true;
+        try {
+          actx = new (window.AudioContext || window.webkitAudioContext)();
+          globalGain = actx.createGain();
+          globalGain.gain.value = muted ? 0 : GLOBAL_LEVEL;
+          globalGain.connect(actx.destination);
+          sfxGain = actx.createGain();
+          sfxGain.gain.value = 1.0;
+          sfxGain.connect(globalGain);
+          // Arena tail: short feedback-delay used as a cheap reverb send
+          // for heavy hits. Heavy SFX tap this via `send` on tone()/noise().
+          arenaSendGain = actx.createGain();
+          arenaSendGain.gain.value = 1.0;
+          var arenaDelay = actx.createDelay(0.5);
+          arenaDelay.delayTime.value = 0.16;
+          var arenaFb = actx.createGain();
+          arenaFb.gain.value = 0.34;
+          var arenaLP = actx.createBiquadFilter();
+          arenaLP.type = "lowpass";
+          arenaLP.frequency.value = 2400;
+          arenaSendGain.connect(arenaDelay);
+          arenaDelay.connect(arenaLP);
+          arenaLP.connect(globalGain);
+          arenaLP.connect(arenaFb);
+          arenaFb.connect(arenaDelay);
+          try { bgm.init(); bgm.start(); } catch (e) {}
+          try { applyAudioSettings(); } catch (e) {}
+        } catch (err) { actx = null; }
+      }
+      function blip(freq, dur, type, vol) {
+        if (!actx) return;
+        try {
+          if (actx.state === "suspended") actx.resume();
+          var t = actx.currentTime;
+          var osc = actx.createOscillator();
+          var g = actx.createGain();
+          osc.type = type || "square";
+          osc.frequency.setValueAtTime(freq, t);
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(vol || 0.12, t + 0.005);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+          osc.connect(g); g.connect(sfxGain || actx.destination);
+          osc.start(t); osc.stop(t + dur + 0.02);
+        } catch (err) {}
+      }
+
+      // ===== GLOBAL MUTE TOGGLE =====
+      function setMuted(m) {
+        muted = !!m;
+        try { localStorage.setItem("lkb3d_muted", muted ? "1" : "0"); } catch (e) {}
+        if (actx && globalGain) {
+          var t = actx.currentTime;
+          globalGain.gain.cancelScheduledValues(t);
+          globalGain.gain.linearRampToValueAtTime(muted ? 0 : GLOBAL_LEVEL, t + 0.05);
+        }
+        // Reflect in DOM (icon + class) so users see the change.
+        var btn = document.getElementById("mute-btn");
+        if (btn) {
+          btn.classList.toggle("is-muted", muted);
+          btn.innerHTML = muted ? "&#x1F507;" : "&#x1F50A;";
+          btn.setAttribute("aria-pressed", muted ? "true" : "false");
+        }
+      }
+      function toggleMuted() { setMuted(!muted); }
+
+      function applyAudioSettings() {
+        if (sfxGain) sfxGain.gain.value = sfxVolume / 100;
+        if (typeof bgm !== "undefined" && bgm && bgm.setVolume) bgm.setVolume(bgmVolume / 100);
+      }
+
+      // ===== PROCEDURAL NORDIC-MOOD BGM =====
+      // Sparse atmospheric loop: low drone + minor-pentatonic bells.
+      // (Verbatim port from 2D index.html — see that file for the long
+      // architectural comments. Only setMatchPointActive is left in but
+      // never called from the 3D build since there is no match-point UI.)
+      var bgm = (function () {
+        var BGM_LEVEL = 0.07;
+        var userBgmScale = 1.0;
+        var BPM = 75;
+        var STEP_SEC = 60 / BPM / 2;
+        var SCALE = [110.00, 130.81, 146.83, 164.81, 196.00];
+        var PATTERN = [
+          1,0,0,0, 0,0,1,0, 0,0,0,0, 1,0,0,0,
+          0,0,0,1, 0,0,0,0, 1,0,0,0, 0,0,0,0,
+        ];
+        var bgmStageDetune = 0;
+        var bgmExtraDetune = 0;
+        var bgmGain = null;
+        var droneGain = null;
+        var bellGain = null;
+        var droneNodes = null;
+        var reverbIn = null;
+        var stepIdx = 0;
+        var stepTimer = null;
+        var accentTimer = null;
+        var started = false;
+        var visHandlerInstalled = false;
+
+        function init() {
+          if (!actx || bgmGain) return;
+          bgmGain = actx.createGain();
+          bgmGain.gain.value = 0.0001;
+          bgmGain.connect(globalGain);
+
+          // ---- DRONE ----
+          droneGain = actx.createGain();
+          droneGain.gain.value = 0.6;
+          var filt = actx.createBiquadFilter();
+          filt.type = "lowpass";
+          filt.frequency.value = 700;
+          filt.Q.value = 0.7;
+          var lfo = actx.createOscillator();
+          lfo.frequency.value = 0.07;
+          var lfoGain = actx.createGain();
+          lfoGain.gain.value = 150;
+          lfo.connect(lfoGain).connect(filt.frequency);
+          lfo.start();
+
+          var oscs = [];
+          function voice(freq, type, vol, detune) {
+            var o = actx.createOscillator();
+            o.type = type;
+            o.frequency.value = freq;
+            if (detune) o.detune.value = detune;
+            var g = actx.createGain();
+            g.gain.value = vol;
+            o.connect(g).connect(filt);
+            o.start();
+            oscs.push(o);
+          }
+          voice(55.00, "sine",     1.00, 0);
+          voice(55.00, "sawtooth", 0.18, -7);
+          voice(110.00,"sine",     0.45, +4);
+          filt.connect(droneGain).connect(bgmGain);
+          droneNodes = { oscs: oscs, lfo: lfo, lfoGain: lfoGain, filter: filt };
+
+          // ---- BELL + FEEDBACK-DELAY REVERB ----
+          bellGain = actx.createGain();
+          bellGain.gain.value = 0.55;
+          bellGain.connect(bgmGain);
+          reverbIn = actx.createGain();
+          reverbIn.gain.value = 1.0;
+          var delay = actx.createDelay(2.0);
+          delay.delayTime.value = 0.42;
+          var dampen = actx.createBiquadFilter();
+          dampen.type = "lowpass";
+          dampen.frequency.value = 1800;
+          var fb = actx.createGain();
+          fb.gain.value = 0.55;
+          var wet = actx.createGain();
+          wet.gain.value = 0.45;
+          reverbIn.connect(delay);
+          delay.connect(dampen);
+          dampen.connect(fb);
+          fb.connect(delay);
+          dampen.connect(wet);
+          wet.connect(bellGain);
+        }
+
+        function bell(freq, when, vol) {
+          if (!actx) return;
+          var o = actx.createOscillator();
+          o.type = "triangle";
+          o.frequency.value = freq;
+          o.detune.value = bgmStageDetune + bgmExtraDetune;
+          var g = actx.createGain();
+          g.gain.setValueAtTime(0.0001, when);
+          g.gain.exponentialRampToValueAtTime(vol, when + 0.015);
+          g.gain.exponentialRampToValueAtTime(0.0001, when + 1.6);
+          o.connect(g);
+          g.connect(bellGain);
+          g.connect(reverbIn);
+          o.start(when);
+          o.stop(when + 1.7);
+        }
+
+        function tick() {
+          if (!actx || !bgmGain) return;
+          var hit = PATTERN[stepIdx % PATTERN.length];
+          stepIdx++;
+          if (hit) {
+            var idx = Math.floor(Math.pow(Math.random(), 1.4) * SCALE.length);
+            var f = SCALE[Math.max(0, Math.min(SCALE.length - 1, idx))];
+            bell(f, actx.currentTime + 0.02, 0.18 + Math.random() * 0.06);
+          }
+        }
+
+        function scheduleAccent() {
+          if (accentTimer) clearTimeout(accentTimer);
+          var ms = 8000 + Math.random() * 8000;
+          accentTimer = setTimeout(function () {
+            if (started && actx) {
+              var idx = Math.floor(Math.random() * SCALE.length);
+              bell(SCALE[idx] * 2, actx.currentTime + 0.02, 0.10);
+            }
+            scheduleAccent();
+          }, ms);
+        }
+
+        function start() {
+          if (!actx || started) return;
+          init();
+          if (!bgmGain) return;
+          started = true;
+          var t = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(t);
+          bgmGain.gain.setValueAtTime(0.0001, t);
+          bgmGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, BGM_LEVEL * userBgmScale), t + 2.0);
+          if (stepTimer) clearInterval(stepTimer);
+          stepTimer = setInterval(tick, STEP_SEC * 1000);
+          scheduleAccent();
+
+          if (!visHandlerInstalled) {
+            visHandlerInstalled = true;
+            document.addEventListener("visibilitychange", function () {
+              if (!actx || !bgmGain) return;
+              if (document.hidden) {
+                if (!started) return;
+                var tnow = actx.currentTime;
+                bgmGain.gain.cancelScheduledValues(tnow);
+                bgmGain.gain.linearRampToValueAtTime(0.0001, tnow + 0.15);
+                if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+                if (accentTimer) { clearTimeout(accentTimer); accentTimer = null; }
+              } else {
+                if (actx.state === "suspended") { try { actx.resume(); } catch (e) {} }
+                if (!started) return;
+                var tnow2 = actx.currentTime;
+                bgmGain.gain.cancelScheduledValues(tnow2);
+                bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, tnow2 + 0.4);
+                if (!stepTimer) stepTimer = setInterval(tick, STEP_SEC * 1000);
+                scheduleAccent();
+              }
+            });
+          }
+        }
+
+        function stop() {
+          if (!actx || !bgmGain) { started = false; return; }
+          var t = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(t);
+          bgmGain.gain.linearRampToValueAtTime(0.0001, t + 0.3);
+          if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+          if (accentTimer) { clearTimeout(accentTimer); accentTimer = null; }
+          started = false;
+        }
+
+        function setMutedNoop(_m) {}
+
+        function duck(level, ramp) {
+          if (!actx || !bgmGain) return;
+          var t = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(t);
+          bgmGain.gain.linearRampToValueAtTime(level, t + (ramp || 0.1));
+        }
+        function restore(ramp) {
+          if (!actx || !bgmGain) return;
+          var t = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(t);
+          bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, t + (ramp || 0.4));
+        }
+
+        function setVolume(v) {
+          userBgmScale = Math.max(0, Math.min(1, v));
+          if (!actx || !bgmGain) return;
+          var t = actx.currentTime;
+          bgmGain.gain.cancelScheduledValues(t);
+          bgmGain.gain.setValueAtTime(bgmGain.gain.value, t);
+          bgmGain.gain.linearRampToValueAtTime(BGM_LEVEL * userBgmScale, t + 0.15);
+        }
+
+        function setStage(stageId) {
+          switch (stageId) {
+            case "tundra":     bgmStageDetune = 700;  break;
+            case "goldenhour": bgmStageDetune = -200; break;
+            case "aurora":     bgmStageDetune = 1200; break;
+            case "dusk":
+            default:           bgmStageDetune = 0;    break;
+          }
+        }
+
+        function setMatchPointActive(active) {
+          bgmExtraDetune = active ? 300 : 0;
+        }
+
+        return {
+          init: init, start: start, stop: stop, setMuted: setMutedNoop,
+          duck: duck, restore: restore, setVolume: setVolume,
+          setStage: setStage, setMatchPointActive: setMatchPointActive
+        };
+      })();
+
+      // ===== SFX PRIMITIVES (tone / noise) =====
+      function tone(opts) {
+        if (!actx) return;
+        var freq = opts.freq, freq2 = opts.freq2, dur = opts.dur;
+        var type = opts.type || "sine";
+        var vol = (opts.vol == null) ? 0.1 : opts.vol;
+        var attack = (opts.attack == null) ? 0.005 : opts.attack;
+        var release = opts.release;
+        var filterFreq = opts.filterFreq, filterQ = opts.filterQ;
+        var send = opts.send || 0;
+        try {
+          if (actx.state === "suspended") actx.resume();
+          var t = actx.currentTime;
+          var osc = actx.createOscillator();
+          osc.type = type;
+          osc.frequency.setValueAtTime(freq, t);
+          if (freq2 != null) osc.frequency.exponentialRampToValueAtTime(Math.max(0.01, freq2), t + dur);
+          var g = actx.createGain();
+          var rel = release == null ? dur : release;
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(vol, t + Math.min(attack, dur * 0.5));
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+          var head = osc;
+          if (filterFreq != null) {
+            var f = actx.createBiquadFilter();
+            f.type = "lowpass";
+            f.frequency.value = filterFreq;
+            if (filterQ != null) f.Q.value = filterQ;
+            head.connect(f); head = f;
+          }
+          head.connect(g);
+          g.connect(sfxGain || actx.destination);
+          if (send > 0 && arenaSendGain) {
+            var sg = actx.createGain();
+            sg.gain.value = send;
+            g.connect(sg);
+            sg.connect(arenaSendGain);
+          }
+          osc.start(t);
+          osc.stop(t + dur + 0.1);
+        } catch (e) {}
+      }
+
+      function noise(opts) {
+        if (!actx) return;
+        var dur = opts.dur;
+        var vol = (opts.vol == null) ? 0.08 : opts.vol;
+        var attack = (opts.attack == null) ? 0.002 : opts.attack;
+        var type = opts.type || "lowpass";
+        var freqStart = (opts.freqStart == null) ? 2000 : opts.freqStart;
+        var freqEnd = (opts.freqEnd == null) ? 400 : opts.freqEnd;
+        var q = (opts.q == null) ? 1 : opts.q;
+        var send = opts.send || 0;
+        try {
+          if (actx.state === "suspended") actx.resume();
+          var t = actx.currentTime;
+          var bufLen = Math.max(1, Math.floor(actx.sampleRate * (dur + 0.05)));
+          var buf = actx.createBuffer(1, bufLen, actx.sampleRate);
+          var ch = buf.getChannelData(0);
+          for (var i = 0; i < bufLen; i++) ch[i] = (Math.random() * 2 - 1);
+          var src = actx.createBufferSource();
+          src.buffer = buf;
+          var f = actx.createBiquadFilter();
+          f.type = type;
+          f.frequency.setValueAtTime(freqStart, t);
+          f.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), t + dur);
+          f.Q.value = q;
+          var g = actx.createGain();
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(vol, t + Math.min(attack, dur * 0.4));
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+          src.connect(f); f.connect(g); g.connect(sfxGain || actx.destination);
+          if (send > 0 && arenaSendGain) {
+            var sg2 = actx.createGain();
+            sg2.gain.value = send;
+            g.connect(sg2);
+            sg2.connect(arenaSendGain);
+          }
+          src.start(t);
+          src.stop(t + dur + 0.1);
+        } catch (e) {}
+      }
+
+      // ===== SFX VOICES (verbatim from 2D) =====
+      function _sfxSwing() {
+        noise({ dur: 0.10, vol: 0.05, type: "bandpass", freqStart: 1800, freqEnd: 600, q: 1.2 });
+        tone({ freq: 180, freq2: 120, dur: 0.08, type: "triangle", vol: 0.03, attack: 0.003, release: 0.08 });
+      }
+      function _sfxHit() {
+        tone({ freq: 110, freq2: 70, dur: 0.18, type: "square", vol: 0.10, attack: 0.001, release: 0.16, send: 0.25 });
+        tone({ freq: 540, freq2: 420, dur: 0.14, type: "triangle", vol: 0.07, attack: 0.001, release: 0.14, send: 0.30 });
+        noise({ dur: 0.06, vol: 0.10, type: "bandpass", freqStart: 4500, freqEnd: 1500, q: 1.5, send: 0.20 });
+      }
+      function _sfxClang() {
+        tone({ freq: 880, freq2: 820, dur: 0.22, type: "square", vol: 0.08, attack: 0.001, release: 0.22, send: 0.40 });
+        tone({ freq: 1320, freq2: 1240, dur: 0.18, type: "triangle", vol: 0.05, attack: 0.001, release: 0.18, send: 0.40 });
+        noise({ dur: 0.05, vol: 0.06, type: "bandpass", freqStart: 6000, freqEnd: 2000, q: 2, send: 0.30 });
+      }
+      function _sfxJump() {
+        tone({ freq: 330, freq2: 520, dur: 0.10, type: "sine", vol: 0.05, attack: 0.002 });
+      }
+      function _sfxFall() {
+        tone({ freq: 120, freq2: 50, dur: 0.5, type: "sawtooth", vol: 0.10, attack: 0.005, send: 0.30 });
+        tone({ freq: 60, freq2: 30, dur: 0.6, type: "sine", vol: 0.06, attack: 0.001, send: 0.40 });
+        noise({ dur: 0.35, vol: 0.06, type: "lowpass", freqStart: 800, freqEnd: 80, q: 1, send: 0.50 });
+      }
+      function _sfxCount() {
+        tone({ freq: 660, freq2: 660, dur: 0.10, type: "square", vol: 0.06, attack: 0.001, release: 0.10 });
+        tone({ freq: 1320, dur: 0.10, type: "triangle", vol: 0.03, attack: 0.001, release: 0.10 });
+      }
+      function _sfxFight() {
+        var chord = [523, 784, 1175];
+        chord.forEach(function (f) {
+          tone({ freq: f, dur: 0.32, type: "square", vol: 0.06, attack: 0.002, release: 0.32, send: 0.35 });
+          tone({ freq: f, dur: 0.32, type: "triangle", vol: 0.04, attack: 0.002, release: 0.32, send: 0.35 });
+        });
+      }
+      function _sfxSpReady() {
+        tone({ freq: 880, dur: 0.08, type: "square", vol: 0.05, attack: 0.001, release: 0.08 });
+        tone({ freq: 1320, dur: 0.12, type: "triangle", vol: 0.06, attack: 0.001, release: 0.12 });
+        tone({ freq: 1760, dur: 0.16, type: "triangle", vol: 0.04, attack: 0.001, release: 0.16 });
+      }
+      function _sfxSpFail() {
+        tone({ freq: 180, freq2: 120, dur: 0.08, type: "square", vol: 0.04, attack: 0.001, release: 0.08 });
+      }
+      function _sfxMega() {
+        tone({ freq: 70, freq2: 40, dur: 0.40, type: "sawtooth", vol: 0.14, attack: 0.001, release: 0.40, send: 0.55 });
+        tone({ freq: 160, freq2: 90, dur: 0.30, type: "square", vol: 0.10, attack: 0.001, release: 0.30, send: 0.50 });
+        tone({ freq: 880, freq2: 600, dur: 0.18, type: "triangle", vol: 0.08, attack: 0.001, release: 0.18, send: 0.40 });
+        noise({ dur: 0.10, vol: 0.12, type: "bandpass", freqStart: 4500, freqEnd: 800, q: 1.4, send: 0.55 });
+      }
+      function _sfxCounter() {
+        tone({ freq: 1320, dur: 0.10, type: "square", vol: 0.08, attack: 0.001, release: 0.10, send: 0.45 });
+        tone({ freq: 1760, dur: 0.16, type: "triangle", vol: 0.06, attack: 0.001, release: 0.16, send: 0.45 });
+        noise({ dur: 0.04, vol: 0.06, type: "bandpass", freqStart: 6000, freqEnd: 3000, q: 2, send: 0.40 });
+      }
+      function _sfxDash() {
+        noise({ dur: 0.18, vol: 0.08, type: "bandpass", freqStart: 2400, freqEnd: 400, q: 1.0, send: 0.30 });
+        tone({ freq: 130, freq2: 80, dur: 0.18, type: "sawtooth", vol: 0.08, attack: 0.002, release: 0.18, send: 0.30 });
+      }
+      function _sfxAnchor() {
+        tone({ freq: 110, freq2: 70, dur: 0.28, type: "sine", vol: 0.10, attack: 0.001, release: 0.28, send: 0.40 });
+        tone({ freq: 220, freq2: 180, dur: 0.22, type: "triangle", vol: 0.06, attack: 0.001, release: 0.22 });
+        noise({ dur: 0.16, vol: 0.05, type: "lowpass", freqStart: 600, freqEnd: 100, q: 1, send: 0.40 });
+      }
+      function _sfxSelect() {
+        tone({ freq: 523, dur: 0.05, type: "square", vol: 0.05, attack: 0.001, release: 0.05 });
+      }
+      function _sfxLock() {
+        tone({ freq: 659, dur: 0.08, type: "square", vol: 0.07, attack: 0.001, release: 0.08 });
+        tone({ freq: 988, dur: 0.10, type: "triangle", vol: 0.05, attack: 0.001, release: 0.10 });
+      }
+      function sfxHorn() {
+        if (!actx) return;
+        if (actx.state === "suspended") actx.resume();
+        tone({ freq: 196, freq2: 185, dur: 0.50, type: "sawtooth", vol: 0.10, attack: 0.015, release: 0.48 });
+        tone({ freq: 392, freq2: 370, dur: 0.42, type: "sawtooth", vol: 0.06, attack: 0.012, release: 0.40 });
+        tone({ freq: 588, freq2: 555, dur: 0.35, type: "triangle", vol: 0.03, attack: 0.010, release: 0.33 });
+        noise({ dur: 0.08, vol: 0.04, type: "bandpass", freqStart: 800, freqEnd: 300, q: 1.5 });
+      }
+      // Public sfx* wrappers (netRecordSfx is a no-op in 3D but kept for parity).
+      function sfxSwing()   { _sfxSwing();   netRecordSfx("swing"); }
+      function sfxHit()     { _sfxHit();     netRecordSfx("hit"); }
+      function sfxClang()   { _sfxClang();   netRecordSfx("clang"); }
+      function sfxJump()    { _sfxJump();    netRecordSfx("jump"); }
+      function sfxFall()    { _sfxFall();    netRecordSfx("fall"); }
+      function sfxCount()   { _sfxCount();   netRecordSfx("count"); }
+      function sfxFight()   { _sfxFight();   netRecordSfx("fight"); }
+      function sfxSpReady() { _sfxSpReady(); netRecordSfx("spReady"); }
+      function sfxSpFail()  { _sfxSpFail();  netRecordSfx("spFail"); }
+      function sfxMega()    { _sfxMega();    netRecordSfx("mega"); }
+      function sfxCounter() { _sfxCounter(); netRecordSfx("counter"); }
+      function sfxDash()    { _sfxDash();    netRecordSfx("dash"); }
+      function sfxAnchor()  { _sfxAnchor();  netRecordSfx("anchor"); }
+      function sfxSelect()  { _sfxSelect();  netRecordSfx("select"); }
+      function sfxLock()    { _sfxLock();    netRecordSfx("lock"); }
+
+      // ───────────── First-gesture init + DOM wiring ─────────────
+      // Browsers refuse to start an AudioContext until a real user gesture
+      // happens, so we only call initAudio() from a click/keydown listener
+      // registered with { once: true } so we don't keep firing it. The mute
+      // button itself ALSO calls initAudioOnce() in case the very first
+      // interaction the user makes is the mute toggle.
+      function initAudioOnce() {
+        initAudio();
+        // Try to resume immediately — Safari sometimes leaves the context
+        // in "suspended" even after creation inside a gesture handler.
+        if (actx && actx.state === "suspended") {
+          try { actx.resume(); } catch (e) {}
+        }
+      }
+      window.addEventListener("click",   initAudioOnce, { once: true });
+      window.addEventListener("keydown", initAudioOnce, { once: true });
+      window.addEventListener("touchstart", initAudioOnce, { once: true, passive: true });
+
+      // Mute button (top-right corner). Toggles globalGain; persists across
+      // reloads via "lkb3d_muted". M-key shortcut mirrors the 2D build.
+      function bindMuteUI() {
+        var btn = document.getElementById("mute-btn");
+        if (btn) {
+          // Reflect initial state on load.
+          btn.classList.toggle("is-muted", muted);
+          btn.innerHTML = muted ? "&#x1F507;" : "&#x1F50A;";
+          btn.setAttribute("aria-pressed", muted ? "true" : "false");
+          btn.addEventListener("click", function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            initAudioOnce();   // ensure context exists before toggling
+            toggleMuted();
+          });
+        }
+        // Keyboard shortcut: "m" toggles mute (matches 2D convention).
+        window.addEventListener("keydown", function (ev) {
+          if (ev.key === "m" || ev.key === "M") {
+            initAudioOnce();
+            toggleMuted();
+          }
+        });
+      }
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", bindMuteUI);
+      } else {
+        bindMuteUI();
+      }
+
+      // ───────────── Export to window for the module script ─────────────
+      // The type=module block runs in its own scope, so anything it needs
+      // to call must be reachable via window.*. We expose only the public
+      // surface (no primitives like tone()/noise() — call the named SFX).
+      window.initAudioOnce = initAudioOnce;
+      window.setMuted      = setMuted;
+      window.toggleMuted   = toggleMuted;
+      window.bgm           = bgm;
+      window.sfxSwing      = sfxSwing;
+      window.sfxHit        = sfxHit;
+      window.sfxClang      = sfxClang;
+      window.sfxJump       = sfxJump;
+      window.sfxFall       = sfxFall;
+      window.sfxCount      = sfxCount;
+      window.sfxFight      = sfxFight;
+      window.sfxSpReady    = sfxSpReady;
+      window.sfxSpFail     = sfxSpFail;
+      window.sfxMega       = sfxMega;
+      window.sfxCounter    = sfxCounter;
+      window.sfxDash       = sfxDash;
+      window.sfxAnchor     = sfxAnchor;
+      window.sfxSelect     = sfxSelect;
+      window.sfxLock       = sfxLock;
+      window.sfxHorn       = sfxHorn;
+    } catch (bootErr) {
+      // Audio block failure must NEVER take down the visual scene.
+      console.warn("[lkb-3d] audio init failed; muted scene", bootErr);
+    }
+  })();
+  </script>
 
   <script type="module">
     import * as THREE from 'three';
@@ -1354,6 +1981,9 @@
       span.className = 'rb-text';
       span.textContent = 'ROUND ' + n;
       roundBannerHost.appendChild(span);
+      // ── SFX wiring: FIGHT chord on round announce. Skipped on the
+      //    very first showing if audio isn't unlocked yet (autoplay).
+      try { if (window.sfxFight) window.sfxFight(); } catch (e) {}
       _roundBannerTimer = setTimeout(() => {
         while (roundBannerHost.firstChild) roundBannerHost.removeChild(roundBannerHost.firstChild);
         _roundBannerTimer = null;
@@ -1411,6 +2041,10 @@
       window.gameState[defenderId].dead = true;
       c.state = 'dead';
       playClip(c, 'Death_A', { fadeIn: 0.15, loop: false });
+      // ── SFX wiring: KO fall thud + brass horn fanfare. Sequenced so
+      //    the fall lands first and the horn punctuates the silence.
+      try { if (window.sfxFall) window.sfxFall(); } catch (e) {}
+      try { if (window.sfxHorn) setTimeout(function () { window.sfxHorn(); }, 400); } catch (e) {}
 
       // Increment winner's win count
       const winnerId = defenderId === 'crimson' ? 'azure' : 'crimson';
@@ -1491,6 +2125,9 @@
       } catch (err) {
         console.warn('[lkb-3d] impactSystem.spawn threw', err);
       }
+      // ── SFX wiring: heavy hit on every impact frame. Guarded behind
+      //    feature-detect so an audio init failure can't break combat.
+      try { if (window.sfxHit) window.sfxHit(); } catch (e) {}
     };
 
     // combatTick — runs every 3s. Picks a random attacker, fires the
@@ -1509,6 +2146,10 @@
 
       combatTickCount++;
       console.log(`[lkb-3d] combatTick #${combatTickCount}: ${attackerLabel} → ${defenderLabel}`);
+
+      // ── SFX wiring: swing whoosh on attack windup. The matching hit
+      //    fires inside window.triggerImpact at ~70% of the swing.
+      try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
 
       // Wind up + attack — randomize attack clip each tick for variety.
       // State labels track the rough phase so future logic (HUD, sound
