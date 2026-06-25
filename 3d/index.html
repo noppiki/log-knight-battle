@@ -1227,10 +1227,9 @@
       font-style: normal;
     }
 
-    /* ── ROUND N banner — center overlay shown on each round start
-         (and on initial page load). Engraved-metal palette matches the
-         iter-65 player labels (#e8dcc0 body, #d8a45a accent). 1.2s
-         hold, 0.3s fade-out, then auto-removed by JS. */
+    /* ── r88: ROUND N cinematic title card — two-tier layout (prefix + large
+         number + optional streak sub-text). Engraved-metal palette.
+         z-index 27 (below cinematic READY/FIGHT at z-30). */
     #round-banner {
       position: fixed;
       inset: 0;
@@ -1241,6 +1240,56 @@
       pointer-events: none;
       font-family: 'Trebuchet MS', Verdana, sans-serif;
     }
+    /* r88: card container — flex column, center-aligned */
+    #round-banner .rb-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      animation: rbCardIn 1.8s ease-out forwards;
+    }
+    /* r88: "ROUND" prefix line — amber accent */
+    #round-banner .rb-prefix {
+      color: #d8a45a;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.55em;
+      text-transform: uppercase;
+      text-shadow:
+        0 1px 0 rgba(20, 16, 24, 0.95),
+        0 0 14px rgba(216, 164, 90, 0.55);
+      opacity: 0.9;
+    }
+    /* r88: large round number — white/cream, punchy */
+    #round-banner .rb-num {
+      color: #f0ead8;
+      font-size: 96px;
+      font-weight: 900;
+      line-height: 0.9;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      text-shadow:
+        0 -1px 0 rgba(255, 245, 220, 0.6),
+        0 2px 0 rgba(20, 16, 24, 0.95),
+        0 4px 0 rgba(20, 16, 24, 0.75),
+        0 6px 0 rgba(0, 0, 0, 0.45),
+        0 10px 28px rgba(0, 0, 0, 0.90),
+        0 0 40px rgba(216, 164, 90, 0.35);
+    }
+    /* r88: streak sub-text — cyan tint, compact */
+    #round-banner .rb-sub {
+      color: #8fd6d8;
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.35em;
+      text-transform: uppercase;
+      text-shadow:
+        0 1px 0 rgba(0, 0, 0, 0.9),
+        0 0 12px rgba(100, 200, 210, 0.55);
+      min-height: 20px;
+      margin-top: 4px;
+    }
+    /* legacy .rb-text kept for back-compat (online sync path may rely on it) */
     #round-banner .rb-text {
       color: #e8dcc0;
       font-size: 64px;
@@ -1261,6 +1310,14 @@
       18%  { opacity: 1; transform: scale(1.0)  translateY(0);    letter-spacing: 0.22em; }
       80%  { opacity: 1; transform: scale(1.0)  translateY(0);    letter-spacing: 0.22em; }
       100% { opacity: 0; transform: scale(0.98) translateY(2px);  letter-spacing: 0.22em; }
+    }
+    /* r88: card entrance — scale punch 0.85→1.08→1.0, then hold, then fade out */
+    @keyframes rbCardIn {
+      0%   { opacity: 0; transform: scale(0.85) translateY(-10px); }
+      18%  { opacity: 1; transform: scale(1.08) translateY(0); }
+      30%  { opacity: 1; transform: scale(1.0)  translateY(0); }
+      78%  { opacity: 1; transform: scale(1.0)  translateY(0); }
+      100% { opacity: 0; transform: scale(0.97) translateY(3px); }
     }
 
     /* FP pointer-lock hint — center-screen, only visible when
@@ -8577,10 +8634,10 @@
       setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, _DMG_FLOAT_LIFE_MS);
     }
 
-    // ── ROUND N banner — clears any prior banner child, then injects
-    // a fresh .rb-text span so the CSS animation re-runs from frame 0.
-    // The element is removed after the 1.5s show+fade completes.
-    const _ROUND_BANNER_LIFE_MS = 1550;
+    // ── r88 ROUND N cinematic title card — two-tier prefix/num layout +
+    // streak sub-text. Replaces the old single .rb-text span with a .rb-card
+    // container. Legacy .rb-text CSS is kept for back-compat.
+    const _ROUND_BANNER_LIFE_MS = 1800; // extended for 1.8s rbCardIn animation
     const roundBannerHost = document.getElementById('round-banner');
     let _roundBannerTimer = null;
     function showRoundBanner(n) {
@@ -8588,13 +8645,37 @@
       // Clear any in-flight banner so back-to-back calls don't stack.
       if (_roundBannerTimer) { clearTimeout(_roundBannerTimer); _roundBannerTimer = null; }
       while (roundBannerHost.firstChild) roundBannerHost.removeChild(roundBannerHost.firstChild);
-      const span = document.createElement('div');
-      span.className = 'rb-text';
-      span.textContent = 'ROUND ' + n;
-      roundBannerHost.appendChild(span);
-      // ── SFX wiring: FIGHT chord on round announce. Skipped on the
+
+      // ── r88: build two-tier card (prefix + large number + streak sub)
+      const card = document.createElement('div');
+      card.className = 'rb-card';
+
+      const prefix = document.createElement('div');
+      prefix.className = 'rb-prefix';
+      prefix.textContent = 'ROUND';
+
+      const num = document.createElement('div');
+      num.className = 'rb-num';
+      num.textContent = n;
+
+      const sub = document.createElement('div');
+      sub.className = 'rb-sub';
+      // Streak sub-text: derive from current wins state.
+      // gameState wins are already incremented before showRoundBanner is called.
+      const _cw = (window.gameState && window.gameState.crimson && window.gameState.crimson.wins) || 0;
+      const _aw = (window.gameState && window.gameState.azure   && window.gameState.azure.wins)   || 0;
+      const _maxW = Math.max(_cw, _aw);
+      sub.textContent = _maxW >= 1 ? 'STREAK ×' + _maxW : '';
+
+      card.appendChild(prefix);
+      card.appendChild(num);
+      card.appendChild(sub);
+      roundBannerHost.appendChild(card);
+
+      // ── SFX wiring: bell tone on round announce. Skipped on the
       //    very first showing if audio isn't unlocked yet (autoplay).
       try { if (window.sfxFight) window.sfxFight(); } catch (e) {}
+
       _roundBannerTimer = setTimeout(() => {
         while (roundBannerHost.firstChild) roundBannerHost.removeChild(roundBannerHost.firstChild);
         _roundBannerTimer = null;
