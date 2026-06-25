@@ -9654,8 +9654,15 @@
       if (defenderId === 'azure') {
         if (!guardAbsorbed) {
           try { _comboHit(); } catch (e) {}
+          // r95: open combo follow-up window on clean tier-0 (normal) player hit.
+          // Exclude combo-generated hits (opts.combo) to prevent infinite re-arming.
+          if (opts && opts.kind === 'normal' && !opts.combo) {
+            window._comboFollowWindow    = performance.now() + 250;
+            window._comboFollowAvailable = true;
+          }
         } else {
           try { _comboReset(); } catch (e) {}
+          window._comboFollowAvailable = false;
         }
       }
       // r78: finisher detection — arm finisher flag when a clean tier-2 hit
@@ -10677,6 +10684,12 @@
     const playerInput = { spacePressed: false, eHeld: false, lastSpaceTime: 0 };
     const PLAYER_ATTACK_COOLDOWN_MS = 250; // soft floor between repeated taps
 
+    // r95: combo follow-up window state
+    // Opens 250ms after a clean tier-0 hit lands (player → azure).
+    // Cleared immediately when consumed or on window expiry.
+    window._comboFollowWindow    = 0;   // performance.now() + 250 when window opens
+    window._comboFollowAvailable = false;
+
     // r55: charge-swing state
     // _chargeStart: performance.now() at Space keydown; 0 when not charging.
     // _isCharging: true while Space is held and charge is active.
@@ -11112,9 +11125,12 @@
 
       // Return crimson to idle after the swing — but only if E isn't held
       // (in which case the keyup handler will own the state).
+      // r95: guard with _swingId so triggerComboFollow() (which bumps _swingId)
+      // self-cancels this stale restore — avoids a visible snap mid-combo.
       setTimeout(() => {
         if (!combatants.crimson) return;
         if (window.gameState.crimson.dead) return;
+        if (attacker._swingId !== mySwing) return; // r95: superseded by combo follow-up
         if (playerInput.eHeld) return; // guard takes over
         playClip(combatants.crimson, CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
         combatants.crimson.state = 'idle';
@@ -11182,11 +11198,86 @@
       c.state = 'idle';
     }
 
+    // ── r95: combo follow-up swing ──────────────────────────────────
+    // Triggered when Space is pressed within 250ms of a clean tier-0
+    // hit landing on azure. Short stab (250ms), 3 dmg, 5 STM cost.
+    // No telegraph, no charge — DMC-style light follow-up.
+    function triggerComboFollow() {
+      const attacker = combatants && combatants.crimson;
+      if (!attacker) return;
+      const stmState = window.gameState.crimson;
+      if (!stmState || stmState.dead) return;
+      if (stmState.stamina < 5) {
+        showExhaustPill('EXHAUSTED');
+        return;
+      }
+      stmState.stamina = Math.max(0, stmState.stamina - 5);
+      try { updateGaugeDOM(); } catch (e) {}
+
+      // Bump _swingId — cancels the stale idle-restore from the prior swing
+      // (which is now guarded by the r95 _swingId check) and gates this impact.
+      const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
+      attacker.state = 'attack';
+      attacker.impactScheduled = false;
+
+      // Higher-pitch whoosh for combo feel.
+      try { if (window.sfxSwing) window.sfxSwing(1.25); } catch (e) {}
+
+      // Short stab anim — 250ms total.
+      const stabAction = playClip(attacker, '1H_Melee_Attack_Stab', {
+        fadeIn: 0.05, loop: false, weight: 1.0
+      });
+      const stabDur = (stabAction && attacker.currentDuration) ? Math.min(attacker.currentDuration, 0.25) : 0.25;
+
+      // Impact at 60% of anim (≈150ms).
+      setTimeout(() => {
+        if (attacker._swingId !== mySwing) return; // superseded / cancelled
+        if (window.gameState.crimson.dead || window.gameState.azure.dead) return;
+
+        const defender = combatants.azure;
+        if (defender && !window.gameState.azure.dead && defender.state !== 'guard' && defender.state !== 'attack') {
+          const hitClip = pickHitClip(defender.state);
+          defender.state = 'hit';
+          playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+        }
+        const defRoot = defender && defender.root;
+        const hitPos  = defRoot
+          ? defRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
+          : new THREE.Vector3(0, 1.0, 0);
+        try { window.triggerImpact(hitPos); } catch (e) {}
+        // opts.combo = true prevents re-arming the follow-up window.
+        try {
+          window.applyDamage('azure', 3, { kind: 'normal', combo: true });
+          gainSP('crimson', 2);
+          gainSP('azure', 2);
+        } catch (e) {}
+      }, stabDur * 0.60 * 1000);
+
+      // Return to idle after stab resolves.
+      setTimeout(() => {
+        if (attacker._swingId !== mySwing) return;
+        if (window.gameState.crimson.dead) return;
+        if (playerInput.eHeld) return;
+        playClip(attacker, CLIP_NAMES.IDLE, { fadeIn: 0.25, loop: true });
+        attacker.state = 'idle';
+      }, stabDur * 1.05 * 1000);
+    }
+
     // ── r85: charge helpers (shared by keyboard and touch) ─────────
     // beginAttackCharge() / releaseAttackCharge() extract the Space
     // keydown/keyup bodies so both input paths call identical logic.
     function beginAttackCharge() {
       const now = performance.now();
+      // r95: combo follow-up intercept — must run BEFORE cooldown check
+      // because the follow-up window opens after the prior swing's keyup
+      // (which sets lastSpaceTime), so the 250ms cooldown may or may not
+      // have expired. We honour the combo regardless.
+      if (window._comboFollowAvailable && now < window._comboFollowWindow) {
+        window._comboFollowAvailable = false;
+        window._comboFollowWindow    = 0;
+        triggerComboFollow();
+        return; // do not start a normal charge
+      }
       if (now - playerInput.lastSpaceTime < PLAYER_ATTACK_COOLDOWN_MS) return;
       playerInput.spacePressed = true;
       const c = combatants && combatants.crimson;
@@ -11270,6 +11361,8 @@
     // r63: expose retreat dodge for QA headless bridge (synthetic key drivers).
     // triggerRetreatDodge() already fires — this alias makes it discoverable.
     window.triggerRetreatDodge = triggerRetreatDodge;
+    // r95: expose combo follow-up for QA headless bridge.
+    window.triggerComboFollow  = triggerComboFollow;
     // r52: QA hook — simulates a perfect parry without requiring real timing.
     // Usage: window.__triggerParryTest() — arms azure as if in telegraph windup
     // at elapsed 200ms, then calls playerGuardEnter so the parry path fires.
