@@ -6855,15 +6855,63 @@
       HIT:    'Hit_A',
     };
 
-    // Attack variety pool — pick one uniformly at random each combat tick.
-    const ATTACK_CLIPS = [
-      '2H_Melee_Attack_Chop',
-      '2H_Melee_Attack_Slice',
-      '2H_Melee_Attack_Stab',
-      '2H_Melee_Attack_Spin',
+    // r79: Per-combatant attack variety pools.
+    // Both knights carry a 1H sword + round shield (confirmed from GLB node names:
+    // "Azure_1H_Sword" / "1H_Sword"). The old shared 2H pool was weapon-mismatched.
+    // crimson = player (1H sword) uses 1H slice/stab variety.
+    // azure   = opponent (1H sword) uses 1H chop/diagonal/horizontal/stab — 4 distinct
+    //           motions that read visually distinct from each other at FP camera distance.
+    // Timing contract: pickAttackClip() is called only to select the visual clip;
+    // all damage / telegraph timing is driven by fixed setTimeouts (not clip events),
+    // so shorter 1H clips never desync the 70% impact or 350ms telegraph windows.
+    const CRIMSON_ATTACK_CLIPS = [
+      '1H_Melee_Attack_Chop',
+      '1H_Melee_Attack_Slice_Diagonal',
+      '1H_Melee_Attack_Slice_Horizontal',
+      '1H_Melee_Attack_Stab',
     ];
-    function pickAttackClip() {
-      return ATTACK_CLIPS[Math.floor(Math.random() * ATTACK_CLIPS.length)];
+    const AZURE_ATTACK_CLIPS = [
+      '1H_Melee_Attack_Chop',
+      '1H_Melee_Attack_Slice_Diagonal',
+      '1H_Melee_Attack_Slice_Horizontal',
+      '1H_Melee_Attack_Stab',
+    ];
+    // Validated pools are narrowed at first call to clips actually present in each GLB.
+    let _crimsonValidated = false;
+    let _azureValidated   = false;
+    let _validCrimsonAttacks = CRIMSON_ATTACK_CLIPS.slice();
+    let _validAzureAttacks   = AZURE_ATTACK_CLIPS.slice();
+
+    function _validateAttackPool(label, rawPool) {
+      const c = combatants[label];
+      if (!c || !c.clips) return rawPool; // not loaded yet — use raw, fail gracefully
+      const valid = rawPool.filter(name => findClip(c.clips, name) != null);
+      if (valid.length === 0) {
+        console.warn('[lkb-3d] r79: no valid 1H attack clips found for', label, '— falling back to first entry');
+        return [rawPool[0]];
+      }
+      console.log('[lkb-3d] r79: validated attack pool for', label, valid);
+      return valid;
+    }
+
+    function pickAttackClip(attackerLabel) {
+      // Default to azure pool when label is omitted (legacy call sites already pass it).
+      const label = attackerLabel || 'azure';
+      if (label === 'crimson') {
+        if (!_crimsonValidated) {
+          _validCrimsonAttacks = _validateAttackPool('crimson', CRIMSON_ATTACK_CLIPS);
+          _crimsonValidated = true;
+        }
+        const pool = _validCrimsonAttacks;
+        return pool[Math.floor(Math.random() * pool.length)];
+      } else {
+        if (!_azureValidated) {
+          _validAzureAttacks = _validateAttackPool('azure', AZURE_ATTACK_CLIPS);
+          _azureValidated = true;
+        }
+        const pool = _validAzureAttacks;
+        return pool[Math.floor(Math.random() * pool.length)];
+      }
     }
 
     // Hit-reaction variety pool. Block_Hit is reserved for guard state;
@@ -9289,7 +9337,7 @@
       // Prevents zero-damage swings when the defender lands first and
       // flips the attacker into state='hit' before our 70% impact tick.
       const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
-      const chosenAttack = pickAttackClip();
+      const chosenAttack = pickAttackClip(attackerLabel);
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15, loop: false, weight: 1.0,
       });
@@ -9520,7 +9568,7 @@
         // cues) can read combatant.state.
         swingAttacker.state = 'attack';
         swingAttacker.impactScheduled = false;
-        const chosenAttack = pickAttackClip();
+        const chosenAttack = pickAttackClip(attackerLabel);
         const attackAction = playClip(swingAttacker, chosenAttack, {
           fadeIn: 0.2,
           loop: false,
@@ -9640,7 +9688,7 @@
                 if (!curSwingAttacker2 || !curSwingDefender2) return;
 
                 curSwingAttacker2.state = 'attack';
-                const atk2 = playClip(curSwingAttacker2, pickAttackClip(), { fadeIn: 0.15, loop: false, weight: 1.0 });
+                const atk2 = playClip(curSwingAttacker2, pickAttackClip(attackerLabel), { fadeIn: 0.15, loop: false, weight: 1.0 });
                 const dur2 = (atk2 && curSwingAttacker2.currentDuration) || 1.0;
 
                 // 2nd impact at 70% of 2nd swing — damage 3 (follow-up is weaker).
@@ -10091,7 +10139,7 @@
           _swingDustVelScale[myChargeTier] || 1.0
         );
       } catch (_e) {}
-      const chosenAttack = pickAttackClip();
+      const chosenAttack = pickAttackClip('crimson');
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15,
         loop: false,
@@ -10796,6 +10844,11 @@
           // back into mixers[]; combat loop will resume next tick.
           // Reset its HP / SP / stamina so the swap doesn't carry over
           // chip damage from the previous opponent.
+          // r79: reset attack-pool validation so the new GLB's clip list
+          // is re-checked on the first swing (different roster chars may
+          // not include all 1H attack clips).
+          _azureValidated = false;
+          _validAzureAttacks = AZURE_ATTACK_CLIPS.slice();
           setupCombatant(gltf, 'azure');
           if (window.gameState && window.gameState.azure) {
             window.gameState.azure.hp      = 100;
