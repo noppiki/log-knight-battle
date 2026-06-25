@@ -11779,6 +11779,17 @@
         _mitShow('FIGHT!', true);
         try { if (window.sfxFight) window.sfxFight(); } catch (e) {}
       }, 2500));
+      // r131: crimson sword glint at match start — fires 500ms after FIGHT! banner
+      // (t=3000ms), same instant the player first grips their sword in earnest.
+      // Intensity 0.8 (vs normal 0.6) and duration 400ms (vs normal 350ms) to
+      // read as a deliberate "ready for combat" flare rather than an idle twinkle.
+      // _matchIntroActive guard ensures it is skipped on early R-key resets.
+      // _glintNextAt scheduler continues independently; this is a one-off trigger.
+      window._matchIntroTimers.push(setTimeout(() => {
+        if (!window._matchIntroActive) return;
+        try { setSwordEmissive(0xfff5d8, 0.8, 400); } catch (_e) {}
+      }, 3000));
+
       window._matchIntroTimers.push(setTimeout(() => {
         _mitHide();
         window._matchIntroActive = false;
