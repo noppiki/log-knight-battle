@@ -9218,6 +9218,15 @@
       // we force-stop here to guarantee emissive and interval are restored
       // before the round banner fires).
       try { if (typeof deactivateAzureDesperate === 'function' && window._azureDesperate && window._azureDesperate.active) deactivateAzureDesperate(); } catch (e) {}
+      // r100: cancel any in-flight azure hit-glow by bumping the generation token,
+      // then clear the cached baseline so the next round re-captures a clean state.
+      try {
+        const _azRootR100 = combatants && combatants.azure && combatants.azure.root;
+        if (_azRootR100) {
+          _azRootR100._hitGlowGen = (_azRootR100._hitGlowGen || 0) + 1;
+          _azRootR100._hitGlowBase = null; // force re-capture on next glow
+        }
+      } catch (e) {}
       // r75: force-remove range ring so it never leaks into the next round.
       try { if (typeof _removeAzureRangeRingNow === 'function') _removeAzureRangeRingNow(); } catch (e) {}
       // Advance the round counter and announce the new round. Initial
@@ -9783,6 +9792,11 @@
       if (defenderId === 'azure') {
         if (!guardAbsorbed) {
           try { _comboHit(); } catch (e) {}
+          // r100: tier-2 hit-take emissive flash on azure mesh — momentary red glow
+          // (300 ms) to punch home the visual impact of a heavy charged strike.
+          if (opts && opts.kind === 'charge2') {
+            try { flashAzureHitGlow(); } catch (e) {}
+          }
           // r95: open combo follow-up window on clean tier-0 (normal) player hit.
           // Exclude combo-generated hits (opts.combo) to prevent infinite re-arming.
           if (opts && opts.kind === 'normal' && !opts.combo) {
@@ -11005,6 +11019,62 @@
         (fpSwordClone._emissiveBase || []).forEach((p) => {
           p.m.emissive.setHex(p.color);
           p.m.emissiveIntensity = p.intensity;
+        });
+      }, durationMs);
+    }
+
+    // flashAzureHitGlow — r100: momentary red emissive flash on azure mesh when
+    // a player tier-2 charge hit lands. Symmetric to setSwordEmissive (r59) but
+    // targets the azure combatant root. Generation token prevents stale restores
+    // if two tier-2 hits land in quick succession.
+    // desperate interaction: when _azureDesperate.active the restore target is
+    // the desperate red glow (DESPERATE_EMISSIVE_BASE / IDL), not the true baseline.
+    function flashAzureHitGlow(color, intensity, durationMs) {
+      color       = (color       != null) ? color       : 0x441010;
+      intensity   = (intensity   != null) ? intensity   : 0.4;
+      durationMs  = (durationMs  != null) ? durationMs  : 300;
+      const az = combatants && combatants.azure && combatants.azure.root;
+      if (!az) return;
+      // Lazy-init baseline (captured once, before any desperate emissive change)
+      if (!az._hitGlowBase) {
+        az._hitGlowBase = [];
+        az.traverse((o) => {
+          if (!o.isMesh || !o.material) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (m.emissive) {
+              az._hitGlowBase.push({
+                mat: m,
+                color: m.emissive.getHex(),
+                intensity: m.emissiveIntensity != null ? m.emissiveIntensity : 1,
+              });
+            }
+          });
+        });
+      }
+      // Generation token — each call bumps the counter; only the latest restore fires.
+      az._hitGlowGen = (az._hitGlowGen || 0) + 1;
+      const gen = az._hitGlowGen;
+      // Apply hit glow
+      az._hitGlowBase.forEach((b) => {
+        try {
+          b.mat.emissive.setHex(color);
+          b.mat.emissiveIntensity = intensity;
+        } catch (_e) {}
+      });
+      setTimeout(() => {
+        if (!az || az._hitGlowGen !== gen) return; // newer glow superseded this one
+        az._hitGlowBase.forEach((b) => {
+          try {
+            if (window._azureDesperate && window._azureDesperate.active) {
+              // Restore to desperate red glow, not the true neutral baseline
+              b.mat.emissive.setHex(DESPERATE_EMISSIVE_BASE);
+              b.mat.emissiveIntensity = DESPERATE_EMISSIVE_IDL;
+            } else {
+              b.mat.emissive.setHex(b.color);
+              b.mat.emissiveIntensity = b.intensity;
+            }
+          } catch (_e) {}
         });
       }, durationMs);
     }
