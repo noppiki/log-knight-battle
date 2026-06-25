@@ -22,7 +22,7 @@
                #game-hud, #record-hud
         21    #fp-stamina-warn                   orange edge pulse when stamina ≤ 15 (r96); below danger vignette
         22    #weather-pill, #fp-danger-vignette (r72) persistent low-HP red rim; below one-shot flashes
-        23    #fp-tg-warn                        amber telegraph vignette (r51); below hit flash
+        23    #fp-tg-warn                        cyan-blue telegraph vignette (r51/r122); below hit flash
         24    #fp-damage-vignette, #fp-dmg-border, hit flash vignette (r49); border pulse (r92);
                #letterbox-*                       letterbox bars (r replay)
         25    #ko-overlay, #fp-streak-hud,       KO text; FP streak; control hints; mp-bar;
@@ -2048,6 +2048,9 @@
        Amber = "attack incoming, press E to guard". Opacity driven by JS.
        z-index 23 = below fp-damage-vignette (24) so a simultaneous hit
        doesn't stomp it. */
+    /* r122: azure telegraph vignette — cyan-blue matches r119 azure weapon trail (#8aafff)
+       and contrasts player-side amber (r59 sword glow, r96 stamina warn) for instant
+       enemy-threat read. Old amber: rgba(255,160,40,0.38) / rgba(200,100,10,0.62). */
     #fp-tg-warn {
       position: fixed;
       inset: 0;
@@ -2056,8 +2059,8 @@
       opacity: 0;
       background: radial-gradient(ellipse at center,
         transparent 55%,
-        rgba(255, 160, 40, 0.38) 82%,
-        rgba(200, 100, 10, 0.62) 100%);
+        rgba(80, 160, 220, 0.38) 82%,
+        rgba(40, 100, 180, 0.62) 100%);
       transition: opacity 120ms ease-in;
     }
     #fp-tg-warn.active { opacity: 1; }
@@ -2067,7 +2070,9 @@
     #fp-tg-warn.active.feint  { opacity: 0.35; }
     #fp-tg-alert.active.feint { opacity: 0.70; }
 
-    /* r51: "⚠ GUARD" HUD alert — flashes above reticle during telegraph. */
+    /* r51: "⚠ GUARD" HUD alert — flashes above reticle during telegraph.
+       r122: color changed amber→cyan-blue (#8aafff) to match azure weapon trail (r119)
+       and vignette; old color: rgba(255,200,60,1.00) / shadow rgba(255,160,20,0.90). */
     #fp-tg-alert {
       position: fixed;
       left: 50%;
@@ -2080,9 +2085,9 @@
       font-size: 22px;
       font-weight: 700;
       letter-spacing: 0.12em;
-      color: rgba(255, 200, 60, 1.00);
+      color: rgba(138, 175, 255, 1.00);
       text-shadow:
-        0 0 12px rgba(255, 160, 20, 0.90),
+        0 0 12px rgba(80, 160, 220, 0.90),
         0 0 4px  rgba(0, 0, 0, 0.95);
       transition: opacity 100ms ease-in, transform 100ms ease-in;
       will-change: opacity, transform;
