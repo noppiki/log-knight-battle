@@ -2815,9 +2815,25 @@
       }
 
       // ===== SFX VOICES (verbatim from 2D) =====
-      function _sfxSwing() {
-        noise({ dur: 0.10, vol: 0.05, type: "bandpass", freqStart: 1800, freqEnd: 600, q: 1.2 });
-        tone({ freq: 180, freq2: 120, dur: 0.08, type: "triangle", vol: 0.03, attack: 0.003, release: 0.08 });
+      // r86: Clip → semitone map for swing sfx pitch variation.
+      // Chop = low-mid thud, Slice_Diagonal = default, Slice_Horizontal = mid-high whoosh, Stab = sharp high.
+      const CLIP_PITCH_SEMI = {
+        '1H_Melee_Attack_Chop':             -3,
+        '1H_Melee_Attack_Slice_Diagonal':    0,
+        '1H_Melee_Attack_Slice_Horizontal':  2,
+        '1H_Melee_Attack_Stab':              5,
+      };
+      function clipPitchRatio(clipName) {
+        const semi = (clipName && CLIP_PITCH_SEMI[clipName] != null)
+          ? CLIP_PITCH_SEMI[clipName] : 0;
+        return Math.pow(2, semi / 12);
+      }
+      // pitchRatio: optional multiplier (default 1). All freq values scaled uniformly
+      // so noise whoosh and tone body stay coherent regardless of clip.
+      function _sfxSwing(pitchRatio) {
+        const p = (typeof pitchRatio === 'number' && pitchRatio > 0) ? pitchRatio : 1;
+        noise({ dur: 0.10, vol: 0.05, type: "bandpass", freqStart: 1800 * p, freqEnd: 600 * p, q: 1.2 });
+        tone({ freq: 180 * p, freq2: 120 * p, dur: 0.08, type: "triangle", vol: 0.03, attack: 0.003, release: 0.08 });
       }
       function _sfxHit() {
         tone({ freq: 110, freq2: 70, dur: 0.18, type: "square", vol: 0.10, attack: 0.001, release: 0.16, send: 0.25 });
@@ -2915,7 +2931,7 @@
         blip(60, 0.08, 'triangle', 0.25);
       }
       // Public sfx* wrappers (netRecordSfx is a no-op in 3D but kept for parity).
-      function sfxSwing()   { _sfxSwing();   netRecordSfx("swing"); }
+      function sfxSwing(pitchRatio) { _sfxSwing(pitchRatio); netRecordSfx("swing"); }
       function sfxHit()     { _sfxHit();     netRecordSfx("hit"); }
       function sfxClang()   { _sfxClang();   netRecordSfx("clang"); }
       function sfxJump()    { _sfxJump();    netRecordSfx("jump"); }
@@ -9672,7 +9688,9 @@
       stmState.stamina = Math.max(0, stmState.stamina - STM_ATTACK_COST);
       try { updateGaugeDOM(); } catch (e) {}
 
-      try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+      // r86: pick clip before sfxSwing so we can pass the clip-matched pitch ratio.
+      const chosenAttack = pickAttackClip(attackerLabel);
+      try { if (window.sfxSwing) window.sfxSwing(clipPitchRatio(chosenAttack)); } catch (e) {}
       try { if (window.sfxStep)  window.sfxStep();  } catch (e) {}
       // Snow puff at attacker's feet on attack windup
       try { if (window.spawnSnowPuff && attacker.root) window.spawnSnowPuff(attacker.root); } catch (e) {}
@@ -9686,7 +9704,6 @@
       // Prevents zero-damage swings when the defender lands first and
       // flips the attacker into state='hit' before our 70% impact tick.
       const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
-      const chosenAttack = pickAttackClip(attackerLabel);
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15, loop: false, weight: 1.0,
       });
@@ -9906,9 +9923,11 @@
           ? inheritedSwingId
           : (swingAttacker._swingId = (swingAttacker._swingId || 0) + 1);
 
+        // r86: pick clip before sfxSwing so we can pass the clip-matched pitch ratio.
+        const chosenAttack = pickAttackClip(attackerLabel);
         // ── SFX wiring: swing whoosh on attack windup. The matching hit
         //    fires inside window.triggerImpact at ~70% of the swing.
-        try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+        try { if (window.sfxSwing) window.sfxSwing(clipPitchRatio(chosenAttack)); } catch (e) {}
         // Footstep thud — adds weight to the windup plant.
         try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
 
@@ -9917,7 +9936,6 @@
         // cues) can read combatant.state.
         swingAttacker.state = 'attack';
         swingAttacker.impactScheduled = false;
-        const chosenAttack = pickAttackClip(attackerLabel);
         const attackAction = playClip(swingAttacker, chosenAttack, {
           fadeIn: 0.2,
           loop: false,
@@ -10444,8 +10462,10 @@
       stmState.stamina = Math.max(0, stmState.stamina - totalStmCost);
       try { updateGaugeDOM(); } catch (e) {}
 
+      // r86: pick clip before sfxSwing so we can pass the clip-matched pitch ratio.
+      const chosenAttack = pickAttackClip('crimson');
       // r55: tier-scaled SFX — tier2 gets an extra heavy-thud oscillator burst
-      try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+      try { if (window.sfxSwing) window.sfxSwing(clipPitchRatio(chosenAttack)); } catch (e) {}
       if (chargeTier >= 2 && window.actx) {
         try {
           const ac = window.actx;
@@ -10490,7 +10510,6 @@
           _swingDustVelScale[myChargeTier] || 1.0
         );
       } catch (_e) {}
-      const chosenAttack = pickAttackClip('crimson');
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15,
         loop: false,
