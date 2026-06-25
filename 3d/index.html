@@ -3532,9 +3532,10 @@
        driven — intensity is owned by the weather system (disjoint channels).
        PMREM / envMap and sky shader uniforms (GLSL constants) are untouched. */
     class TimeCycle {
-      constructor(sunLight, hemiLight) {
+      constructor(sunLight, hemiLight, skyMaterial) {
         this._sun  = sunLight;
         this._hemi = hemiLight;
+        this._sky  = skyMaterial || null; // r77: sky shader uniform drift
         this._startMs = performance.now();
         this._periodMs = 75000; // 75 s full cycle
 
@@ -3550,6 +3551,20 @@
           sky:    new THREE.Color(0x7090b8), // deeper slate-blue
           ground: new THREE.Color(0x2a2a44), // shadowed purple-earth
         };
+
+        // r77: sky shader Vector3 poles — raw linear floats, no ColorManagement
+        // Warm = exact original GLSL values (#2a2538 zenith / #6a5d68 horizon / #d8a45a glow)
+        // Cool = subtle dusk shift (desaturate zenith toward slate, cool horizon, ember glow dimmed)
+        this._skyWarm = {
+          zenith:  new THREE.Vector3(0.165, 0.145, 0.220), // #2a2538 deep purple
+          horizon: new THREE.Vector3(0.416, 0.365, 0.408), // #6a5d68 dusky rose
+          glow:    new THREE.Vector3(0.847, 0.643, 0.353), // #d8a45a amber glow
+        };
+        this._skyCool = {
+          zenith:  new THREE.Vector3(0.120, 0.145, 0.200), // slightly cooler slate-purple
+          horizon: new THREE.Vector3(0.340, 0.360, 0.430), // cooler blue-grey horizon
+          glow:    new THREE.Vector3(0.680, 0.600, 0.480), // cooler, desaturated pale glow
+        };
       }
 
       update() {
@@ -3559,6 +3574,12 @@
         this._sun.color.lerpColors(this._warm.sun,    this._cool.sun,    phase);
         this._hemi.color.lerpColors(this._warm.sky,   this._cool.sky,    phase);
         this._hemi.groundColor.lerpColors(this._warm.ground, this._cool.ground, phase);
+        // r77: drift sky shader uniforms in sync with the same phase
+        if (this._sky && this._sky.uniforms.colorZenith) {
+          this._sky.uniforms.colorZenith.value.lerpVectors(this._skyWarm.zenith,  this._skyCool.zenith,  phase);
+          this._sky.uniforms.colorHorizon.value.lerpVectors(this._skyWarm.horizon, this._skyCool.horizon, phase);
+          this._sky.uniforms.colorGlow.value.lerpVectors(this._skyWarm.glow,    this._skyCool.glow,    phase);
+        }
       }
 
       // Restore baseline colors (available for future hard-reset scenarios)
@@ -3566,6 +3587,12 @@
         this._sun.color.copy(this._warm.sun);
         this._hemi.color.copy(this._warm.sky);
         this._hemi.groundColor.copy(this._warm.ground);
+        // r77: restore sky uniforms to warm baseline
+        if (this._sky && this._sky.uniforms.colorZenith) {
+          this._sky.uniforms.colorZenith.value.copy(this._skyWarm.zenith);
+          this._sky.uniforms.colorHorizon.value.copy(this._skyWarm.horizon);
+          this._sky.uniforms.colorGlow.value.copy(this._skyWarm.glow);
+        }
       }
     }
 
@@ -3575,10 +3602,18 @@
     //   middle #6a5d68  (dusky rose horizon)
     //   lower  #d8a45a  (warm amber glow near horizon)
     const skyGeo = new THREE.SphereGeometry(150, 32, 16);
+    // r77: sky shader uniforms — colorZenith/Horizon/Glow promoted from GLSL
+    // constants to uniform vec3 so TimeCycle can lerp them per-frame.
+    // Values set as raw linear floats via THREE.Vector3 to bypass Three.js
+    // ColorManagement; exact original floats preserved on the warm pole.
     const skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
-      uniforms: {},
+      uniforms: {
+        colorZenith:  { value: new THREE.Vector3(0.165, 0.145, 0.220) }, // #2a2538 warm base
+        colorHorizon: { value: new THREE.Vector3(0.416, 0.365, 0.408) }, // #6a5d68 warm base
+        colorGlow:    { value: new THREE.Vector3(0.847, 0.643, 0.353) }, // #d8a45a warm base
+      },
       vertexShader: /* glsl */`
         varying vec3 vWorldPos;
         void main() {
@@ -3589,9 +3624,9 @@
       fragmentShader: /* glsl */`
         varying vec3 vWorldPos;
 
-        vec3 colorZenith  = vec3(0.165, 0.145, 0.220); // #2a2538
-        vec3 colorHorizon = vec3(0.416, 0.365, 0.408); // #6a5d68
-        vec3 colorGlow    = vec3(0.847, 0.643, 0.353); // #d8a45a
+        uniform vec3 colorZenith;
+        uniform vec3 colorHorizon;
+        uniform vec3 colorGlow;
 
         void main() {
           // normalised height  -1..+1 → we remap to 0..1
@@ -3646,8 +3681,9 @@
     scene.add(sun);
 
     // r71: time-of-day color cycle — instantiated after both lights exist.
+    // r77: skyMat passed as third arg so sky shader uniforms drift in sync.
     // timeCycle.update() is called each frame inside animate() just before render.
-    const timeCycle = new TimeCycle(sun, hemi);
+    const timeCycle = new TimeCycle(sun, hemi, skyMat);
 
     // ── Lensflare on the sun (procedural canvas textures, no external assets) ──
     try {
