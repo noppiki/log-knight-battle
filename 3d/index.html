@@ -8652,6 +8652,92 @@
 
     const ambientGustSystem = new AmbientGustSystem(scene, camera);
 
+    /* ── ImpactSparkSystem (r118) ─────────────────────────────────────────
+       White-yellow additive spark particles that burst radially from the
+       impact point when player's tier-2 charged strike lands on azure
+       (unguarded). 8–12 billboard planes per burst; each flies outward
+       ~0.3 m over 130–180 ms with light gravity, then fades linearly.
+       AdditiveBlending gives metallic "hot spark" highlight on contact.
+       Tagged name='impact_spark' for cleanup. resetMatch() calls clearAll().
+    ──────────────────────────────────────────────────────────────────────── */
+    class ImpactSparkSystem {
+      constructor(scene, camera) {
+        this.scene    = scene;
+        this.camera   = camera;
+        this.particles = [];
+      }
+
+      spawn(worldPos) {
+        const count = 8 + Math.floor(Math.random() * 5); // 8–12
+        for (let i = 0; i < count; i++) {
+          const angle     = (i / count) * Math.PI * 2 + Math.random() * 0.5;
+          const elevation = (Math.random() - 0.3) * 0.6;  // slight downward bias
+          const speed     = 1.5 + Math.random() * 1.0;    // 1.5–2.5 m/s
+          const lifeMs    = 130 + Math.random() * 50;      // 130–180 ms
+
+          const geo = new THREE.PlaneGeometry(0.06, 0.06);
+          const mat = new THREE.MeshBasicMaterial({
+            color:       0xfff5d8,
+            transparent: true,
+            opacity:     1.0,
+            depthWrite:  false,
+            blending:    THREE.AdditiveBlending,
+            side:        THREE.DoubleSide,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.copy(worldPos);
+          mesh.userData = {
+            velX:    Math.cos(angle) * speed,
+            velY:    (elevation + 0.3) * speed,
+            velZ:    Math.sin(angle) * speed,
+            lifeMs,
+            startMs: performance.now(),
+          };
+          mesh.name = 'impact_spark';
+          mesh.frustumCulled = false;
+          this.scene.add(mesh);
+          this.particles.push(mesh);
+        }
+      }
+
+      update(delta) {
+        const now      = performance.now();
+        const toRemove = [];
+        for (const p of this.particles) {
+          const ud = p.userData;
+          const t  = (now - ud.startMs) / ud.lifeMs;
+          if (t >= 1) { toRemove.push(p); continue; }
+
+          p.position.x += ud.velX * delta;
+          p.position.y += ud.velY * delta;
+          p.position.z += ud.velZ * delta;
+          ud.velY -= 1.5 * delta; // gentle gravity
+
+          p.material.opacity = 1.0 * (1.0 - t); // linear fade
+          try { p.lookAt(this.camera.position); } catch (e) {} // billboard
+        }
+        for (const p of toRemove) {
+          this.scene.remove(p);
+          p.geometry.dispose();
+          p.material.dispose();
+          const idx = this.particles.indexOf(p);
+          if (idx !== -1) this.particles.splice(idx, 1);
+        }
+      }
+
+      clearAll() {
+        for (const p of this.particles) {
+          this.scene.remove(p);
+          p.geometry.dispose();
+          p.material.dispose();
+        }
+        this.particles.length = 0;
+      }
+    }
+
+    const impactSparkSystem = new ImpactSparkSystem(scene, camera);
+    window.impactSparkSystem = impactSparkSystem;
+
     /* ── DesperateFlameSystem (r115) ─────────────────────────────────────
        Red-orange additive flame particles rising from azure's feet while
        desperate mode is active (HP ≤ 25%).  Spawns 4–6 billboard planes
@@ -9607,6 +9693,8 @@
       try { ambientGustSystem.clearAll(); } catch (e) {}
       // r115: clear desperate flame particles between rounds
       try { desperateFlameSystem.clearAll(); } catch (e) {}
+      // r118: clear impact spark particles between rounds
+      try { impactSparkSystem.clearAll(); } catch (e) {}
       try {
         const flashLights = scene.children.filter((o) => o.name === 'tier2_flash');
         flashLights.forEach((l) => scene.remove(l));
@@ -10314,6 +10402,15 @@
           // (300 ms) to punch home the visual impact of a heavy charged strike.
           if (opts && opts.kind === 'charge2') {
             try { flashAzureHitGlow(); } catch (e) {}
+            // r118: white-yellow metallic spark burst at azure chest on tier-2 impact
+            try {
+              const azRoot = (typeof combatants !== 'undefined' && combatants && combatants.azure)
+                             ? combatants.azure.root : null;
+              if (azRoot && typeof impactSparkSystem !== 'undefined') {
+                const chestPos = azRoot.position.clone().add(new THREE.Vector3(0, 1.2, 0));
+                impactSparkSystem.spawn(chestPos);
+              }
+            } catch (e) {}
           }
           // r95: open combo follow-up window on clean tier-0 (normal) player hit.
           // Exclude combo-generated hits (opts.combo) to prevent infinite re-arming.
@@ -13521,6 +13618,7 @@
       try { groundDustSystem.update(delta); } catch (e) {} // r60: tier2 ground dust
       try { ambientGustSystem.update(delta); } catch (e) {} // r67: ambient dust gusts
       try { desperateFlameSystem.update(delta); } catch (e) {} // r115: azure desperate flame stream
+      try { impactSparkSystem.update(delta); } catch (e) {}   // r118: tier-2 impact sparks
       try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
