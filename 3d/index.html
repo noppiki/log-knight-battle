@@ -2016,6 +2016,64 @@
       opacity: 0;
       transition: opacity 0.4s ease-out;
     }
+
+    /* ── r85: mobile touch controls overlay ─────────────────────────
+       Visible only on touch devices in FP mode.
+       body.touch-device class set at boot; body.fp-mode set by
+       refreshFpOverlays() when viewMode==='fp'. */
+    #fp-touch-controls {
+      display: none;
+      position: fixed;
+      bottom: 24px;
+      right: 20px;
+      z-index: 120;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: none; /* children opt-in via pointer-events:auto */
+    }
+    /* Only show on touch device in FP mode */
+    body.touch-device #fp-touch-controls { pointer-events: auto; }
+    body:not(.touch-device) #fp-touch-controls { display: none !important; }
+    body:not(.fp-mode) #fp-touch-controls { display: none !important; }
+    body.touch-device.fp-mode #fp-touch-controls { display: flex; }
+
+    .fp-touch-btn {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: rgba(10, 8, 6, 0.70);
+      border: 2px solid rgba(180, 140, 80, 0.55);
+      color: rgba(220, 190, 130, 0.90);
+      font-size: 26px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      pointer-events: auto;
+      transition: transform 0.08s ease, background 0.08s ease, border-color 0.08s ease;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+    .fp-touch-btn:active,
+    .fp-touch-btn.pressing {
+      transform: scale(0.90);
+      background: rgba(30, 20, 10, 0.85);
+      border-color: rgba(220, 170, 80, 0.90);
+    }
+    /* Guard button held: amber tint */
+    .fp-touch-btn[data-action="guard"].pressing {
+      border-color: rgba(200, 155, 60, 0.95);
+      box-shadow: 0 0 12px rgba(200, 155, 60, 0.35);
+    }
+    /* Attack button held: white-gold charge glow */
+    .fp-touch-btn[data-action="attack"].pressing {
+      border-color: rgba(240, 220, 140, 0.95);
+      box-shadow: 0 0 14px rgba(240, 220, 140, 0.45);
+    }
   </style>
 
   <script type="importmap">
@@ -2326,6 +2384,15 @@
 
   <!-- r61: tier-2 edge motion blur — backdrop-filter periphery burst on swing start. -->
   <div id="fp-edge-blur"></div>
+
+  <!-- r85: mobile touch controls — attack / guard / dodge buttons.
+       Visible only via body.touch-device.fp-mode CSS gate.
+       data-action drives JS handlers (touchstart/touchend). -->
+  <div id="fp-touch-controls" aria-hidden="true">
+    <div class="fp-touch-btn" data-action="attack"  aria-label="Attack">⚔</div>
+    <div class="fp-touch-btn" data-action="guard"   aria-label="Guard">🛡</div>
+    <div class="fp-touch-btn" data-action="dodge"   aria-label="Dodge">⇐</div>
+  </div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -6497,6 +6564,20 @@
     cameraDirector.setViewMode = function (mode) {
       _origSetViewMode(mode);
       refreshFpOverlays();
+      // r85: touch device — auto force-lock when entering FP so that
+      // fpInputActive() gates pass and reticle/bracket show correctly.
+      // pointer-lock is unavailable on mobile so we use mpForceLock().
+      // mpForceLock is defined later in the file; at this call-site it
+      // hasn't been declared yet so we access it via window to avoid
+      // a TDZ error on the boot-restore path.
+      if (('ontouchstart' in window || navigator.maxTouchPoints > 0)) {
+        if (mode === 'fp') {
+          if (window.mpForceLock) window.mpForceLock(true);
+          else window._mouseLocked = true; // pre-mpForceLock fallback
+        } else {
+          window._mouseLocked = false;
+        }
+      }
     };
     refreshFpOverlays();
 
@@ -10638,22 +10719,41 @@
       c.state = 'idle';
     }
 
+    // ── r85: charge helpers (shared by keyboard and touch) ─────────
+    // beginAttackCharge() / releaseAttackCharge() extract the Space
+    // keydown/keyup bodies so both input paths call identical logic.
+    function beginAttackCharge() {
+      const now = performance.now();
+      if (now - playerInput.lastSpaceTime < PLAYER_ATTACK_COOLDOWN_MS) return;
+      playerInput.spacePressed = true;
+      const c = combatants && combatants.crimson;
+      if (c && c.state !== 'attack' && c.state !== 'guard') {
+        playerInput._isCharging = true;
+        playerInput._chargeStart = now;
+        _chargeRumbleStart();
+      }
+    }
+    function releaseAttackCharge() {
+      playerInput.spacePressed = false;
+      if (!playerInput._isCharging) return;
+      const holdMs = performance.now() - (playerInput._chargeStart || 0);
+      playerInput._isCharging = false;
+      playerInput._chargeStart = 0;
+      _chargeRingHide();
+      _chargeRumbleStop();
+      if (fpInputActive()) {
+        const tier = _chargeGetTier(holdMs);
+        playerInput.lastSpaceTime = performance.now();
+        playerAttack({ chargeTier: tier });
+      }
+    }
+
     window.addEventListener('keydown', (e) => {
       if (!fpInputActive()) return;
       if (e.code === 'Space') {
         if (e.repeat) return;
         e.preventDefault();
-        const now = performance.now();
-        if (now - playerInput.lastSpaceTime < PLAYER_ATTACK_COOLDOWN_MS) return;
-        // r55: don't fire immediately on keydown — start charge instead.
-        // playerAttack fires on keyup (or stamina-auto-release).
-        playerInput.spacePressed = true;
-        const c = combatants && combatants.crimson;
-        if (c && c.state !== 'attack' && c.state !== 'guard') {
-          playerInput._isCharging = true;
-          playerInput._chargeStart = now;
-          _chargeRumbleStart();
-        }
+        beginAttackCharge();
       } else if (e.code === 'KeyE') {
         if (e.repeat) return;
         e.preventDefault();
@@ -10674,21 +10774,7 @@
 
     window.addEventListener('keyup', (e) => {
       if (e.code === 'Space') {
-        playerInput.spacePressed = false;
-        // r55: release charge → compute tier → fire attack
-        if (playerInput._isCharging) {
-          const holdMs = performance.now() - (playerInput._chargeStart || 0);
-          playerInput._isCharging = false;
-          playerInput._chargeStart = 0;
-          _chargeRingHide();
-          _chargeRumbleStop();
-          if (fpInputActive()) {
-            const tier = _chargeGetTier(holdMs);
-            // Record lastSpaceTime here (was previously in keydown)
-            playerInput.lastSpaceTime = performance.now();
-            playerAttack({ chargeTier: tier });
-          }
-        }
+        releaseAttackCharge();
       } else if (e.code === 'KeyE') {
         if (!playerInput.eHeld) return;
         playerInput.eHeld = false;
@@ -10745,6 +10831,139 @@
       }
       return !!window._mouseLocked;
     };
+
+    // ── r85: mobile touch input layer ───────────────────────────────
+    // Touch device detection: add body.touch-device class so CSS gate
+    // shows #fp-touch-controls only on touch hardware.
+    const _isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    if (_isTouchDevice) {
+      document.body.classList.add('touch-device');
+      // On touch devices, hide the "click to aim" pointer-lock hint
+      // (pointer-lock is unavailable; we use touch drag instead).
+      if (fpLockHint) fpLockHint.style.display = 'none';
+    }
+
+    // Touch button handlers — attack/guard/dodge.
+    // Gate on fpInputActive() like keyboard handlers so cinematic
+    // intro (_matchIntroActive) and non-FP modes are blocked.
+    // Attack uses beginAttackCharge() / releaseAttackCharge() so
+    // charge-tier hold works identically to Space keydown/keyup.
+    (function () {
+      const btns = document.querySelectorAll('#fp-touch-controls .fp-touch-btn');
+      btns.forEach((btn) => {
+        btn.addEventListener('touchstart', (e) => {
+          e.preventDefault(); // prevent synthetic mousedown
+          if (!fpInputActive()) return;
+          const action = btn.dataset.action;
+          btn.classList.add('pressing');
+          if (action === 'attack') {
+            beginAttackCharge();
+          } else if (action === 'guard') {
+            if (!playerInput.eHeld) {
+              playerInput.eHeld = true;
+              playerGuardEnter();
+            }
+          } else if (action === 'dodge') {
+            triggerRetreatDodge();
+          }
+        }, { passive: false });
+
+        btn.addEventListener('touchend', (e) => {
+          e.preventDefault();
+          const action = btn.dataset.action;
+          btn.classList.remove('pressing');
+          if (action === 'attack') {
+            releaseAttackCharge();
+          } else if (action === 'guard') {
+            if (playerInput.eHeld) {
+              playerInput.eHeld = false;
+              if (cameraDirector && cameraDirector.viewMode === 'fp') {
+                playerGuardExit();
+              }
+            }
+          }
+          // dodge has no hold state; nothing to release
+        }, { passive: false });
+
+        btn.addEventListener('touchcancel', (e) => {
+          const action = btn.dataset.action;
+          btn.classList.remove('pressing');
+          if (action === 'attack') { releaseAttackCharge(); }
+          else if (action === 'guard' && playerInput.eHeld) {
+            playerInput.eHeld = false;
+            if (cameraDirector && cameraDirector.viewMode === 'fp') playerGuardExit();
+          }
+        }, { passive: false });
+      });
+    }());
+
+    // Touch drag mouselook — upper half of screen (y < innerHeight/2),
+    // excluding the touch buttons area. Mutates cameraDirector.fpYaw /
+    // fpPitch using FP_MOUSE_SENS and clamps with FP_PITCH_MIN/MAX.
+    // Sensitivity multiplier 4× accounts for typical touch swipe delta
+    // being much smaller in pixels per angular unit than mouse movement.
+    const FP_TOUCH_SENS = FP_MOUSE_SENS * 4;
+    let _touchLook = null; // { x, y } of active look touch
+    let _touchLookId = null; // identifier for multi-touch stability
+
+    window.addEventListener('touchstart', (e) => {
+      if (!_isTouchDevice) return;
+      if (cameraDirector.viewMode !== 'fp') return;
+      // Ignore touches that originated on the button overlay
+      if (e.target.closest('#fp-touch-controls')) return;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t.clientY < window.innerHeight / 2 && _touchLook === null) {
+          _touchLook   = { x: t.clientX, y: t.clientY };
+          _touchLookId = t.identifier;
+          e.preventDefault();
+          break;
+        }
+      }
+    }, { passive: false });
+
+    window.addEventListener('touchmove', (e) => {
+      if (!_touchLook) return;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t.identifier !== _touchLookId) continue;
+        const dx = t.clientX - _touchLook.x;
+        const dy = t.clientY - _touchLook.y;
+        _touchLook.x = t.clientX;
+        _touchLook.y = t.clientY;
+        cameraDirector.fpYaw   -= dx * FP_TOUCH_SENS;
+        cameraDirector.fpPitch -= dy * FP_TOUCH_SENS;
+        if (cameraDirector.fpPitch < FP_PITCH_MIN) cameraDirector.fpPitch = FP_PITCH_MIN;
+        if (cameraDirector.fpPitch > FP_PITCH_MAX) cameraDirector.fpPitch = FP_PITCH_MAX;
+        e.preventDefault();
+        break;
+      }
+    }, { passive: false });
+
+    window.addEventListener('touchend', (e) => {
+      if (!_touchLook) return;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === _touchLookId) {
+          _touchLook   = null;
+          _touchLookId = null;
+          break;
+        }
+      }
+    }, { passive: true });
+
+    window.addEventListener('touchcancel', () => {
+      _touchLook   = null;
+      _touchLookId = null;
+    }, { passive: true });
+
+    // On touch device, if we are already in FP at this point
+    // (e.g. late-loaded module after setViewMode was already called),
+    // apply the force-lock now so fpInputActive() gates pass.
+    // All future FP-entry paths are handled by the cameraDirector.setViewMode
+    // patch injected at the top of this file (r85 touch block above).
+    if (_isTouchDevice && cameraDirector && cameraDirector.viewMode === 'fp') {
+      window.mpForceLock(true);
+    }
 
     // ── log.glb ────────────────────────────────────────────────── */
     loader.load(
