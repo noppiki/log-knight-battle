@@ -10796,6 +10796,13 @@
         try { if (typeof deactivateAzureDesperate === 'function') deactivateAzureDesperate(); } catch (e) {}
         // r146: azure-specific body fall thud sfx (parallel layer with sfxFall).
         try { playDeathBodyThud(); } catch (e) {}
+        // r153: azure death final flash — white emissive burst at the decisive moment.
+        // Fires 150ms after Death_A starts (motion peak ~0.15s) to punctuate the exact
+        // instant of defeat. Uses flashWinnerGlow reuse pattern (different mesh from
+        // the winner's golden glow: azure mesh vs crimson mesh — no collision).
+        setTimeout(function () {
+          try { flashWinnerGlow('azure', 250, 0xffffff, 0.6); } catch (_dfE) {}
+        }, 150);
       }
       // Race fix: invalidate any pending swing-impact timeouts on the
       // dying knight (and, for safety, the winner — round is over).
