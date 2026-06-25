@@ -4959,7 +4959,8 @@
       // the match-end slow-mo cinematic regardless of cycleEnabled.
       jumpTo(shot, reason) {
         if (!this.active) return;
-        if (!this.cycleEnabled && reason !== 'KO_REPLAY') return;
+        // r87: VICTORY_POSE also bypasses the cycleEnabled gate (same as KO_REPLAY).
+        if (!this.cycleEnabled && reason !== 'KO_REPLAY' && reason !== 'VICTORY_POSE') return;
         this._override = { shot, reason };
         this._beginTransitionTo(shot);
       }
@@ -8634,6 +8635,22 @@
         try { window._koReplayRestoreFn(); } catch (e) {}
         window._koReplayRestoreFn = null;
       }
+      // r87: cancel any in-flight victory pose camera reveal so viewMode
+      // isn't left in cinematic (FP) heading into the next round.
+      if (window._victoryPoseCamHandle) {
+        clearTimeout(window._victoryPoseCamHandle);
+        window._victoryPoseCamHandle = null;
+      }
+      if (window._victoryPoseCamRestoreFn) {
+        try { window._victoryPoseCamRestoreFn(); } catch (e) {}
+        window._victoryPoseCamRestoreFn = null;
+      }
+      // r87: also cancel any in-flight cheer anim scheduled for the
+      // outgoing round — reset must not let the cheer fire on the new round.
+      if (window._pendingCheerHandle) {
+        clearTimeout(window._pendingCheerHandle);
+        window._pendingCheerHandle = null;
+      }
       // r68: cancel any in-flight stagger-boost timeScale so azure's hit anim
       // doesn't stay at 0.6× across rounds.
       if (window._staggerBoostHandle) {
@@ -8909,12 +8926,50 @@
       if (resetTimerHandle) clearTimeout(resetTimerHandle);
 
       // Winner plays Cheer after 4s (Death_A pose held), lasting 2s before reset (6s total).
+      // r87: if winner is crimson and camera is in FP, temporarily switch to 3rd-person
+      // cinematic (CLOSE_CRIMSON) so the player actually sees the victory pose.
+      // Restores to the prior viewMode 2s later (at 6s = reset boundary).
+      // Cancel-safe via _victoryPoseCamHandle + _victoryPoseCamRestoreFn (cleared in
+      // resetMatch / resetFullMatch as idempotent backstops).
       const cheerHandle = setTimeout(() => {
         const winner = combatants[winnerId];
         if (winner && !window.gameState[winnerId].dead) {
           winner.state = 'cheer';
           playClip(winner, 'Cheer', { fadeIn: 0.2, loop: false, weight: 1.0 });
           console.log(`[lkb-3d] ${winnerId} Cheer`);
+          // r87: victory pose camera reveal — crimson wins in FP only.
+          if (winnerId === 'crimson' && cameraDirector &&
+              cameraDirector.viewMode === 'fp') {
+            try {
+              // Cancel any leftover restore from a prior round
+              if (window._victoryPoseCamHandle) {
+                clearTimeout(window._victoryPoseCamHandle);
+                window._victoryPoseCamHandle = null;
+              }
+              if (window._victoryPoseCamRestoreFn) {
+                try { window._victoryPoseCamRestoreFn(); } catch (_e) {}
+                window._victoryPoseCamRestoreFn = null;
+              }
+              const _vpSavedMode = cameraDirector.viewMode; // 'fp'
+              cameraDirector.setViewMode('cinematic');
+              cameraDirector.jumpTo(CINEMA_SHOTS.CLOSE_CRIMSON, 'VICTORY_POSE');
+              console.log('[lkb-3d] r87 victory pose cam reveal → CLOSE_CRIMSON');
+              window._victoryPoseCamRestoreFn = function () {
+                if (cameraDirector && cameraDirector.viewMode !== _vpSavedMode) {
+                  cameraDirector.setViewMode(_vpSavedMode);
+                }
+                window._victoryPoseCamRestoreFn = null;
+                window._victoryPoseCamHandle    = null;
+              };
+              // Restore after 1800ms (well within the 2s Cheer window,
+              // before the 6s reset tears everything down).
+              window._victoryPoseCamHandle = setTimeout(
+                window._victoryPoseCamRestoreFn, 1800
+              );
+            } catch (_vpE) {
+              console.warn('[lkb-3d] r87 victory pose cam failed:', _vpE);
+            }
+          }
         }
       }, 4000);
 
