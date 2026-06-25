@@ -753,6 +753,15 @@
       gap: 8px;
     }
     #match-won-overlay.visible { display: flex; }
+    /* r83: match-won reveal — scale+fade on .visible; keyframes avoid the
+       display:none→flex transition gap (transitions won't fire on that flip). */
+    @keyframes mwReveal {
+      from { opacity: 0; transform: scale(0.85); }
+      to   { opacity: 1; transform: scale(1.0);  }
+    }
+    #match-won-overlay.visible {
+      animation: mwReveal 0.4s cubic-bezier(0.2, 0.9, 0.3, 1.1) both;
+    }
     #match-won-overlay .mw-label {
       color: #d8a45a;
       font-size: 52px;
@@ -2771,6 +2780,22 @@
         tone({ freq: 588, freq2: 555, dur: 0.35, type: "triangle", vol: 0.03, attack: 0.010, release: 0.33 });
         noise({ dur: 0.08, vol: 0.04, type: "bandpass", freqStart: 800, freqEnd: 300, q: 1.5 });
       }
+      // r83: playVictoryFanfare — C major arpeggio (C5 E5 G5 C6) fired when
+      // crimson wins the match (player victory). 4 notes × 100ms step via
+      // tone(), so it routes through sfxGain → globalGain for mute compliance.
+      // triangle type = warm, non-aggressive; complements the existing sfxHorn.
+      function playVictoryFanfare() {
+        if (!actx) return;
+        if (actx.state === 'suspended') actx.resume();
+        var notes = [523.25, 659.25, 783.99, 1046.50]; // C5 E5 G5 C6
+        var noteDur  = 0.16;
+        var stepMs   = 100;
+        notes.forEach(function (freq, i) {
+          setTimeout(function () {
+            tone({ freq: freq, freq2: freq, dur: noteDur, type: 'triangle', vol: 0.12, attack: 0.02 });
+          }, i * stepMs);
+        });
+      }
       // sfxStep — quick low thud for attack-windup footstep impact. Gated
       // on actx so the audio block never throws when init failed; called
       // from combatTick + playerAttack to add weight to the swing.
@@ -2866,8 +2891,9 @@
       window.sfxAnchor     = sfxAnchor;
       window.sfxSelect     = sfxSelect;
       window.sfxLock       = sfxLock;
-      window.sfxHorn       = sfxHorn;
-      window.sfxStep       = sfxStep;
+      window.sfxHorn             = sfxHorn;
+      window.sfxStep             = sfxStep;
+      window.playVictoryFanfare  = playVictoryFanfare; // r83
     } catch (bootErr) {
       // Audio block failure must NEVER take down the visual scene.
       console.warn("[lkb-3d] audio init failed; muted scene", bootErr);
@@ -8736,6 +8762,10 @@
             if (mwWinnerText) mwWinnerText.textContent = winnerId.toUpperCase() + ' WINS THE MATCH';
             matchWonOverlay.classList.add('visible');
           }
+          // r83: victory fanfare — crimson = P1 (player win only)
+          if (winnerId === 'crimson') {
+            try { if (window.playVictoryFanfare) window.playVictoryFanfare(); } catch (e) {}
+          }
         }
         // r70: flag match end so R/Esc hotkeys activate, show hint after
         // the KO_REPLAY cinematic (3s) / finisher (4s) so it doesn't clutter.
@@ -8970,6 +9000,10 @@
         if (matchWonOverlayEl) {
           if (mwWinnerTextEl) mwWinnerTextEl.textContent = (winnerId || 'CRIMSON').toUpperCase() + ' WINS THE MATCH';
           matchWonOverlayEl.classList.add('visible');
+        }
+        // r83: victory fanfare on finisher path — always crimson (player) win
+        if ((winnerId || 'crimson') === 'crimson') {
+          try { if (window.playVictoryFanfare) window.playVictoryFanfare(); } catch (e) {}
         }
         window._finisherHandle = null;
       };
