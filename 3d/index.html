@@ -3222,6 +3222,20 @@
         noise({ dur: 0.10, vol: 0.05, type: "bandpass", freqStart: 1800 * p, freqEnd: 600 * p, q: 1.2 });
         tone({ freq: 180 * p, freq2: 120 * p, dur: 0.08, type: "triangle", vol: 0.03, attack: 0.003, release: 0.08 });
       }
+      // r126: player-only high-freq wind hiss layer — "air cutting" texture.
+      // Layered on top of _sfxSwing (low-thud) to match AAA fighter: hiss + thump synthesis.
+      // tier 0→2 scales vol (0.05→0.09) and freq ceiling (6kHz→8kHz).
+      // p = pitchRatio so clip-matched pitch shifts apply here too.
+      function _sfxSwingWind(tier, pitchRatio) {
+        const p = (typeof pitchRatio === 'number' && pitchRatio > 0) ? pitchRatio : 1;
+        const t = (tier >= 2) ? 2 : (tier >= 1 ? 1 : 0);
+        const vol       = 0.05 + t * 0.02;   // 0.05 / 0.07 / 0.09
+        const freqHi    = (5000 + t * 1500) * p;  // 5kHz / 6.5kHz / 8kHz
+        const freqLo    = (3500 + t *  500) * p;  // 3.5kHz / 4kHz / 4.5kHz
+        const dur       = 0.05 + t * 0.01;   // 0.05s / 0.06s / 0.07s
+        // highpass-shaped noise: sharp attack (2ms), fast fade to give a brief "whoosh hiss"
+        noise({ dur: dur, vol: vol, type: "highpass", freqStart: freqHi, freqEnd: freqLo, q: 0.8, attack: 0.002 });
+      }
       function _sfxHit() {
         tone({ freq: 110, freq2: 70, dur: 0.18, type: "square", vol: 0.10, attack: 0.001, release: 0.16, send: 0.25 });
         tone({ freq: 540, freq2: 420, dur: 0.14, type: "triangle", vol: 0.07, attack: 0.001, release: 0.14, send: 0.30 });
@@ -12083,6 +12097,9 @@
       const chosenAttack = pickAttackClip('crimson');
       // r55: tier-scaled SFX — tier2 gets an extra heavy-thud oscillator burst
       try { if (window.sfxSwing) window.sfxSwing(clipPitchRatio(chosenAttack)); } catch (e) {}
+      // r126: player-only swing wind hiss (high-freq air-cut layer, tier-scaled).
+      // Fired in parallel with sfxSwing; azure uses a separate audio chain so excluded here.
+      try { _sfxSwingWind(chargeTier || 0, clipPitchRatio(chosenAttack)); } catch (e) {}
       if (chargeTier >= 2 && window.actx) {
         try {
           const ac = window.actx;
@@ -12090,7 +12107,8 @@
           const g = ac.createGain();
           g.gain.setValueAtTime(0.15, ac.currentTime);
           g.gain.linearRampToValueAtTime(0, ac.currentTime + 0.20);
-          g.connect(ac.destination);
+          // r126 bugfix: route through sfxGain (mute gate) instead of ac.destination directly
+          g.connect(window.sfxGain || ac.destination);
           const o = ac.createOscillator();
           o.type = 'sawtooth';
           o.frequency.setValueAtTime(180, ac.currentTime);
