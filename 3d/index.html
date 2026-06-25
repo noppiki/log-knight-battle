@@ -1461,6 +1461,25 @@
       transition: opacity 180ms ease-out;
     }
     #charge-impact-flash.active { opacity: 1; }
+
+    /* r61: tier-2 screen-edge motion blur — 80ms burst on swing start.
+       backdrop-filter blurs the canvas behind the mask.
+       mask-image: centre (60%) transparent → edge opaque = only periphery blurs. */
+    #fp-edge-blur {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 31; /* above charge-impact-flash (30) */
+      opacity: 0;
+      -webkit-backdrop-filter: blur(2px);
+              backdrop-filter: blur(2px);
+      -webkit-mask-image: radial-gradient(ellipse 60% 50% at center,
+        transparent 50%, black 90%);
+              mask-image: radial-gradient(ellipse 60% 50% at center,
+        transparent 50%, black 90%);
+      transition: opacity 80ms ease-out;
+    }
+    #fp-edge-blur.active { opacity: 1; }
   </style>
 
   <script type="importmap">
@@ -1687,6 +1706,9 @@
 
   <!-- r55: heavy-strike screen edge flash — cyan-white radial on tier2 impact. -->
   <div id="charge-impact-flash"></div>
+
+  <!-- r61: tier-2 edge motion blur — backdrop-filter periphery burst on swing start. -->
+  <div id="fp-edge-blur"></div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -4530,6 +4552,15 @@
       chargeRingCircle: document.getElementById('charge-ring-circle'),   // r55 SVG circle
       chargeImpactEl:   document.getElementById('charge-impact-flash'),  // r55 tier2 edge flash
       chargeImpactTimer: 0,                                               // r55 edge flash timer
+      edgeBlurEl:       document.getElementById('fp-edge-blur'),         // r61 tier2 edge motion blur
+      edgeBlurTimer:    0,                                                // r61 edge blur clear timer
+      // r61: post-parry camera pitch kick — 5° up over 200ms, eased back to rest.
+      parryKick: {
+        active:    false,
+        elapsed:   0,
+        magnitude: 0.09,  // radians (~5.2°)
+        duration:  0.20,  // seconds
+      },
       // Pre-allocated THREE.Vector3 so updateLockBracket() never allocates
       // per-frame (avoids GC pressure in the hot animate() path).
       _lbProj:          new THREE.Vector3(),
@@ -4751,6 +4782,8 @@
 
       // ── 6) FOV dip (reuses existing triggerFovPunch) ─────────────────
       try { triggerFovPunch(); } catch (e) {}
+      // ── r61: post-parry pitch kick — 5° upward camera recoil 200ms ───
+      try { triggerParryKick(); } catch (e) {}
 
       // ── 7) ⚡ PARRY! HUD text ─────────────────────────────────────────
       const textEl = FpPolish.parryTextEl;
@@ -4828,6 +4861,58 @@
       }
       camera.fov = newFov;
       camera.updateProjectionMatrix();
+    }
+
+    // ── r61: triggerParryKick ────────────────────────────────────────────
+    // Arms a 5° upward pitch kick on a successful parry. The per-frame
+    // decay runs inside animate() via updateParryKick(delta), which is
+    // called BEFORE camera.rotation.set() so the offset always lands on
+    // the same frame it's computed. Magnitude peaks at start and decays
+    // to 0 with a smoothstep ease — gives a sharp impact kick that settles
+    // naturally without the abrupt snapping of a linear decay.
+    function triggerParryKick() {
+      if (cameraDirector.viewMode !== 'fp') return;
+      const pk = FpPolish.parryKick;
+      pk.active  = true;
+      pk.elapsed = 0;  // restart even if previous kick still in progress
+    }
+
+    // updateParryKick — per-frame pitch-offset computation.
+    // Returns the additive pitch offset to apply this frame (0 when inactive).
+    // MUST be called BEFORE camera.rotation.set() so the offset is fresh.
+    function updateParryKick(delta) {
+      const pk = FpPolish.parryKick;
+      if (!pk.active) return 0;
+      if (cameraDirector.viewMode !== 'fp') { pk.active = false; return 0; }
+      pk.elapsed += delta;
+      const t = pk.elapsed / pk.duration;
+      if (t >= 1.0) { pk.active = false; return 0; }
+      // smoothstep decay: magnitude * (1 - smoothstep(t))
+      // smoothstep: 3t²-2t³; inverted gives a kick that is max at t=0,
+      // eases to 0. Positive offset = look upward (YXZ, +pitch = up).
+      const ease = 1 - (t * t * (3 - 2 * t)); // 1→0 smoothstep
+      return pk.magnitude * ease;
+    }
+
+    // ── r61: triggerEdgeBlur ─────────────────────────────────────────────
+    // 80ms peripheral blur burst for tier-2 swing start.
+    // Mirrors the chargeImpactTimer guard pattern (r55) for re-trigger safety.
+    function triggerEdgeBlur() {
+      const el = FpPolish.edgeBlurEl;
+      if (!el) return;
+      if (FpPolish.edgeBlurTimer) {
+        clearTimeout(FpPolish.edgeBlurTimer);
+        FpPolish.edgeBlurTimer = 0;
+      }
+      el.style.transition = 'none';
+      el.style.opacity = '0';
+      void el.offsetWidth;
+      el.classList.add('active');
+      el.style.transition = '';
+      FpPolish.edgeBlurTimer = setTimeout(() => {
+        el.classList.remove('active');
+        FpPolish.edgeBlurTimer = 0;
+      }, 80);
     }
 
     // refreshFpOverlays — single source of truth for the FP HUD overlays.
@@ -6787,6 +6872,19 @@
         const flashLights = scene.children.filter((o) => o.name === 'tier2_flash');
         flashLights.forEach((l) => scene.remove(l));
       } catch (e) {}
+      // r61: clear parry kick tween and edge blur so they don't leak between rounds
+      try {
+        FpPolish.parryKick.active = false;
+        FpPolish.parryKick.elapsed = 0;
+        if (FpPolish.edgeBlurTimer) {
+          clearTimeout(FpPolish.edgeBlurTimer);
+          FpPolish.edgeBlurTimer = 0;
+        }
+        if (FpPolish.edgeBlurEl) {
+          FpPolish.edgeBlurEl.classList.remove('active');
+          FpPolish.edgeBlurEl.style.opacity = '0';
+        }
+      } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -8160,6 +8258,12 @@
           }
           window.spawnSwingLight(lightPos, 0xddeeff, 6, 4, 120);
         } catch (e) {}
+      }
+      // r61: tier2 swing start — screen-edge motion blur (80ms peripheral blur burst).
+      // Fires at swing release so the player feels the weight of a charged strike
+      // in the peripheral vision before the blade even lands.
+      if (myChargeTier >= 2) {
+        try { triggerEdgeBlur(); } catch (e) {}
       }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
@@ -9620,7 +9724,10 @@
         // mousemove deltas, even when pointer lock is not yet engaged
         // (so the camera stays where setViewMode('fp') seeded it).
         if (cameraDirector.viewMode === 'fp') {
-          camera.rotation.set(cameraDirector.fpPitch, cameraDirector.fpYaw, 0);
+          // r61: advance parry-kick tween BEFORE rotation.set so the offset lands
+          // on the same frame it's computed (not one frame stale like updateFovPunch).
+          const _pkOffset = updateParryKick(delta);
+          camera.rotation.set(cameraDirector.fpPitch + _pkOffset, cameraDirector.fpYaw, 0);
         } else {
           camera.lookAt(cameraDirector.currentLookAt);
         }
