@@ -5968,6 +5968,52 @@
       });
     }
 
+    // r103: idle wind sfx — subtle 2-oscillator (150Hz sine + 220Hz triangle) ambient
+    // wind layer that plays during combat. Perfect fifth interval gives harmonic warmth
+    // without muddying the BGM. Gain ceiling 0.012 (total < 0.05 with r82 tension layer).
+    // Connected through globalGain so the mute button silences it.
+    const _idleWind = { active: false, oscNodes: [] };
+
+    function startIdleWind() {
+      if (!actx || !globalGain) return;
+      if (_idleWind.active) return; // idempotency guard
+      try {
+        if (actx.state === 'suspended') actx.resume();
+        _idleWind.active = true;
+        [
+          { f: 150, type: 'sine',     vol: 0.008 },
+          { f: 220, type: 'triangle', vol: 0.004 }
+        ].forEach(function ({ f, type, vol }) {
+          const osc  = actx.createOscillator();
+          const gain = actx.createGain();
+          osc.type = type;
+          osc.frequency.setValueAtTime(f, actx.currentTime);
+          gain.gain.setValueAtTime(0, actx.currentTime);
+          gain.gain.linearRampToValueAtTime(vol, actx.currentTime + 3.0); // 3s fade-in
+          osc.connect(gain);
+          gain.connect(globalGain);
+          osc.start();
+          _idleWind.oscNodes.push({ osc, gain });
+        });
+      } catch (e) { /* audio not critical */ }
+    }
+
+    function stopIdleWind() {
+      if (!_idleWind.active) return; // idempotent
+      _idleWind.active = false;
+      const nodes = _idleWind.oscNodes.splice(0);
+      nodes.forEach(function ({ osc, gain }) {
+        try {
+          if (actx) gain.gain.linearRampToValueAtTime(0, actx.currentTime + 0.5);
+          setTimeout(function () {
+            try { osc.stop(); } catch (_) {}
+            try { osc.disconnect(); } catch (_) {}
+            try { gain.disconnect(); } catch (_) {}
+          }, 600);
+        } catch (e) {}
+      });
+    }
+
     // updateDangerState — called once per frame from animate().
     // Reads gameState.crimson.hp, manages activate/deactivate edge,
     // and lerps reticle color from amber #d8a45a → danger red #ff3030.
@@ -9265,6 +9311,8 @@
       // r82: also stop sub-bass tension layer (safety — triggerDeath normally
       // handles this, but resetMatch is the idempotent backstop).
       try { stopBgmTension(); } catch (e) {}
+      // r103: also stop idle wind layer (same safety backstop as above).
+      try { stopIdleWind(); } catch (e) {}
       // r73: force-clear azure desperate state so interval and emissive don't
       // leak into the next round (HP was just reset to HP_MAX above, so
       // updateAzureDesperateState would self-deactivate on the next frame, but
@@ -9377,6 +9425,8 @@
       // r82: fade out sub-bass tension layer on KO so it doesn't underpin the
       // death cinematic (silence reads more dramatic than lingering rumble).
       try { stopBgmTension(); } catch (e) {}
+      // r103: fade out idle wind on KO (same reasoning — silence the battlefield).
+      try { stopIdleWind(); } catch (e) {}
       // r73: if azure dies while desperate, deactivate immediately so the
       // emissive red and short interval don't linger into the death pose /
       // KO cinematic. deactivateAzureDesperate() is idempotent.
@@ -10868,6 +10918,8 @@
         window._matchIntroActive = false;
         // r82: arm the sub-bass tension layer as combat opens
         try { startBgmTension(); } catch (e) {}
+        // r103: arm idle wind ambient layer alongside BGM tension
+        try { startIdleWind(); } catch (e) {}
         // r91: start round timer when FIGHT! resolves (hook A — match-start / full-reset)
         try { startRoundTimer(); } catch (e) {}
       }, 3200));
