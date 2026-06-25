@@ -6131,6 +6131,48 @@
       window._dangerState.pantingId = 0;
     }
 
+    // ── r137: azure idle subtle breath sfx ──────────────────────────────
+    // 150Hz triangle, 200ms, vol 0.025, attack 30ms — a soft "hoo" exhale
+    // fired at 4–6s random intervals while azure is idle/guarding during
+    // combat. Gives the AI opponent life presence between swings. Distinct
+    // from r128 panting (which is crimson-only, danger-state, noise burst)
+    // and r103 wind (which is a continuous ambient oscillator layer).
+    // Routes through tone() → globalGain so master-mute silences it.
+    const _azureBreath = { active: false, intervalId: null };
+
+    function _playAzureBreath() {
+      const az = combatants && combatants.azure;
+      if (!az) return;
+      if (az.state !== 'idle' && az.state !== 'guard') return;
+      if (window._azureDesperate && window._azureDesperate.active) return;
+      try {
+        tone({ freq: 150, dur: 0.20, type: 'triangle', vol: 0.025, attack: 0.03 });
+      } catch (e) {}
+    }
+
+    function _scheduleNextAzureBreath() {
+      if (!_azureBreath.active) return;
+      const delay = 4000 + Math.random() * 2000; // 4000–6000ms
+      _azureBreath.intervalId = setTimeout(function () {
+        _playAzureBreath();
+        _scheduleNextAzureBreath();
+      }, delay);
+    }
+
+    function startAzureBreath() {
+      if (!actx || _azureBreath.active) return;
+      _azureBreath.active = true;
+      _scheduleNextAzureBreath();
+    }
+
+    function stopAzureBreath() {
+      _azureBreath.active = false;
+      if (_azureBreath.intervalId) {
+        clearTimeout(_azureBreath.intervalId);
+        _azureBreath.intervalId = null;
+      }
+    }
+
     // ── r82: BGM combat tension sub layer ──────────────────────────────
     // Two sine oscillators at 60Hz and 90Hz (perfect fifth interval) fade
     // in at combat start (FIGHT! banner) and fade out on KO / round reset.
@@ -10144,6 +10186,8 @@
       try { stopBgmTension(); } catch (e) {}
       // r103: also stop idle wind layer (same safety backstop as above).
       try { stopIdleWind(); } catch (e) {}
+      // r137: stop azure idle breath sfx on round reset.
+      try { stopAzureBreath(); } catch (e) {}
       // r73: force-clear azure desperate state so interval and emissive don't
       // leak into the next round (HP was just reset to HP_MAX above, so
       // updateAzureDesperateState would self-deactivate on the next frame, but
@@ -10293,6 +10337,8 @@
       try { stopBgmTension(); } catch (e) {}
       // r103: fade out idle wind on KO (same reasoning — silence the battlefield).
       try { stopIdleWind(); } catch (e) {}
+      // r137: stop azure idle breath sfx on KO.
+      try { stopAzureBreath(); } catch (e) {}
       // r73: if azure dies while desperate, deactivate immediately so the
       // emissive red and short interval don't linger into the death pose /
       // KO cinematic. deactivateAzureDesperate() is idempotent.
@@ -11961,6 +12007,8 @@
         try { startBgmTension(); } catch (e) {}
         // r103: arm idle wind ambient layer alongside BGM tension
         try { startIdleWind(); } catch (e) {}
+        // r137: arm azure idle breath sfx
+        try { startAzureBreath(); } catch (e) {}
         // r91: start round timer when FIGHT! resolves (hook A — match-start / full-reset)
         try { startRoundTimer(); } catch (e) {}
       }, 3200));
