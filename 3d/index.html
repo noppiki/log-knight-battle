@@ -24,9 +24,9 @@
         23    #fp-tg-warn                        amber telegraph vignette (r51); below hit flash
         24    #fp-damage-vignette, #letterbox-*  hit flash vignette (r49); letterbox bars (r replay)
         25    #ko-overlay, #fp-streak-hud,       KO text; FP streak; control hints; mp-bar;
-               #fp-control-hints, #mp-bar,        reticle; dmg-arrow; lock-bracket
-               #fp-reticle, #fp-dmg-arrow,
-               #fp-lock-bracket
+               #fp-control-hints, #mp-bar,        reticle; dmg-arrow; lock-bracket;
+               #fp-reticle, #fp-dmg-arrow,        dodge cooldown ring (r76)
+               #fp-lock-bracket, #fp-dodge-cd
         26    #match-won-overlay, #fp-tg-alert,  match-won text; guard alert; charge ring; mp-toast
                #charge-ring, #mp-toast
         27    #match-hotkey-hint, #round-banner, rematch hint; round banner; dodge flash (r63)
@@ -1662,6 +1662,65 @@
     }
     #fp-dodge-flash.active { opacity: 1; }
 
+    /* r76: dodge cooldown circular progress indicator — bottom-center HUD.
+       Visible only in FP mode (body.fp-mode gate).
+       Three visual states:
+         (default)  cooldown in progress: cyan arc fills clockwise 0→full over 800ms
+         .ready     cooldown complete + stamina OK: empty track only (shows ⇄ icon)
+         .flash     just-became-ready window ~150ms: green arc flash
+         .disabled  stamina < 8: grey track + ✗ icon */
+    #fp-dodge-cd {
+      display: none;
+      position: fixed;
+      bottom: 82px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 44px;
+      height: 44px;
+      z-index: 25;
+      pointer-events: none;
+      opacity: 0.88;
+    }
+    body.fp-mode #fp-dodge-cd { display: block; }
+    #fp-dodge-cd svg {
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+    }
+    /* track circle — always visible, low-opacity */
+    #fp-dodge-cd .cd-track {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.22);
+      stroke-width: 2.2;
+    }
+    /* fill arc — rotated -90° so fill starts at 12 o'clock */
+    #fp-dodge-cd .cd-fill {
+      fill: none;
+      stroke: #55ccee;
+      stroke-width: 3;
+      stroke-linecap: round;
+      transform: rotate(-90deg);
+      transform-origin: 22px 22px;
+      transition: stroke 0.15s ease-out;
+    }
+    #fp-dodge-cd.disabled .cd-fill { stroke: rgba(180, 180, 180, 0.30); }
+    #fp-dodge-cd.flash .cd-fill    { stroke: #55ff99; }
+    /* center icon */
+    #fp-dodge-cd .cd-icon {
+      font-size: 13px;
+      fill: rgba(100, 215, 255, 0.88);
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+    }
+    #fp-dodge-cd.disabled .cd-icon { fill: rgba(180, 180, 180, 0.50); }
+    @keyframes dodgeCdFlash {
+      0%   { opacity: 1; }
+      60%  { opacity: 0.9; }
+      100% { opacity: 0.88; }
+    }
+    #fp-dodge-cd.flash { animation: dodgeCdFlash 0.18s ease-out forwards; }
+
     /* r52: ⚡ PARRY! HUD text — appears center-top on successful parry. */
     #fp-parry-text {
       position: fixed;
@@ -2080,6 +2139,19 @@
 
   <!-- r63: retreat dodge edge vignette — cyan burst on Shift dodge. -->
   <div id="fp-dodge-flash"></div>
+
+  <!-- r76: dodge cooldown circular progress indicator — bottom-center.
+       SVG circle: r=18, C=2π×18≈113.1. Stroke-dashoffset drives fill 0→C.
+       JS updates .cd-fill dashoffset per frame; .ready/.flash/.disabled classes
+       swap icon glyph and stroke color. Hidden outside FP mode via CSS gate. -->
+  <div id="fp-dodge-cd" class="ready">
+    <svg viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
+      <circle class="cd-track" cx="22" cy="22" r="18"/>
+      <circle class="cd-fill" id="cd-fill-arc" cx="22" cy="22" r="18"
+              stroke-dasharray="113.1" stroke-dashoffset="113.1"/>
+      <text class="cd-icon" id="cd-icon-glyph" x="22" y="22">⇄</text>
+    </svg>
+  </div>
 
   <!-- r55: charge-swing ring — SVG arc centered on reticle. JS drives
        stroke-dashoffset (0..138) and .tier1/.tier2 class for color. -->
@@ -5071,6 +5143,15 @@
     // r63: resolve dodge flash DOM ref now that the element exists.
     FpPolish.dodgeFlashEl = document.getElementById('fp-dodge-flash');
 
+    // r76: dodge cooldown indicator DOM refs — cached once, never per-frame.
+    FpPolish.dodgeCdEl      = document.getElementById('fp-dodge-cd');
+    FpPolish.dodgeCdArc     = document.getElementById('cd-fill-arc');
+    FpPolish.dodgeCdIcon    = document.getElementById('cd-icon-glyph');
+    // Track last cooldown value so we can detect the exact frame it expires.
+    FpPolish._dodgeCdPrev   = 0;
+    // Circumference for r=18: 2π×18 ≈ 113.097
+    FpPolish._dodgeCdC      = 2 * Math.PI * 18;
+
     // ── r72: low-HP danger state ─────────────────────────────────────────
     // Active when crimson HP ≤ 25% and alive. Drives three effects:
     //   (1) Red vignette pulse — CSS @keyframes 2s, toggled by .active class.
@@ -5834,6 +5915,56 @@
         el.classList.remove('active');
         FpPolish.edgeBlurTimer = 0;
       }, 80);
+    }
+
+    // ── r76: updateDodgeIndicator — per-frame cooldown ring update ──────────
+    // Called from animate(); bails immediately when not in FP mode.
+    // Three visual states:
+    //   cooling  (remaining > 0):  cyan arc fills clockwise, dashoffset shrinks
+    //   flash    (within 150ms of expiry): full green arc, .flash class
+    //   ready    (default / idle):  empty arc (dashoffset = C), ⇄ icon
+    //   disabled (stm < STM_DODGE_COST): empty grey arc, ✗ icon
+    function updateDodgeIndicator() {
+      const el   = FpPolish.dodgeCdEl;
+      const arc  = FpPolish.dodgeCdArc;
+      const icon = FpPolish.dodgeCdIcon;
+      if (!el || !arc || !icon) return;
+      // FP-mode gate — same check triggerRetreatDodge uses
+      if (!window.cameraDirector || cameraDirector.viewMode !== 'fp') return;
+
+      const now      = performance.now();
+      const cdUntil  = window._dodgeCooldownUntil || 0;
+      const remaining = cdUntil - now;
+      const C        = FpPolish._dodgeCdC; // ≈ 113.097
+
+      if (remaining > 0) {
+        // ── cooling: arc fills clockwise from empty → full as cooldown drains
+        const progress = 1 - remaining / 800;          // 0 → 1 over 800ms
+        arc.setAttribute('stroke-dashoffset', C * (1 - progress));
+        el.classList.remove('ready', 'flash', 'disabled');
+        icon.textContent = '⇄';
+      } else {
+        // ── ready or flash
+        const sinceReady = cdUntil ? now - cdUntil : Infinity;
+        if (cdUntil && sinceReady < 150) {
+          // Flash window: full green ring for ~150ms to signal cooldown done
+          arc.setAttribute('stroke-dashoffset', 0);
+          el.classList.add('flash');
+          el.classList.remove('ready', 'disabled');
+          icon.textContent = '⇄';
+        } else {
+          // Idle-ready: empty track (dashoffset = C = empty arc)
+          arc.setAttribute('stroke-dashoffset', C);
+          el.classList.remove('flash');
+          // stamina gate
+          const stm = window.gameState?.crimson?.stamina ?? STM_MAX;
+          const hasStamina = stm >= STM_DODGE_COST;
+          el.classList.toggle('disabled', !hasStamina);
+          el.classList.toggle('ready', hasStamina);
+          icon.textContent = hasStamina ? '⇄' : '✗';
+        }
+      }
+      FpPolish._dodgeCdPrev = cdUntil;
     }
 
     // ── r63: triggerRetreatDodge ─────────────────────────────────────────
@@ -8123,6 +8254,18 @@
           FpPolish.dodgeFlashEl.classList.remove('active');
           FpPolish.dodgeFlashEl.style.opacity = '0';
         }
+        // r76: reset dodge cooldown indicator to idle-ready state
+        if (FpPolish.dodgeCdEl) {
+          FpPolish.dodgeCdEl.classList.remove('flash', 'disabled');
+          FpPolish.dodgeCdEl.classList.add('ready');
+        }
+        if (FpPolish.dodgeCdArc) {
+          FpPolish.dodgeCdArc.setAttribute('stroke-dashoffset', FpPolish._dodgeCdC || 113.1);
+        }
+        if (FpPolish.dodgeCdIcon) {
+          FpPolish.dodgeCdIcon.textContent = '⇄';
+        }
+        FpPolish._dodgeCdPrev = 0;
       } catch (e) {}
       // r64: restore all control hints for the new round
       try {
@@ -11351,6 +11494,8 @@
       try { updateDangerState(); } catch (e) { /* never break the render loop */ }
       // r73: azure desperate mode — boss enrage on low HP (interval + emissive + telegraph).
       try { updateAzureDesperateState(); } catch (e) { /* never break the render loop */ }
+      // r76: dodge cooldown progress indicator — O(1) DOM attribute set.
+      try { updateDodgeIndicator(); } catch (e) { /* never break the render loop */ }
       composer.render();
     }
     animate();
