@@ -6271,6 +6271,37 @@
       } catch (e) {}
     }
 
+    // ── r161: playTelegraphWindupRumble ─────────────────────────────────
+    // 45Hz sine burst fired at telegraph start to signal "attack is coming".
+    // Duration matches the telegraph window (350ms default, 150ms double 2nd).
+    // Gain envelope: 0 → 0.04 over first 50% of duration (ramp-in),
+    //               0.04 → 0.02 by 85% (sustain taper),
+    //               0.02 → 0   by 100% (fade-out 50ms pre-stop guard).
+    // Routes through globalGain so master mute silences it.
+    // Distinct from r72 _startDangerRumble (40Hz constant player low-HP only):
+    // this is 45Hz, short, per-attack burst — dual rumble during low-HP
+    // telegraph is acceptable and enhances tension.
+    function playTelegraphWindupRumble(durationMs) {
+      if (!actx || !globalGain) return;
+      try {
+        if (actx.state === 'suspended') actx.resume();
+        const osc  = actx.createOscillator();
+        const gn   = actx.createGain();
+        const dur  = durationMs / 1000;
+        const t0   = actx.currentTime;
+        osc.type   = 'sine';
+        osc.frequency.setValueAtTime(45, t0);
+        gn.gain.setValueAtTime(0,    t0);
+        gn.gain.linearRampToValueAtTime(0.04, t0 + dur * 0.50);
+        gn.gain.linearRampToValueAtTime(0.02, t0 + dur * 0.85);
+        gn.gain.linearRampToValueAtTime(0,    t0 + dur);
+        osc.connect(gn);
+        gn.connect(globalGain);
+        osc.start(t0);
+        osc.stop(t0 + dur + 0.05); // extra 50ms allows natural graph drain
+      } catch (e) { /* audio not critical */ }
+    }
+
     // ── r113: low-HP heartbeat pulse ────────────────────────────────────
     // 60Hz triangle, 80ms, gain 0.05 — fired every 1500ms (BPM 40) while
     // danger state is active.  Runs in parallel with the 40Hz rumble but at
@@ -7146,6 +7177,17 @@
             : 1.0;
           window.sfxHorn(_feintPitch);
         }
+      } catch (e) {}
+
+      // ── r161: telegraph windup low rumble ─────────────────────────
+      // 45Hz sine burst for the full telegraph window; reinforces "attack
+      // is incoming" with sub-bass vibration alongside the horn cue.
+      // Uses DESPERATE_TELEGRAPH_MS (250ms) when azure is in desperate mode.
+      try {
+        const _tgDurMs = (window._azureDesperate && window._azureDesperate.active &&
+                          attackerLabel === 'azure')
+          ? DESPERATE_TELEGRAPH_MS : TELEGRAPH_MS;
+        playTelegraphWindupRumble(_tgDurMs);
       } catch (e) {}
 
       // ── r75: range ring — show sword-reach danger zone on ground ───
@@ -12332,6 +12374,9 @@
                              alertEl.style.transition = ''; alertEl.classList.add('active'); }
               // Arm parry window for the 2nd hit.
               swingAttacker._telegraphAt = performance.now();
+
+              // r161: 2nd-hit short telegraph rumble (150ms — same window as vignette above).
+              try { playTelegraphWindupRumble(DOUBLE_TELEGRAPH_MS); } catch (e) {}
 
               setTimeout(() => {
                 // Clear 2nd-strike telegraph overlays (r117: .feint; r148: .double-pulse).
