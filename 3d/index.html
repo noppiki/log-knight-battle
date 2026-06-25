@@ -6767,6 +6767,81 @@
     // _azureShieldMat so the next round re-finds the mesh from the fresh GLB scene.
     let _azureShieldMat = null;   // cached material; null forces re-search on next call
 
+    // ── r167: azure sword windup emissive brighten ──────────────────────────
+    // When azure starts an attack telegraph, the sword's constant cyan rim
+    // (r165 baseline 0.05) ramps to 0.20 over 50 ms, holds, then eases back
+    // to 0.05 over 100 ms after the telegraph window expires.
+    // Conveys "the blade is being drawn back, gathering energy" before the
+    // strike — AAA fighter tell at the weapon level.
+    //
+    // Race-safety: _swordBrightenGen increments on every new brighten call so
+    // stale rAF loops from superseded telegraphs self-cancel immediately.
+    //
+    // Baseline-proximity is NOT gated here (unlike r144 helm blink) — this is
+    // a deliberately-triggered event (telegraph), not an ambient idle effect,
+    // so we always override and restore correctly.
+    //
+    // Conflict notes:
+    //   r100 hit-glow    — snapshots/restores via _hitGlowBase; our baseline
+    //                      restore lands after our own rAF loop, before next
+    //                      frame, so the snapshot captures the right value.
+    //   r73 desperate    — drives emissiveSave per-frame; our loop restores
+    //                      before desperate grabs next frame — no stuck state.
+    //   r119 trail       — separate geometry/material, zero conflict.
+    //   r154 sway        — rotation only, zero conflict.
+    //   r165 rim         — load-time bind that sets our starting value; this
+    //                      system is the sole runtime driver of sword intensity.
+    let _azureSwordMat     = null; // cached sword material; null re-searches lazily
+    let _swordBrightenGen  = 0;    // generation token; prevents stale rAF loops
+
+    function triggerSwordWindupBrighten(durationMs) {
+      // Lazy-bind: find Azure_1H_Sword emissive material once, reuse until reset.
+      if (!_azureSwordMat) {
+        const azRoot = combatants && combatants.azure && combatants.azure.root;
+        if (!azRoot) return;
+        azRoot.traverse((o) => {
+          if (_azureSwordMat || !o.isMesh || !o.material) return;
+          if (!/Azure_1H_Sword/i.test(o.name)) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of mats) {
+            if (m.emissive) { _azureSwordMat = m; break; }
+          }
+        });
+        if (!_azureSwordMat) return; // sword mesh not in GLB — silent skip
+      }
+
+      const gen          = ++_swordBrightenGen;
+      const startMs      = performance.now();
+      const BASE         = 0.05;
+      const PEAK         = 0.20;
+      const RAMP_MS      = 50;
+      const FADE_MS      = 100;
+
+      function tick() {
+        if (_swordBrightenGen !== gen) return; // superseded — let newer loop own the material
+        const elapsed = performance.now() - startMs;
+        if (elapsed >= durationMs) {
+          _azureSwordMat.emissiveIntensity = BASE;
+          return;
+        }
+        let intensity;
+        if (elapsed <= RAMP_MS) {
+          // Ramp up 0.05 → 0.20 over first 50 ms
+          intensity = BASE + (PEAK - BASE) * (elapsed / RAMP_MS);
+        } else if (elapsed <= durationMs - FADE_MS) {
+          // Hold at peak
+          intensity = PEAK;
+        } else {
+          // Ease-out 0.20 → 0.05 over last 100 ms
+          const t = (durationMs - elapsed) / FADE_MS;
+          intensity = BASE + (PEAK - BASE) * t;
+        }
+        _azureSwordMat.emissiveIntensity = intensity;
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
     // ── r144: azure helm slit eye glow blink ─────────────────────────────────
     // r123 sets Knight_Head emissiveIntensity to a constant 0.08 cyan rim.
     // This scheduler brightens it briefly (0.08→peak→0.08, 150 ms sin curve)
@@ -7209,6 +7284,18 @@
           ? DESPERATE_TELEGRAPH_MS : TELEGRAPH_MS;
         playTelegraphWindupRumble(_tgDurMs);
       } catch (e) {}
+
+      // ── r167: sword windup emissive brighten ─────────────────────
+      // Sword cyan rim (r165 baseline 0.05) ramps to 0.20 for the duration
+      // of the telegraph window, then eases back — "blade coiling with energy".
+      // Only fires when azure is the attacker (sword belongs to azure).
+      if (attackerLabel === 'azure') {
+        try {
+          const _swordTgDurMs = (window._azureDesperate && window._azureDesperate.active)
+            ? DESPERATE_TELEGRAPH_MS : TELEGRAPH_MS;
+          triggerSwordWindupBrighten(_swordTgDurMs);
+        } catch (e) {}
+      }
 
       // ── r75: range ring — show sword-reach danger zone on ground ───
       // Only in FP mode when azure is the attacker (same condition as
@@ -11007,6 +11094,9 @@
       // r154: null the cached azure sword ref so the next round re-resolves the mesh
       // from the freshly-loaded GLB (roster-swap safe).
       try { _azureSwordRef = null; } catch (e) {}
+      // r167: null the cached sword material and cancel any in-flight brighten loop
+      // so the next round re-finds the material from the freshly-loaded GLB.
+      try { _azureSwordMat = null; _swordBrightenGen++; } catch (e) {}
       // r158: null the cached azure shield ref so the next round re-resolves the mesh
       // from the freshly-loaded GLB (roster-swap safe; _baseRotation re-captured lazily).
       try { _azureShieldRef = null; } catch (e) {}
@@ -12465,6 +12555,10 @@
 
               // r161: 2nd-hit short telegraph rumble (150ms — same window as vignette above).
               try { playTelegraphWindupRumble(DOUBLE_TELEGRAPH_MS); } catch (e) {}
+              // r167: sword windup brighten for 2nd-hit telegraph (150ms window).
+              if (attackerLabel === 'azure') {
+                try { triggerSwordWindupBrighten(DOUBLE_TELEGRAPH_MS); } catch (e) {}
+              }
 
               setTimeout(() => {
                 // Clear 2nd-strike telegraph overlays (r117: .feint; r148: .double-pulse).
