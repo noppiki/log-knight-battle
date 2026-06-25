@@ -5506,6 +5506,9 @@
       const xform = FP_WEAPON_TRANSFORM[wantName] || FP_WEAPON_DEFAULT_XFORM;
       clone.position.set(xform.pos[0], xform.pos[1], xform.pos[2]);
       clone.rotation.set(xform.rot[0], xform.rot[1], xform.rot[2]);
+      // r98: snapshot rest-pose baseline for idle weapon micro-sway.
+      // Must be captured after rotation.set() so sway adds onto the correct base.
+      clone._baseRotation = { x: xform.rot[0], y: xform.rot[1], z: xform.rot[2] };
       clone.scale.set(1.0, 1.0, 1.0);
       clone.visible = true;
       // Suppress self-shadowing of the world by the viewmodel.
@@ -6596,6 +6599,42 @@
       const offset = Math.sin(t * Math.PI * 2) * BREATHE_FOV_AMP;
       camera.fov   = base + offset;
       camera.updateProjectionMatrix();
+    }
+
+    // ── r98: updateWeaponSway ────────────────────────────────────────────
+    // Subtle 8s-period idle micro-sway on the FP sword, phase-locked with
+    // updateBreatheFov() so they read as a single "breathing" system.
+    //   Y-axis (yaw):  ±0.5° — primary pendulum drift
+    //   Z-axis (roll): ±0.3° — secondary roll wobble at 75% freq for asymmetry
+    // Guards (mirror r97 pattern):
+    //   • FP mode only.
+    //   • Skip during attack / windup / dodge / hit (swing animation owns pose).
+    //   • Skip during charge (playerInput._isCharging).
+    //   • Skip during parry-kick (subtle but avoids phase clash with the kick).
+    //   • Skip during cinematic overrides (_finisherCamActive, _matchIntroActive).
+    //   • Skip during dodge-roll (FpPolish.dodge.active).
+    // Base rotation stored as _baseRotation on the clone by attachFpSword (r98).
+    const WEAPON_SWAY_PERIOD_MS = 8000; // matches BREATHE_FOV_PERIOD_MS
+    const WEAPON_SWAY_Y_DEG     = 0.5;  // yaw amplitude, degrees
+    const WEAPON_SWAY_Z_DEG     = 0.3;  // roll amplitude, degrees
+    function updateWeaponSway() {
+      if (!fpSwordClone) return;
+      if (cameraDirector.viewMode !== 'fp') return;
+      if (window._finisherCamActive) return;
+      if (window._matchIntroActive)  return;
+      if (FpPolish.dodge.active)     return;
+      if (FpPolish.parryKick.active) return;
+      if (playerInput._isCharging)   return;
+      const cs = combatants?.crimson?.state;
+      if (cs === 'attack' || cs === 'windup' || cs === 'dodge' || cs === 'hit' || cs === 'dead') return;
+
+      const t      = performance.now() / WEAPON_SWAY_PERIOD_MS;
+      const swayY  = Math.sin(t * Math.PI * 2) * THREE.MathUtils.degToRad(WEAPON_SWAY_Y_DEG);
+      const swayZ  = Math.cos(t * Math.PI * 2 * 0.75) * THREE.MathUtils.degToRad(WEAPON_SWAY_Z_DEG);
+      const base   = fpSwordClone._baseRotation || { x: 0, y: 0, z: 0 };
+      fpSwordClone.rotation.x = base.x;
+      fpSwordClone.rotation.y = base.y + swayY;
+      fpSwordClone.rotation.z = base.z + swayZ;
     }
 
     // ── r61: triggerParryKick ────────────────────────────────────────────
@@ -12906,6 +12945,9 @@
       // r97: breathe FOV micro-zoom — 8s sin-wave ±0.5° in FP mode.
       // Called AFTER fovPunch so punch wins when both could fire.
       updateBreatheFov();
+      // r98: idle weapon micro-sway — 8s sin-wave ±0.5°/0.3° on Y/Z axes.
+      // Phase-locked with updateBreatheFov so sword and FOV breathe together.
+      updateWeaponSway();
       // FP lock-on bracket — world→screen projection of azure's AABB.
       // Runs after camera ownership so the projection uses the final
       // camera pose for this frame. Bails cheaply when not in FP mode.
