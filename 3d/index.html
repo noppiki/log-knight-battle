@@ -1643,6 +1643,33 @@
       transform: translate(-50%, -50%) scale(1.0);
     }
 
+    /* r73: DESPERATE! flash — center-screen burst when azure enters desperate mode. */
+    #desperate-flash {
+      position: fixed;
+      left: 50%;
+      top: 44%;
+      transform: translate(-50%, -50%) scale(0.7);
+      pointer-events: none;
+      z-index: 30;
+      opacity: 0;
+      font-family: 'Segoe UI', 'Arial', sans-serif;
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: 0.22em;
+      color: rgba(255, 80, 60, 1.0);
+      text-shadow:
+        0 0 24px rgba(255, 40, 20, 0.95),
+        0 0 8px  rgba(255, 180, 100, 0.80),
+        0 0 2px  rgba(0, 0, 0, 0.90);
+      transition: opacity 90ms ease-in, transform 90ms ease-in;
+      will-change: opacity, transform;
+    }
+    #desperate-flash.active {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1.0);
+      transition: opacity 80ms ease-in, transform 80ms ease-in;
+    }
+
     /* r55: charge-swing ring — SVG arc around the reticle.
        Centered on the reticle (fixed, 50%/50%), drawn via stroke-dashoffset.
        Invisible by default; JS sets opacity 1 while charging and fades out
@@ -2002,6 +2029,9 @@
   <!-- r52: perfect-parry cyan-white flash (full-screen) + HUD text. -->
   <div id="fp-parry-flash"></div>
   <div id="fp-parry-text">⚡ PARRY!</div>
+
+  <!-- r73: azure desperate mode burst text. -->
+  <div id="desperate-flash">DESPERATE!</div>
 
   <!-- r63: retreat dodge edge vignette — cyan burst on Shift dodge. -->
   <div id="fp-dodge-flash"></div>
@@ -5121,6 +5151,125 @@
       }
     }
 
+    // ── r73: azure desperate mode (boss enrage on low HP) ───────────────
+    // When azure's HP falls to ≤25% the fight enters a final-phase:
+    //   • Combat tick interval tightened by 30% (DESPERATE_INTERVAL_FACTOR).
+    //   • Azure mesh emissive shifts to dim red (#441010), boosted during
+    //     windup/attack. Baseline is captured on activate and restored on
+    //     deactivate so GLB materials stay clean after the round.
+    //   • Telegraph window shortens to 250ms (from TELEGRAPH_MS=350ms),
+    //     making parry timing strictly harder.
+    //   • "DESPERATE!" HUD flash on first activation per round.
+    // State is force-cleared in resetMatch() and triggerDeath().
+    const DESPERATE_HP_THRESHOLD   = 0.25;
+    const DESPERATE_INTERVAL_FACTOR = 0.7;
+    const DESPERATE_TELEGRAPH_MS    = 250;
+    const DESPERATE_EMISSIVE_BASE   = 0x441010;  // dim red
+    const DESPERATE_EMISSIVE_IDL    = 0.15;
+    const DESPERATE_EMISSIVE_ATK    = 0.35;      // boosted during windup/attack
+
+    window._azureDesperate = {
+      active:       false,
+      activating:   false, // re-entrancy guard
+      emissiveSave: [],    // [{ m, color, intensity }, ...]
+    };
+
+    function activateAzureDesperate() {
+      const ad = window._azureDesperate;
+      if (ad.active || ad.activating) return;
+      ad.activating = true;
+      ad.active     = true;
+      ad.activating = false;
+
+      // 1) Tighten combat interval.
+      if (typeof combatLoopHandle !== 'undefined' && combatLoopHandle) {
+        clearInterval(combatLoopHandle);
+        const newInterval = ((window._lkbDiffCfg || DIFFICULTIES.normal).interval) * DESPERATE_INTERVAL_FACTOR;
+        combatLoopHandle = setInterval(combatTick, newInterval);
+      }
+
+      // 2) Capture azure mesh emissive baseline and apply red glow.
+      const azRoot = (typeof combatants !== 'undefined' && combatants && combatants.azure)
+                     ? combatants.azure.root : null;
+      ad.emissiveSave = [];
+      if (azRoot) {
+        azRoot.traverse((obj) => {
+          if (!obj.isMesh || !obj.material) return;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          mats.forEach((m) => {
+            if (!m.emissive) return;
+            ad.emissiveSave.push({ m, color: m.emissive.getHex(), intensity: m.emissiveIntensity != null ? m.emissiveIntensity : 0 });
+            m.emissive.setHex(DESPERATE_EMISSIVE_BASE);
+            m.emissiveIntensity = DESPERATE_EMISSIVE_IDL;
+          });
+        });
+      }
+
+      // 3) HUD flash "DESPERATE!" — once per activation.
+      try {
+        const _dspEl = document.getElementById('desperate-flash');
+        if (_dspEl) {
+          _dspEl.classList.remove('active');
+          void _dspEl.offsetWidth;
+          _dspEl.classList.add('active');
+          setTimeout(() => _dspEl.classList.remove('active'), 700);
+        }
+      } catch (e) {}
+
+      console.log('[lkb-3d] r73 azure desperate → ACTIVE (interval ×' + DESPERATE_INTERVAL_FACTOR + ', tg ' + DESPERATE_TELEGRAPH_MS + 'ms)');
+    }
+
+    function deactivateAzureDesperate() {
+      const ad = window._azureDesperate;
+      if (!ad.active) return;
+      ad.active = false;
+
+      // 1) Restore base combat interval.
+      if (typeof combatLoopHandle !== 'undefined' && combatLoopHandle) {
+        clearInterval(combatLoopHandle);
+        const baseInterval = (window._lkbDiffCfg || DIFFICULTIES.normal).interval;
+        combatLoopHandle = setInterval(combatTick, baseInterval);
+      }
+
+      // 2) Restore azure mesh emissive baseline.
+      (ad.emissiveSave || []).forEach(({ m, color, intensity }) => {
+        try {
+          m.emissive.setHex(color);
+          m.emissiveIntensity = intensity;
+        } catch (_e) {}
+      });
+      ad.emissiveSave = [];
+
+      console.log('[lkb-3d] r73 azure desperate → INACTIVE');
+    }
+
+    // updateAzureDesperateState — called once per frame from animate().
+    // Edge-triggers activate/deactivate and drives per-frame intensity boost.
+    function updateAzureDesperateState() {
+      if (!window.gameState) return;
+      const as = window.gameState.azure;
+      if (!as) return;
+      const ratio          = as.hp / HP_MAX;
+      const shouldBeActive = ratio <= DESPERATE_HP_THRESHOLD && !as.dead && as.hp > 0;
+      const ad             = window._azureDesperate;
+
+      if (shouldBeActive && !ad.active) {
+        activateAzureDesperate();
+      } else if (!shouldBeActive && ad.active) {
+        deactivateAzureDesperate();
+      }
+
+      // Per-frame: boost emissive intensity during windup/attack; idle back down.
+      if (ad.active && ad.emissiveSave.length > 0) {
+        const azCombatant = (typeof combatants !== 'undefined' && combatants) ? combatants.azure : null;
+        const isAggressive = azCombatant && (azCombatant.state === 'windup' || azCombatant.state === 'attack');
+        const wantIntensity = isAggressive ? DESPERATE_EMISSIVE_ATK : DESPERATE_EMISSIVE_IDL;
+        ad.emissiveSave.forEach(({ m }) => {
+          try { m.emissiveIntensity = wantIntensity; } catch (_e) {}
+        });
+      }
+    }
+
     // flashDamageVignette — kick the red vignette to opacity 1 immediately
     // then let CSS transition fade it back to 0 over 0.4s. We clear any
     // pending fade-back so a rapid second hit re-triggers cleanly.
@@ -5296,7 +5445,9 @@
         }
 
         runAttackFn(mySwing);
-      }, TELEGRAPH_MS);
+      // r73: use shorter 250ms telegraph when azure is in desperate mode.
+      }, (window._azureDesperate && window._azureDesperate.active && attackerLabel === 'azure')
+          ? DESPERATE_TELEGRAPH_MS : TELEGRAPH_MS);
     }
 
     // ── r52: triggerPerfectParry ────────────────────────────────────
@@ -7816,6 +7967,12 @@
       // the round banner fires).
       try { if (typeof deactivateDanger === 'function' && window._dangerState && window._dangerState.active) deactivateDanger(); } catch (e) {}
       try { if (typeof _stopDangerRumble === 'function') _stopDangerRumble(); } catch (e) {}
+      // r73: force-clear azure desperate state so interval and emissive don't
+      // leak into the next round (HP was just reset to HP_MAX above, so
+      // updateAzureDesperateState would self-deactivate on the next frame, but
+      // we force-stop here to guarantee emissive and interval are restored
+      // before the round banner fires).
+      try { if (typeof deactivateAzureDesperate === 'function' && window._azureDesperate && window._azureDesperate.active) deactivateAzureDesperate(); } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -7897,6 +8054,12 @@
       const c = combatants[defenderId];
       if (!c) return;
       window.gameState[defenderId].dead = true;
+      // r73: if azure dies while desperate, deactivate immediately so the
+      // emissive red and short interval don't linger into the death pose /
+      // KO cinematic. deactivateAzureDesperate() is idempotent.
+      if (defenderId === 'azure') {
+        try { if (typeof deactivateAzureDesperate === 'function') deactivateAzureDesperate(); } catch (e) {}
+      }
       // Race fix: invalidate any pending swing-impact timeouts on the
       // dying knight (and, for safety, the winner — round is over).
       c._swingId = (c._swingId || 0) + 1;
@@ -11012,6 +11175,8 @@
       try { timeCycle.update(); } catch (e) { /* never break the render loop */ }
       // r72: low-HP danger state — vignette pulse + reticle shift + audio rumble.
       try { updateDangerState(); } catch (e) { /* never break the render loop */ }
+      // r73: azure desperate mode — boss enrage on low HP (interval + emissive + telegraph).
+      try { updateAzureDesperateState(); } catch (e) { /* never break the render loop */ }
       composer.render();
     }
     animate();
