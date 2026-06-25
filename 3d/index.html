@@ -7165,6 +7165,59 @@
       fpSwordClone.position.z = base.z + offset;
     }
 
+    // ── r136: updateSwordYBob ─────────────────────────────────────────────
+    // Player swing sword Y bob arc — 300 ms arcing motion on every attack swing.
+    // Sword drops -0.10 m (low dip) then rises to +0.15 m (high peak) before
+    // returning to baseline, giving every swing the weight of an AAA fighter arc.
+    //
+    // Applies to: all chargeTiers (tier 0 normal attack, tier 1+) AND triggerComboFollow.
+    // Interaction with r116 (position breath):
+    //   breath early-returns during state==='attack' — mutually exclusive with Y bob.
+    //   Y bob writes fpSwordClone.position.y absolutely (base.y + offset) so no drift.
+    // Interaction with r134 thrust / r135 pull-back:
+    //   thrust and pull-back write Z only; Y bob writes Y only — orthogonal, no conflict.
+    // Ordering: runs AFTER updateSwordPullBack and updateSwordThrust in animate().
+    const _yBobState = {
+      active:    false,
+      startMs:   0,
+      totalMs:   300,
+      lowPeakAt: 80,   // ms — bottom of dip
+      highPeakAt: 180, // ms — top of arc
+      lowAmp:    -0.10,
+      highAmp:    0.15,
+    };
+    function triggerSwordYBob() {
+      _yBobState.active  = true;
+      _yBobState.startMs = performance.now();
+    }
+    function updateSwordYBob() {
+      if (!_yBobState.active) return;
+      const t = performance.now() - _yBobState.startMs;
+      if (t >= _yBobState.totalMs) {
+        _yBobState.active = false;
+        return;
+      }
+      if (!fpSwordClone) return;
+      const base = fpSwordClone._basePosition;
+      if (!base) return;
+      let offset;
+      if (t <= _yBobState.lowPeakAt) {
+        // 0 → low dip (ease-out quad)
+        const norm = t / _yBobState.lowPeakAt;
+        offset = _yBobState.lowAmp * (1 - (1 - norm) * (1 - norm));
+      } else if (t <= _yBobState.highPeakAt) {
+        // low dip → high peak (linear cross-over)
+        const norm = (t - _yBobState.lowPeakAt) / (_yBobState.highPeakAt - _yBobState.lowPeakAt);
+        offset = _yBobState.lowAmp + (_yBobState.highAmp - _yBobState.lowAmp) * norm;
+      } else {
+        // high peak → 0 baseline (ease-out quad)
+        const norm = (t - _yBobState.highPeakAt) / (_yBobState.totalMs - _yBobState.highPeakAt);
+        offset = _yBobState.highAmp * (1 - norm * norm);
+      }
+      // Absolute write — breath is suppressed during attack state so base.y is stable.
+      fpSwordClone.position.y = base.y + offset;
+    }
+
     // ── r111: updateWeaponGlint ──────────────────────────────────────────
     // Idle weapon glint — subtle warm-white emissive flash on fpSwordClone,
     // Sekiro/MK style "blade life". Fires every 10s ± 2s (random per cycle),
@@ -12419,6 +12472,9 @@
         try { triggerSwordPullBack(); } catch (e) {}
         setTimeout(() => { try { triggerSwordThrust(); } catch (e) {} }, 50);
       }
+      // r136: Y bob arc — all tiers including tier 0 normal attack.
+      // Dips -0.10 m then rises to +0.15 m over 300 ms; Y-axis only (orthogonal to Z thrust).
+      try { triggerSwordYBob(); } catch (e) {}
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
       // Impact at ~70% through the swing — matches combatTick timing.
@@ -12613,6 +12669,8 @@
 
       // Higher-pitch whoosh for combo feel.
       try { if (window.sfxSwing) window.sfxSwing(1.25); } catch (e) {}
+      // r136: Y bob arc on combo follow — same dip-then-rise arc as normal attacks.
+      try { triggerSwordYBob(); } catch (e) {}
 
       // Short stab anim — 250ms total.
       const stabAction = playClip(attacker, '1H_Melee_Attack_Stab', {
@@ -14231,6 +14289,9 @@
       // r134: tier 1+ sword forward thrust — 80ms peak / 200ms ease-out (-0.3m z).
       // Breath is suppressed during attack state so these are mutually exclusive.
       updateSwordThrust();
+      // r136: swing Y bob arc — 300ms dip-then-rise arc on every attack swing.
+      // Y-axis only; orthogonal to thrust/pull-back (Z-axis) — no conflict.
+      updateSwordYBob();
       // r111: idle weapon glint — warm-white emissive flash every ~10s when idle.
       updateWeaponGlint();
       // FP lock-on bracket — world→screen projection of azure's AABB.
