@@ -1424,8 +1424,10 @@
       // ===== PROCEDURAL NORDIC-MOOD BGM =====
       // Sparse atmospheric loop: low drone + minor-pentatonic bells.
       // (Verbatim port from 2D index.html — see that file for the long
-      // architectural comments. Only setMatchPointActive is left in but
-      // never called from the 3D build since there is no match-point UI.)
+      // architectural comments. setMatchPointActive is wired into the
+      // round-flow below: a +300-cent tension layer kicks in once either
+      // knight is one win away from MATCH WON (wins === WINS_MAX-1), and
+      // is cleared on full-match reset / non-match-point rounds.)
       var bgm = (function () {
         var BGM_LEVEL = 0.07;
         var userBgmScale = 1.0;
@@ -3562,8 +3564,8 @@
     // (at x≈2) is centered and the view stays level.
     const FP_SHOT = {
       name: 'FP_CRIMSON',
-      getPosition: () => new THREE.Vector3(-1.6, 1.4, 0),
-      getLookAt:   () => new THREE.Vector3( 4, 1.2, 0),
+      getPosition: () => new THREE.Vector3(-1.8, 1.85, 0),
+      getLookAt:   () => new THREE.Vector3( 4, 1.6, 0),
       fov: 70,
     };
 
@@ -5874,6 +5876,12 @@
       window.gameState.round = (window.gameState.round || 1) + 1;
       showRoundBanner(window.gameState.round);
       console.log('[lkb-3d] match reset — ROUND ' + window.gameState.round);
+      // Re-derive match-point tension from the freshly entered round.
+      // triggerDeath() already armed it when wins hit WINS_MAX-1; this
+      // re-sync is a no-op via the idempotency guard, but safely covers
+      // any edge case where wins were rolled back externally (e.g. a
+      // future "rematch / replay round" hook) so the BGM never lies.
+      syncMatchPointBgm();
     }
 
     // Full match reset — zeroes wins on both sides, then does normal round reset.
@@ -5885,6 +5893,12 @@
       window.gameState.azure.wins   = 0;
       // Force round back to 1: resetMatch() below will pre-increment to 1.
       window.gameState.round = 0;
+      // Release the match-point tension detune so it doesn't bleed into
+      // the post-match HUD / next-match opening rounds. resetMatch()
+      // below will call syncMatchPointBgm() again, which will be a no-op
+      // since wins were just zeroed — but clearing here keeps the audible
+      // transition tight against the MATCH WON moment.
+      syncMatchPointBgm();
       // Per-match arena rotation — defensive try/catch so a load error
       // here can never block the match reset.
       try { rotateHdriForNextMatch(); } catch (e) {
@@ -5894,6 +5908,27 @@
       try { FootprintSystem.clearAllFootprints(); } catch (e) {}
       resetMatch();
       console.log('[lkb-3d] full match reset (wins + round cleared)');
+    }
+
+    // syncMatchPointBgm — push the current "is anyone at match point?"
+    // state into the procedural BGM's tension detune layer. Match point
+    // is defined as either knight being one win away from MATCH WON
+    // (wins === WINS_MAX-1), so on a best-of-WINS_MAX it's the round
+    // where the next KO ends the match. Idempotent: only fires the BGM
+    // setter when the boolean actually flips, so a streak of match-point
+    // rounds doesn't repeatedly re-arm the +300-cent ramp.
+    let _matchPointApplied = false;
+    function syncMatchPointBgm() {
+      const cw = (window.gameState && window.gameState.crimson && window.gameState.crimson.wins) || 0;
+      const aw = (window.gameState && window.gameState.azure   && window.gameState.azure.wins)   || 0;
+      const isMatchPoint = (cw === WINS_MAX - 1) || (aw === WINS_MAX - 1);
+      if (isMatchPoint === _matchPointApplied) return;
+      _matchPointApplied = isMatchPoint;
+      try {
+        if (window.bgm && typeof window.bgm.setMatchPointActive === 'function') {
+          window.bgm.setMatchPointActive(isMatchPoint);
+        }
+      } catch (e) { /* audio not ready yet — harmless */ }
     }
 
     // triggerDeath — fires Death_A on the dead knight, shows K.O.,
@@ -5919,6 +5954,14 @@
 
       const winnerWins = window.gameState[winnerId].wins;
       console.log(`[lkb-3d] ${defenderId} K.O. — ${winnerId} now has ${winnerWins} win(s)`);
+
+      // Match-point BGM tension layer — arm the +300-cent detune as soon
+      // as the post-KO win count hits WINS_MAX-1 (one round from MATCH
+      // WON), so the climactic next round plays with audible tension.
+      // If the KO itself ends the match (winnerWins >= WINS_MAX),
+      // resetFullMatch() below will clear it; the idempotency guard
+      // inside syncMatchPointBgm() keeps the toggle clean.
+      syncMatchPointBgm();
 
       if (resetTimerHandle) clearTimeout(resetTimerHandle);
 
