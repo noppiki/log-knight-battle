@@ -9826,6 +9826,16 @@
           _azRootR100._hitGlowBase = null; // force re-capture on next glow
         }
       } catch (e) {}
+      // r120: cancel any in-flight winner glow for both fighters (idempotent backstop).
+      try {
+        for (const _wgId of ['crimson', 'azure']) {
+          const _wgRoot = combatants && combatants[_wgId] && combatants[_wgId].root;
+          if (_wgRoot) {
+            _wgRoot._winnerGlowGen = (_wgRoot._winnerGlowGen || 0) + 1; // cancels rAF chain
+            _wgRoot._winnerGlowBase = null; // force re-capture on next glow
+          }
+        }
+      } catch (e) {}
       // r75: force-remove range ring so it never leaks into the next round.
       try { if (typeof _removeAzureRangeRingNow === 'function') _removeAzureRangeRingNow(); } catch (e) {}
       // r108: restore azure root.position to its pre-approach snapshot so it
@@ -9968,6 +9978,9 @@
       const winnerId = defenderId === 'crimson' ? 'azure' : 'crimson';
       window.gameState[winnerId].wins += 1;
       updateGaugeDOM(); // refresh pips immediately
+      // r120: golden rim emissive glow on the winner at KO moment (800ms ease-out).
+      // Fires in parallel with KO_REPLAY slow-mo — visually independent.
+      try { flashWinnerGlow(winnerId); } catch (_wgE) {}
 
       const winnerWins = window.gameState[winnerId].wins;
       console.log(`[lkb-3d] ${defenderId} K.O. — ${winnerId} now has ${winnerWins} win(s)`);
@@ -11856,6 +11869,73 @@
           } catch (_e) {}
         });
       }, durationMs);
+    }
+
+    // flashWinnerGlow — r120: momentary golden emissive glow on the winner's mesh at
+    // the instant of KO. Fires in triggerDeath() immediately after winnerId is resolved.
+    // Symmetric to flashAzureHitGlow (r100) but targets either combatant root and uses
+    // a longer rAF-driven ease-out fade (800ms) rather than a simple setTimeout step.
+    // Generation token prevents stale restores if called twice in rapid succession
+    // (e.g. a debug double-trigger). Desperate interaction for azure: if azure wins
+    // while desperate is active the fade ends on the desperate baseline, not neutral.
+    function flashWinnerGlow(winnerLabel, duration, color, intensity) {
+      duration  = (duration  != null) ? duration  : 800;
+      color     = (color     != null) ? color     : 0xffd87a; // golden
+      intensity = (intensity != null) ? intensity : 0.35;
+      const wc = combatants && combatants[winnerLabel];
+      if (!wc || !wc.root) return;
+      const root = wc.root;
+      // Lazy-init baseline (captured once, before any desperate emissive change).
+      if (!root._winnerGlowBase) {
+        root._winnerGlowBase = [];
+        root.traverse(function (o) {
+          if (!o.isMesh || !o.material) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach(function (m) {
+            if (m.emissive) {
+              root._winnerGlowBase.push({
+                mat: m,
+                color: m.emissive.getHex(),
+                intensity: m.emissiveIntensity != null ? m.emissiveIntensity : 1,
+              });
+            }
+          });
+        });
+      }
+      // Generation token — only the latest call's rAF chain writes back.
+      root._winnerGlowGen = (root._winnerGlowGen || 0) + 1;
+      const gen = root._winnerGlowGen;
+      const startMs = performance.now();
+      function _tick() {
+        if (root._winnerGlowGen !== gen) return; // canceled by resetMatch or new call
+        const elapsed = performance.now() - startMs;
+        const t = elapsed / duration;
+        if (t >= 1) {
+          // Fade complete — restore to baseline (or desperate base if applicable).
+          root._winnerGlowBase.forEach(function (b) {
+            try {
+              if (winnerLabel === 'azure' && window._azureDesperate && window._azureDesperate.active) {
+                b.mat.emissive.setHex(DESPERATE_EMISSIVE_BASE);
+                b.mat.emissiveIntensity = DESPERATE_EMISSIVE_IDL;
+              } else {
+                b.mat.emissive.setHex(b.color);
+                b.mat.emissiveIntensity = b.intensity;
+              }
+            } catch (_e) {}
+          });
+          return;
+        }
+        // Ease-out fade: intensity * (1 - t)
+        const fade = 1 - t;
+        root._winnerGlowBase.forEach(function (b) {
+          try {
+            b.mat.emissive.setHex(color);
+            b.mat.emissiveIntensity = intensity * fade;
+          } catch (_e) {}
+        });
+        requestAnimationFrame(_tick);
+      }
+      requestAnimationFrame(_tick);
     }
 
     // Player-driven attack on crimson. Mirrors the swing → impact → damage
