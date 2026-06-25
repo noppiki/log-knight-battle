@@ -6359,6 +6359,16 @@
       }, delay);
     }
 
+    // r160: azure attack release exhale — "ハッ" on swing start (250Hz triangle 100ms)
+    // Distinct from idle breath (150Hz) and recovery breath (180Hz).
+    // Routes through tone() → sfxGain → globalGain so master-mute silences it.
+    function playAzureAttackExhale() {
+      if (!actx) return;
+      try {
+        tone({ freq: 250, freq2: 180, dur: 0.10, type: 'triangle', vol: 0.025, attack: 0.01 });
+      } catch (e) {}
+    }
+
     function startAzureBreath() {
       if (!actx || _azureBreath.active) return;
       _azureBreath.active = true;
@@ -7189,6 +7199,9 @@
           return;
         }
 
+        // r160: azure attack release exhale — fires on every swing start
+        // (feint included; double-strike fires twice, once per swing).
+        if (attackerLabel === 'azure') playAzureAttackExhale();
         runAttackFn(mySwing);
       // r73: use shorter 250ms telegraph when azure is in desperate mode.
       }, (window._azureDesperate && window._azureDesperate.active && attackerLabel === 'azure')
