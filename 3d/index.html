@@ -9272,7 +9272,7 @@
 
       if (winnerWins >= WINS_MAX) {
         // MATCH WON — show match-won overlay, then do a full reset (clears wins).
-        // r78: for the finisher path, matchWonOverlay is shown AFTER the 4s cinematic
+        // r78: for the finisher path, matchWonOverlay is shown AFTER the 3s cinematic
         // (inside triggerFinisherSequence's restore callback). For all other paths it
         // shows immediately as before.
         if (koOverlay) koOverlay.classList.remove('visible');
@@ -9293,9 +9293,9 @@
           }
         }
         // r70: flag match end so R/Esc hotkeys activate, show hint after
-        // the KO_REPLAY cinematic (3s) / finisher (4s) so it doesn't clutter.
+        // the KO_REPLAY cinematic (3s) / finisher (3s) so it doesn't clutter.
         window._matchEndShown = true;
-        const _hintDelay = (_isFinisher && defenderId === 'azure') ? 4300 : 3200;
+        const _hintDelay = (_isFinisher && defenderId === 'azure') ? 3300 : 3200;
         setTimeout(() => {
           const hint = document.getElementById('match-hotkey-hint');
           if (hint && window._matchEndShown) hint.style.display = 'block';
@@ -9341,7 +9341,7 @@
             window._finisherFallback = true;
           }
           if (!window._finisherFallback) {
-            // resetFullMatch scheduled inside triggerFinisherSequence (6s total).
+            // resetFullMatch scheduled inside triggerFinisherSequence (5s total).
           } else {
             window._finisherFallback = false;
             // (fall through to KO_REPLAY block below)
@@ -9422,7 +9422,7 @@
     // Fires when crimson lands a clean tier-2 charge-hit that kills azure
     // while azure's HP was ≤ 5 (execution threshold) on a match-deciding KO.
     // Replaces KO_REPLAY for that specific condition; all other KOs are
-    // unaffected.  Total duration: 4000ms slow-mo cinematic, then victory.
+    // unaffected.  Total duration: 3000ms slow-mo cinematic, then victory.
     //
     // Race safety:
     //   - Cancels hit-stop (_hitLagHandle) and stagger-boost (_staggerBoostHandle)
@@ -9449,7 +9449,7 @@
         window._staggerBoostAction = null;
       }
 
-      // ── 1) Slow-mo: 0.2× for 4000ms (deeper than KO_REPLAY's 0.5×) ──
+      // ── 1) Slow-mo: 0.2× for 3000ms (deeper than KO_REPLAY's 0.5×) ──
       const _fSavedScales = (mixers && mixers.length)
         ? mixers.map(m => m.timeScale)
         : [];
@@ -9497,7 +9497,7 @@
         }
       } catch (_e) {}
 
-      // ── 6) Restore + transition to victory after 4000ms ──
+      // ── 6) Restore + transition to victory after 3000ms ──
       const _fRestoreFn = function () {
         // Restore mixer timeScales.
         if (mixers && mixers.length) {
@@ -9537,9 +9537,9 @@
       };
       window._finisherHandle = setTimeout(function () {
         _fRestoreFn();
-        // Full match reset after an additional 2s (matches the 6s total of normal KO path).
+        // Full match reset after an additional 2s (5s total, slightly faster than normal KO path).
         resetTimerHandle = setTimeout(resetFullMatch, 2000);
-      }, 4000);
+      }, 3000);
     }
 
     // ── Combo counter (r54) ─────────────────────────────────────────
@@ -12653,13 +12653,13 @@
       // director's update() so our write wins (director runs its internal
       // cycle timers, then we overwrite camera.position and lookAt).
       if (window._finisherCamActive) {
-        // r78: FINISHER push-in — drive camera toward azure close-up over 4s.
+        // r78: FINISHER push-in — drive camera toward azure close-up over 3s.
         // Mirrors the matchIntro pattern: hard-coded coords, no .position read on
         // the azure combatant root (baked skeleton offsets make that unreliable).
         // Start: CLOSE_AZURE position (3.5, 0.9, -3.5) → push in toward look
         // target (2.0, 1.5, 0) so the head fills the frame by the end.
-        const _fElapsed  = Math.min(performance.now() - (window._finisherStartMs || 0), 4000);
-        const _fT        = _fElapsed / 4000; // 0→1 over 4s
+        const _fElapsed  = Math.min(performance.now() - (window._finisherStartMs || 0), 3000);
+        const _fT        = _fElapsed / 3000; // 0→1 over 3s
         const _fEase     = _fT < 0.5 ? 4 * _fT * _fT * _fT : 1 - Math.pow(-2 * _fT + 2, 3) / 2;
         // Push in: start at CLOSE_AZURE (dist ~2 m) → pull to 0.9 m from look target.
         const _fFromX = 3.5, _fFromY = 0.9, _fFromZ = -3.5;
