@@ -1098,6 +1098,77 @@
       100% { transform: scale(1.0);  opacity: 1; }
     }
 
+    /* ── r91: round timer — center-top HUD, engraved-metal amber ── */
+    #round-timer {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 25;
+      pointer-events: none;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 48px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      color: #d8a45a;
+      text-shadow:
+        0 -1px 0 rgba(255, 235, 200, 0.55),
+        0 1px 0 rgba(20, 16, 24, 0.95),
+        0 2px 0 rgba(20, 16, 24, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 6px 18px rgba(0, 0, 0, 0.85),
+        0 0 24px rgba(216, 164, 90, 0.5);
+      display: none;
+    }
+    #round-timer.active { display: block; }
+    #round-timer.warn-pulse {
+      color: #ff3030;
+      text-shadow:
+        0 -1px 0 rgba(255, 200, 200, 0.55),
+        0 1px 0 rgba(20, 0, 0, 0.95),
+        0 2px 0 rgba(20, 0, 0, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 6px 18px rgba(0, 0, 0, 0.85),
+        0 0 32px rgba(255, 48, 48, 0.85);
+      animation: timerWarnPulse 1.0s ease-in-out infinite;
+    }
+    @keyframes timerWarnPulse {
+      0%,100% { opacity: 1; }
+      50%      { opacity: 0.45; }
+    }
+
+    /* ── r91: TIME UP! announce banner ───────────────────────────── */
+    #time-up-banner {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 28;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 80px;
+      font-weight: 900;
+      letter-spacing: 0.2em;
+      color: #ff3030;
+      text-shadow:
+        0 -1px 0 rgba(255, 200, 200, 0.55),
+        0 1px 0 rgba(20, 0, 0, 0.95),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 8px 28px rgba(0, 0, 0, 0.9),
+        0 0 48px rgba(255, 80, 40, 0.9);
+    }
+    #time-up-banner.visible {
+      display: flex;
+      animation: timeUpReveal 1.2s ease-out forwards;
+    }
+    @keyframes timeUpReveal {
+      0%   { transform: scale(0.85); opacity: 0; }
+      35%  { transform: scale(1.05); opacity: 1; }
+      65%  { transform: scale(0.98); opacity: 1; }
+      100% { transform: scale(1.0);  opacity: 1; }
+    }
+
     /* ── full-screen radial vignette ───────────────────────────── */
     #vignette {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -2308,6 +2379,10 @@
   <div id="letterbox-bottom"></div>
   <!-- r78: finisher execution text overlay -->
   <div id="finisher-text">FINISHER!</div>
+  <!-- r91: round timer — center-top countdown, amber → red at 10s -->
+  <div id="round-timer" aria-live="polite" aria-label="Round timer">60</div>
+  <!-- r91: TIME UP! announce banner -->
+  <div id="time-up-banner" aria-live="assertive">TIME UP!</div>
   <div id="ko-overlay">K.O.</div>
   <div id="match-won-overlay">
     <div class="mw-label">MATCH WON</div>
@@ -8692,6 +8767,8 @@
     // r89: partialHeal=true → between-round HP carry-over (+30, capped at HP_MAX).
     //      partialHeal=false (default) → full HP_MAX heal (used by resetFullMatch).
     function resetMatch(partialHeal) {
+      // r91: stop round timer immediately on any reset so it never leaks into the next round.
+      try { stopRoundTimer(); } catch (e) {}
       // r78: if a finisher cinematic is still running on reset (R hotkey mid-cinematic),
       // cancel and restore cleanly so mixers don't stay at 0.2× and the
       // finisher text isn't left hanging.
@@ -8900,6 +8977,11 @@
       // any edge case where wins were rolled back externally (e.g. a
       // future "rematch / replay round" hook) so the BGM never lies.
       syncMatchPointBgm();
+      // r91: hook B — start timer for rounds 2+ within a match (partialHeal=true).
+      // Round 1 / full-match reset use hook A inside startMatchIntro.
+      if (partialHeal) {
+        try { startRoundTimer(); } catch (e) {}
+      }
     }
 
     // Full match reset — zeroes wins on both sides, then does normal round reset.
@@ -8965,6 +9047,8 @@
     // total 6s before round/match reset. Idempotent per defender thanks
     // to the gameState.dead flag.
     function triggerDeath(defenderId) {
+      // r91: stop round timer on KO so it never leaks into the death cinematic.
+      try { stopRoundTimer(); } catch (e) {}
       // r78: consume finisher flag atomically — even if this KO isn't match-deciding,
       // the flag must be cleared so it cannot mis-fire on a future match-deciding KO.
       const _isFinisher = !!window._finisherMode;
@@ -10299,6 +10383,88 @@
     //     used by the animate() camera-hijack block.
     //   window._matchIntroTimers  — all pending setTimeout ids; cleared
     //     on re-entry so back-to-back calls never double-fire.
+    // ── r91: 60-second round timer ──────────────────────────────────
+    // Wall-clock (performance.now), pauses for nothing.
+    // startRoundTimer called from:
+    //   (A) startMatchIntro 3200ms callback (round 1 / match-start)
+    //   (B) resetMatch(partialHeal=true) tail (rounds 2-3 + DRAW replay)
+    // stopRoundTimer called from resetMatch top + triggerDeath top.
+    const ROUND_TIME_MS = 60000;
+    const _rtEl  = document.getElementById('round-timer');
+    const _tubEl = document.getElementById('time-up-banner');
+    let _rtActive  = false;
+    let _rtEndMs   = 0;
+    let _rtInFlight = false; // true after handleTimeUp fires, cleared in resetMatch
+
+    function startRoundTimer() {
+      if (_rtInFlight) return; // time-up resolution still pending
+      _rtActive = true;
+      _rtEndMs  = performance.now() + ROUND_TIME_MS;
+      if (_rtEl) {
+        _rtEl.textContent = '60';
+        _rtEl.classList.remove('warn-pulse');
+        _rtEl.classList.add('active');
+      }
+      console.log('[lkb-3d] r91 round timer started');
+    }
+    function stopRoundTimer() {
+      _rtActive   = false;
+      _rtInFlight = false;
+      if (_rtEl) {
+        _rtEl.classList.remove('active', 'warn-pulse');
+        _rtEl.textContent = '60';
+      }
+      if (_tubEl) _tubEl.classList.remove('visible');
+    }
+    function updateRoundTimer() {
+      if (!_rtActive) return;
+      const now       = performance.now();
+      const remaining = Math.max(0, _rtEndMs - now);
+      const secs      = Math.ceil(remaining / 1000);
+      if (_rtEl) {
+        _rtEl.textContent = String(secs).padStart(2, '0');
+        if (remaining <= 10000) {
+          _rtEl.classList.add('warn-pulse');
+        } else {
+          _rtEl.classList.remove('warn-pulse');
+        }
+      }
+      if (remaining <= 0) {
+        _rtActive   = false;
+        _rtInFlight = true;
+        handleTimeUp();
+      }
+    }
+    function handleTimeUp() {
+      // Show banner
+      if (_rtEl) _rtEl.classList.remove('active', 'warn-pulse');
+      if (_tubEl) _tubEl.classList.add('visible');
+      // Capture HP at time-up moment
+      const cHp = window.gameState.crimson.hp;
+      const aHp = window.gameState.azure.hp;
+      console.log('[lkb-3d] r91 TIME UP — crimson HP:', cHp, 'azure HP:', aHp);
+      setTimeout(() => {
+        // Race fix: a real KO may have landed during the 1200ms banner window
+        if (window.gameState.crimson.dead || window.gameState.azure.dead) return;
+        if (cHp > aHp) {
+          triggerDeath('azure');
+        } else if (aHp > cHp) {
+          triggerDeath('crimson');
+        } else {
+          // DRAW — replay round without changing win counts
+          handleTimeDraw();
+        }
+      }, 1200);
+    }
+    function handleTimeDraw() {
+      console.log('[lkb-3d] r91 DRAW — replaying round');
+      if (_tubEl) _tubEl.classList.remove('visible');
+      // resetMatch with partialHeal=true so partial HP stays, then intro re-runs
+      // via resetMatch's own partialHeal branch (startRoundTimer called inside)
+      resetMatch(true);
+    }
+    // ── end r91 round timer state ────────────────────────────────────
+
     window._matchIntroActive  = false;
     window._matchIntroStartMs = 0;
     window._matchIntroTimers  = [];
@@ -10344,6 +10510,8 @@
         window._matchIntroActive = false;
         // r82: arm the sub-bass tension layer as combat opens
         try { startBgmTension(); } catch (e) {}
+        // r91: start round timer when FIGHT! resolves (hook A — match-start / full-reset)
+        try { startRoundTimer(); } catch (e) {}
       }, 3200));
 
       console.log('[lkb-3d] r65 match intro started');
@@ -12463,6 +12631,8 @@
       try { updateAzureDesperateState(); } catch (e) { /* never break the render loop */ }
       // r76: dodge cooldown progress indicator — O(1) DOM attribute set.
       try { updateDodgeIndicator(); } catch (e) { /* never break the render loop */ }
+      // r91: round countdown timer — wall-clock, triggers TIME UP! on expiry.
+      try { updateRoundTimer(); } catch (e) { /* never break the render loop */ }
       composer.render();
     }
     animate();
