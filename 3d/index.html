@@ -1368,6 +1368,59 @@
       opacity: 1;
       transform: translate(-50%, -50%) scale(1.0);
     }
+
+    /* r55: charge-swing ring — SVG arc around the reticle.
+       Centered on the reticle (fixed, 50%/50%), drawn via stroke-dashoffset.
+       Invisible by default; JS sets opacity 1 while charging and fades out
+       after release. Colors cycle white → amber → cyan-white per tier. */
+    #charge-ring {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 26;
+      opacity: 0;
+      transition: opacity 200ms ease-out;
+      will-change: opacity;
+    }
+    #charge-ring.charging { opacity: 1; transition: none; }
+    #charge-ring circle {
+      fill: none;
+      stroke: #ffffff;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      /* circumference for r=22 ≈ 138.23 → dasharray = circ, offset = circ (empty → full) */
+      stroke-dasharray: 138.23;
+      stroke-dashoffset: 138.23;
+      transition: stroke 120ms ease-out;
+      filter: drop-shadow(0 0 3px rgba(255,255,255,0.7));
+    }
+    #charge-ring.tier1 circle {
+      stroke: #d8a45a;
+      filter: drop-shadow(0 0 4px rgba(255,180,60,0.85));
+    }
+    #charge-ring.tier2 circle {
+      stroke: #9feeff;
+      filter: drop-shadow(0 0 6px rgba(100,220,255,0.95));
+    }
+
+    /* r55: heavy-strike screen-edge flash (tier2 on impact).
+       Full-screen radial gradient from edges, cyan-white tint.
+       Layers above bloom (z-index 30) but below menus. */
+    #charge-impact-flash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 30;
+      opacity: 0;
+      background: radial-gradient(ellipse at center,
+        transparent 35%,
+        rgba(160, 240, 255, 0.18) 70%,
+        rgba(80,  200, 255, 0.50) 100%);
+      transition: opacity 180ms ease-out;
+    }
+    #charge-impact-flash.active { opacity: 1; }
   </style>
 
   <script type="importmap">
@@ -1585,6 +1638,15 @@
   <!-- r52: perfect-parry cyan-white flash (full-screen) + HUD text. -->
   <div id="fp-parry-flash"></div>
   <div id="fp-parry-text">⚡ PARRY!</div>
+
+  <!-- r55: charge-swing ring — SVG arc centered on reticle. JS drives
+       stroke-dashoffset (0..138) and .tier1/.tier2 class for color. -->
+  <svg id="charge-ring" width="50" height="50" viewBox="-25 -25 50 50">
+    <circle r="22" id="charge-ring-circle"/>
+  </svg>
+
+  <!-- r55: heavy-strike screen edge flash — cyan-white radial on tier2 impact. -->
+  <div id="charge-impact-flash"></div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -4405,6 +4467,10 @@
       parryTextEl:      document.getElementById('fp-parry-text'), // r52 ⚡ PARRY! text
       parryFlashTimer:  0,                                        // r52 parry flash fade-out timer
       parryTextTimer:   0,                                        // r52 parry text fade-out timer
+      chargeRingEl:     document.getElementById('charge-ring'),          // r55 charge arc ring
+      chargeRingCircle: document.getElementById('charge-ring-circle'),   // r55 SVG circle
+      chargeImpactEl:   document.getElementById('charge-impact-flash'),  // r55 tier2 edge flash
+      chargeImpactTimer: 0,                                               // r55 edge flash timer
       // Pre-allocated THREE.Vector3 so updateLockBracket() never allocates
       // per-frame (avoids GC pressure in the hot animate() path).
       _lbProj:          new THREE.Vector3(),
@@ -6442,6 +6508,8 @@
       if (matchWonOverlay) matchWonOverlay.classList.remove('visible');
       // r54: clear combo chain on round/match reset
       try { if (window._comboReset) window._comboReset(); } catch (e) {}
+      // r55: cancel any in-progress charge so ring + rumble don't leak between rounds
+      try { _chargeCancelSilent(); } catch (e) {}
       // Ensure letterbox bars are retracted before the next round starts
       // (defensive — restore fn above normally handles this, but guard the
       // edge case where bars were left active without a pending restore).
@@ -7485,6 +7553,89 @@
     const playerInput = { spacePressed: false, eHeld: false, lastSpaceTime: 0 };
     const PLAYER_ATTACK_COOLDOWN_MS = 250; // soft floor between repeated taps
 
+    // r55: charge-swing state
+    // _chargeStart: performance.now() at Space keydown; 0 when not charging.
+    // _isCharging: true while Space is held and charge is active.
+    // _chargeRumbleNode / _chargeRumbleGain: low-freq oscillator while charging.
+    // Charge tier thresholds (ms hold time):
+    const CHARGE_TIER1_MS  = 300;   // ≥300ms → tier 1 (amber, +50% dmg)
+    const CHARGE_TIER2_MS  = 800;   // ≥800ms → tier 2 (cyan, +100% dmg)
+    const CHARGE_STM_DRAIN = 12;    // stamina/sec drain while charging (cancels at STM_ATTACK_COST)
+    // SVG arc circumference for charge ring r=22
+    const CHARGE_RING_CIRC = 2 * Math.PI * 22; // ≈138.23
+
+    function _chargeGetTier(holdMs) {
+      if (holdMs >= CHARGE_TIER2_MS) return 2;
+      if (holdMs >= CHARGE_TIER1_MS) return 1;
+      return 0;
+    }
+
+    // Show/hide charge ring — called each frame while charging.
+    function _chargeRingUpdate(holdMs) {
+      const ring = FpPolish.chargeRingEl;
+      const circ = FpPolish.chargeRingCircle;
+      if (!ring || !circ) return;
+      const maxMs = CHARGE_TIER2_MS;
+      const fill  = Math.min(holdMs / maxMs, 1.0); // 0..1
+      // stroke-dashoffset: CIRC (empty) → 0 (full)
+      circ.style.strokeDashoffset = (CHARGE_RING_CIRC * (1 - fill)).toFixed(2);
+      const tier = _chargeGetTier(holdMs);
+      ring.classList.toggle('tier1', tier === 1);
+      ring.classList.toggle('tier2', tier >= 2);
+      if (!ring.classList.contains('charging')) ring.classList.add('charging');
+    }
+
+    function _chargeRingHide() {
+      const ring = FpPolish.chargeRingEl;
+      if (!ring) return;
+      ring.classList.remove('charging', 'tier1', 'tier2');
+      // CSS transition: opacity 200ms — fade out naturally
+    }
+
+    // Start low-freq charge rumble via Web Audio oscillator.
+    let _chargeRumbleNode = null;
+    let _chargeRumbleGain = null;
+    function _chargeRumbleStart() {
+      if (!window.actx) return;
+      try {
+        if (window.actx.state === 'suspended') window.actx.resume();
+        const g = window.actx.createGain();
+        g.gain.setValueAtTime(0, window.actx.currentTime);
+        g.gain.linearRampToValueAtTime(0.05, window.actx.currentTime + 1.0);
+        g.connect(window.actx.destination);
+        const osc = window.actx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(60, window.actx.currentTime);
+        osc.connect(g);
+        osc.start();
+        _chargeRumbleNode = osc;
+        _chargeRumbleGain = g;
+      } catch (e) {}
+    }
+
+    function _chargeRumbleStop() {
+      try {
+        if (_chargeRumbleGain) {
+          _chargeRumbleGain.gain.linearRampToValueAtTime(0, window.actx.currentTime + 0.05);
+        }
+        if (_chargeRumbleNode) {
+          _chargeRumbleNode.stop(window.actx.currentTime + 0.06);
+        }
+      } catch (e) {}
+      _chargeRumbleNode = null;
+      _chargeRumbleGain = null;
+    }
+
+    // Cancel any in-progress charge without firing an attack.
+    // Called on: guard enter, death, reset, pointer unlock.
+    function _chargeCancelSilent() {
+      if (!playerInput._isCharging) return;
+      playerInput._isCharging = false;
+      playerInput._chargeStart = 0;
+      _chargeRingHide();
+      _chargeRumbleStop();
+    }
+
     function fpInputActive() {
       return cameraDirector && cameraDirector.viewMode === 'fp' && window._mouseLocked;
     }
@@ -7517,7 +7668,11 @@
     // sequence from combatTick, but lets the defender (azure) keep whatever
     // state they're in (idle / guard / attack) so we don't yank them out
     // of their own animation mid-swing.
-    function playerAttack() {
+    function playerAttack(opts) {
+      // r55: chargeTier defaults to 0 (normal attack) for all no-arg callers
+      // (QA bridge, MP guest forward, etc.).
+      const chargeTier = (opts && opts.chargeTier != null) ? opts.chargeTier : 0;
+
       // MP phase-3: as a connected guest, forward intent to host
       // instead of running the swing locally. Host echoes back the
       // resulting azure-vs-crimson state via snapshot. Host case
@@ -7535,15 +7690,36 @@
       // Iter-66: stamina gate. Cheap clack + "EXHAUSTED" pill when the
       // player tries to swing under the cost floor; no state change.
       const stmState = window.gameState.crimson;
-      if (stmState.stamina < STM_ATTACK_COST) {
+      // r55: tier1 = +3 stamina cost, tier2 = +6 stamina cost (on top of base 20)
+      const tierStmExtra = chargeTier === 2 ? 6 : (chargeTier === 1 ? 3 : 0);
+      const totalStmCost = STM_ATTACK_COST + tierStmExtra;
+      if (stmState.stamina < totalStmCost) {
         showExhaustPill('EXHAUSTED');
         try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
         return;
       }
-      stmState.stamina = Math.max(0, stmState.stamina - STM_ATTACK_COST);
+      stmState.stamina = Math.max(0, stmState.stamina - totalStmCost);
       try { updateGaugeDOM(); } catch (e) {}
 
+      // r55: tier-scaled SFX — tier2 gets an extra heavy-thud oscillator burst
       try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
+      if (chargeTier >= 2 && window.actx) {
+        try {
+          const ac = window.actx;
+          if (ac.state === 'suspended') ac.resume();
+          const g = ac.createGain();
+          g.gain.setValueAtTime(0.15, ac.currentTime);
+          g.gain.linearRampToValueAtTime(0, ac.currentTime + 0.20);
+          g.connect(ac.destination);
+          const o = ac.createOscillator();
+          o.type = 'sawtooth';
+          o.frequency.setValueAtTime(180, ac.currentTime);
+          o.frequency.linearRampToValueAtTime(60, ac.currentTime + 0.20);
+          o.connect(g);
+          o.start();
+          o.stop(ac.currentTime + 0.21);
+        } catch (e) {}
+      }
       // Footstep thud — adds weight to the player's windup plant.
       try { if (window.sfxStep) window.sfxStep(); } catch (e) {}
 
@@ -7554,18 +7730,23 @@
       // Prevents zero-damage swings when azure lands first and flips
       // crimson into state='hit' before our 70% impact tick.
       const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
+      // r55: capture tier into a local so the setTimeout closure reads a stable value
+      const myChargeTier = chargeTier;
       const chosenAttack = pickAttackClip();
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15,
         loop: false,
         weight: 1.0,
       });
-      // FP polish — kick FOV from 70 → 78 → 70 over ~0.26s on every player
-      // attack. FpPolish.fovPunch's per-frame tween lives in animate(),
-      // gated on viewMode === 'fp' so cinematic / manual cameras keep
-      // their own FOV baseline.
+      // FP polish — kick FOV from 70 → 78+tier*3 → rest over ~0.26s on every
+      // player attack. Tier2 gets a bigger punch (+6° vs base +8° gives total 14°).
       if (cameraDirector && cameraDirector.viewMode === 'fp') {
+        // Temporarily widen peak for heavier hits
+        const basePeak = FpPolish.fovPunch.restFov + 8;
+        FpPolish.fovPunch.peakFov = basePeak + (myChargeTier === 2 ? 6 : (myChargeTier === 1 ? 3 : 0));
         triggerFovPunch();
+        // Restore peak after punch completes so normal attacks keep +8
+        setTimeout(() => { FpPolish.fovPunch.peakFov = basePeak; }, 400);
       }
       // Sword-tip trail — only meaningful in FP where fpSwordClone exists.
       // activate() clears the ring buffer so we don't draw a smear from
@@ -7594,17 +7775,38 @@
           ? defenderRoot.position.clone().add(new THREE.Vector3(0, 1.0, 0))
           : { x: 0, y: 1.0, z: 0 };
         try { window.triggerImpact(hitPos); } catch (err) { console.warn('[lkb-3d] triggerImpact threw', err); }
+        // r55: tier2 — screen edge cyan flash on impact
+        if (myChargeTier >= 2) {
+          const flashEl = FpPolish.chargeImpactEl;
+          if (flashEl) {
+            if (FpPolish.chargeImpactTimer) { clearTimeout(FpPolish.chargeImpactTimer); }
+            flashEl.style.transition = 'none';
+            flashEl.style.opacity = '1';
+            void flashEl.offsetWidth;
+            flashEl.style.transition = '';
+            flashEl.classList.add('active');
+            FpPolish.chargeImpactTimer = setTimeout(() => {
+              flashEl.classList.remove('active');
+              FpPolish.chargeImpactTimer = 0;
+            }, 180);
+          }
+        }
         // r47: microshake — boost shake amplitude when the PLAYER lands a hit
         // so the impact feels meatier than the baseline triggerImpact shake.
+        // r55: tier2 = extra hard shake
+        const shakeAmp = myChargeTier >= 2 ? 0.20 : (myChargeTier >= 1 ? 0.15 : 0.12);
+        const shakeDur = myChargeTier >= 2 ? 0.18 : 0.09;
         try {
           if (impactSystem && impactSystem.shake) {
-            impactSystem.shake.amplitude = 0.12;
-            impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining, 0.09);
-            impactSystem.shake.duration  = Math.max(impactSystem.shake.duration,  0.09);
+            impactSystem.shake.amplitude = shakeAmp;
+            impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining, shakeDur);
+            impactSystem.shake.duration  = Math.max(impactSystem.shake.duration,  shakeDur);
           }
         } catch (e) {}
+        // r55: tier-scaled damage: tier0=8, tier1=12, tier2=16
+        const tierDamage = myChargeTier === 2 ? 16 : (myChargeTier === 1 ? 12 : 8);
         try {
-          window.applyDamage('azure', 8);
+          window.applyDamage('azure', tierDamage);
           gainSP('crimson', 5);
           gainSP('azure', 5);
         } catch (err) { console.warn('[lkb-3d] HUD update threw', err); }
@@ -7639,6 +7841,8 @@
       if (!c) return;
       if (window.gameState.crimson.dead) return;
       if (c.state === 'attack') return; // can't guard mid-swing
+      // r55: cancel any pending charge when the player raises guard
+      try { _chargeCancelSilent(); } catch (e) {}
       // Iter-66: stamina gate — can't raise guard at zero stamina.
       // The per-frame drain in animate() handles auto-release if the
       // guard exhausts mid-hold; this block only catches fresh presses.
@@ -7692,9 +7896,15 @@
         e.preventDefault();
         const now = performance.now();
         if (now - playerInput.lastSpaceTime < PLAYER_ATTACK_COOLDOWN_MS) return;
-        playerInput.lastSpaceTime = now;
+        // r55: don't fire immediately on keydown — start charge instead.
+        // playerAttack fires on keyup (or stamina-auto-release).
         playerInput.spacePressed = true;
-        playerAttack();
+        const c = combatants && combatants.crimson;
+        if (c && c.state !== 'attack' && c.state !== 'guard') {
+          playerInput._isCharging = true;
+          playerInput._chargeStart = now;
+          _chargeRumbleStart();
+        }
       } else if (e.code === 'KeyE') {
         if (e.repeat) return;
         e.preventDefault();
@@ -7711,6 +7921,20 @@
     window.addEventListener('keyup', (e) => {
       if (e.code === 'Space') {
         playerInput.spacePressed = false;
+        // r55: release charge → compute tier → fire attack
+        if (playerInput._isCharging) {
+          const holdMs = performance.now() - (playerInput._chargeStart || 0);
+          playerInput._isCharging = false;
+          playerInput._chargeStart = 0;
+          _chargeRingHide();
+          _chargeRumbleStop();
+          if (fpInputActive()) {
+            const tier = _chargeGetTier(holdMs);
+            // Record lastSpaceTime here (was previously in keydown)
+            playerInput.lastSpaceTime = performance.now();
+            playerAttack({ chargeTier: tier });
+          }
+        }
       } else if (e.code === 'KeyE') {
         if (!playerInput.eHeld) return;
         playerInput.eHeld = false;
@@ -8863,6 +9087,32 @@
         if (FpPolish && FpPolish.reticleEl) {
           const exh = window.gameState.crimson.stamina < STM_ATTACK_COST;
           FpPolish.reticleEl.classList.toggle('exhausted', exh);
+        }
+
+        // r55: charge-swing per-frame tick
+        // (a) drain stamina during hold (CHARGE_STM_DRAIN/s) + auto-release
+        // (b) update charge ring arc fill
+        if (playerInput._isCharging) {
+          const cs = window.gameState.crimson;
+          if (cs && !cs.dead) {
+            cs.stamina = Math.max(0, cs.stamina - CHARGE_STM_DRAIN * delta);
+            if (cs.stamina < STM_ATTACK_COST) {
+              // Auto-release: not enough stamina to complete the swing
+              const holdMs = performance.now() - (playerInput._chargeStart || 0);
+              playerInput._isCharging = false;
+              playerInput._chargeStart = 0;
+              _chargeRingHide();
+              _chargeRumbleStop();
+              showExhaustPill('EXHAUSTED');
+              // Fire a tier-0 forced-release attack (no extra cost — stamina is
+              // already below floor so playerAttack's own gate will likely block;
+              // we skip calling it here to avoid the exhaust double-pill).
+            } else {
+              const holdMs = performance.now() - (playerInput._chargeStart || 0);
+              _chargeRingUpdate(holdMs);
+            }
+            try { updateGaugeDOM(); } catch (e) {}
+          }
         }
       }
       updateDust(delta);
