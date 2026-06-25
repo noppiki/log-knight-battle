@@ -2862,6 +2862,98 @@
       }
     }
 
+    /* ── snow specular glints (ground-level sparkle field) ───────
+     *
+     * A static cloud of ~600 tiny points scattered across a
+     * 30×30m square at y=0.01 (just above the ground). Each
+     * particle carries its own twinkle phase + frequency, evaluated
+     * in a custom vertex shader so the per-frame JS cost is just a
+     * single uniform update. Distance-based fade keeps the cloud
+     * from showing as a flat carpet near the camera-far edge.
+     *
+     * Wrapped in try/catch so a shader-compile failure doesn't take
+     * the rest of the scene down with it.
+     */
+    let snowGlintSystem = null;
+    try {
+      const SNOW_GLINT_COUNT = 600;
+      const SNOW_GLINT_RANGE = 30; // 30×30 m square centered on origin
+      const SNOW_GLINT_FADE  = 20; // particles fully fade by this distance from camera
+      const glintGeo = new THREE.BufferGeometry();
+      const glintPositions = new Float32Array(SNOW_GLINT_COUNT * 3);
+      const glintPhases    = new Float32Array(SNOW_GLINT_COUNT);
+      const glintFreqs     = new Float32Array(SNOW_GLINT_COUNT);
+      for (let i = 0; i < SNOW_GLINT_COUNT; i++) {
+        glintPositions[i * 3 + 0] = (Math.random() - 0.5) * SNOW_GLINT_RANGE;
+        glintPositions[i * 3 + 1] = 0.01; // just above ground plane
+        glintPositions[i * 3 + 2] = (Math.random() - 0.5) * SNOW_GLINT_RANGE;
+        glintPhases[i] = Math.random() * Math.PI * 2.0;
+        // Twinkle freq 0.8-3.2 rad/s — wide range so we get a mix of
+        // slow shimmers and quick flashes, not a uniform pulse.
+        glintFreqs[i]  = 0.8 + Math.random() * 2.4;
+      }
+      glintGeo.setAttribute('position',     new THREE.BufferAttribute(glintPositions, 3));
+      glintGeo.setAttribute('twinklePhase', new THREE.BufferAttribute(glintPhases, 1));
+      glintGeo.setAttribute('twinkleFreq',  new THREE.BufferAttribute(glintFreqs, 1));
+
+      const glintMat = new THREE.ShaderMaterial({
+        uniforms: {
+          uTime:     { value: 0.0 },
+          uColor:    { value: new THREE.Color(0xfffbe8) },
+          uSize:     { value: 0.04 },
+          uFadeDist: { value: SNOW_GLINT_FADE },
+        },
+        vertexShader: `
+          attribute float twinklePhase;
+          attribute float twinkleFreq;
+          uniform float uTime;
+          uniform float uSize;
+          uniform float uFadeDist;
+          varying float vAlpha;
+          void main() {
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            float twinkle   = max(0.0, sin(uTime * twinkleFreq + twinklePhase));
+            // Sharpen the twinkle: most particles dim, occasional bright flash.
+            twinkle = pow(twinkle, 4.0);
+            float dist = length(mvPosition.xyz);
+            float distFade = clamp(1.0 - dist / uFadeDist, 0.0, 1.0);
+            vAlpha = twinkle * distFade;
+            gl_Position = projectionMatrix * mvPosition;
+            // Size attenuated by distance, in clip space.
+            gl_PointSize = uSize * (300.0 / max(dist, 0.001));
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 uColor;
+          varying float vAlpha;
+          void main() {
+            // Soft round sparkle: radial falloff from point center.
+            vec2 uv = gl_PointCoord - vec2(0.5);
+            float r = length(uv);
+            if (r > 0.5) discard;
+            float a = (1.0 - r * 2.0) * vAlpha;
+            gl_FragColor = vec4(uColor, a);
+          }
+        `,
+        transparent:    true,
+        depthWrite:     false,
+        blending:       THREE.AdditiveBlending,
+      });
+
+      const glintPoints = new THREE.Points(glintGeo, glintMat);
+      glintPoints.frustumCulled = false;
+      scene.add(glintPoints);
+      snowGlintSystem = { points: glintPoints, material: glintMat };
+      window.snowGlintSystem = snowGlintSystem;
+    } catch (sgErr) {
+      console.warn('[lkb-3d] snow glint system skipped', sgErr);
+    }
+
+    function updateSnowGlint(delta, time) {
+      if (!snowGlintSystem) return;
+      snowGlintSystem.material.uniforms.uTime.value = time;
+    }
+
     /* ── ground ────────────────────────────────────────────────── */
     const groundGeo = new THREE.PlaneGeometry(40, 40);
     const texLoader = new THREE.TextureLoader();
@@ -4428,6 +4520,215 @@
         console.warn('[lkb-3d] snowPuffSystem.spawn threw', err);
       }
     };
+
+    /* ── BreathFogSystem ────────────────────────────────────────────
+       Visible cold-air exhalation. Each knight exhales a small white
+       plume from the mouth every ~3 s while idle, sold as 20–30
+       THREE.Points particles drifting forward + slightly upward:
+         - Spawn center: knight head world position + tiny upward
+           offset (~+0.05 m above the head bone, roughly at the mouth).
+           Head position resolves through the headIK bone cache when
+           available (most accurate; tracks baked Idle animation),
+           with a root+1.55m fallback for the few frames before the
+           rig has been traversed.
+         - Forward axis: unit vector from the breather toward the
+           opponent's torso, projected to the horizontal plane. This
+           reuses the same "who am I facing" signal the head-IK uses,
+           so the plume always blows toward the duel instead of off
+           into world +Z.
+         - Per-particle velocity = forward * (0.5–0.9 m/s)
+                                  + up      * (0.15–0.35 m/s)
+                                  + tiny lateral jitter (~0.1 m/s),
+           giving a small forward-leaning cone instead of a flat puff.
+         - Lifetime 1.5 s with linear size growth (0.05 m → 0.12 m)
+           so the plume blooms as it cools, and opacity fade 0.7 → 0.
+         - Color #f6f3ec (warm-cream off-white), NormalBlending,
+           depthWrite off — reads as opaque vapor, not glow.
+         - Tiny "rising air" damping on +Y (-0.08 m/s² applied as a
+           soft upward decay) so the plume floats and dissipates
+           instead of falling like SnowPuff does.
+
+       Spawn cadence: each knight has its own setInterval at a random
+       2.5–3.8 s, independent so the two knights don't synchronize.
+       Gated on combatant.state === 'idle' — attack / guard / hit /
+       dead suppress the routine puff (combat overrides breathing).
+       Other systems can fire an extra plume via window.spawnBreathFog
+       (e.g. a "panting" breath right after an attack ends).
+    ─────────────────────────────────────────────────────────────────*/
+    class BreathFogSystem {
+      constructor(scene) {
+        this.scene  = scene;
+        this.plumes = []; // active plume entries
+        // Scratch vectors so we don't allocate per spawn/per frame.
+        this._tmpHeadWorld = new THREE.Vector3();
+        this._tmpOppWorld  = new THREE.Vector3();
+        this._tmpFwd       = new THREE.Vector3();
+      }
+
+      // Resolve (cx, cy, cz) head/mouth world position and a horizontal
+      // forward unit vector pointing at the opponent. Falls back to
+      // root+1.55 m and +Z if any of the lookups aren't ready yet.
+      _resolveAnchor(label) {
+        const self = (typeof combatants !== 'undefined' && combatants) ? combatants[label] : null;
+        if (!self || !self.root) return null;
+        const opp = (label === 'crimson') ? combatants.azure : combatants.crimson;
+
+        // Head world position — prefer the cached head bone from
+        // headIK (matches baked Idle motion), else root + 1.55 m.
+        let head = null;
+        try { head = (typeof headIK !== 'undefined' && headIK) ? headIK.bones.get(label) : null; } catch (e) {}
+        if (head) {
+          head.getWorldPosition(this._tmpHeadWorld);
+        } else {
+          this._tmpHeadWorld.set(self.root.position.x, self.root.position.y + 1.55, self.root.position.z);
+        }
+        // Bump up ~5 cm so the plume reads as coming from the mouth
+        // (KayKit head bones sit roughly at the brow line).
+        this._tmpHeadWorld.y += 0.05;
+
+        // Horizontal forward = (opp - self) flattened to XZ.
+        if (opp && opp.root) {
+          this._tmpFwd.set(
+            opp.root.position.x - self.root.position.x,
+            0,
+            opp.root.position.z - self.root.position.z,
+          );
+          const fl = this._tmpFwd.length();
+          if (fl > 1e-4) this._tmpFwd.multiplyScalar(1 / fl);
+          else           this._tmpFwd.set(0, 0, 1);
+        } else {
+          this._tmpFwd.set(0, 0, 1);
+        }
+        return { fx: this._tmpFwd.x, fz: this._tmpFwd.z, cx: this._tmpHeadWorld.x, cy: this._tmpHeadWorld.y, cz: this._tmpHeadWorld.z };
+      }
+
+      spawn(label) {
+        const a = this._resolveAnchor(label);
+        if (!a) return;
+        // Move mouth forward ~0.25 m so the plume blows past the visor.
+        const cx = a.cx + a.fx * 0.25;
+        const cy = a.cy + 0.10; // +10 cm up so plume reads above the lip
+        const cz = a.cz + a.fz * 0.25;
+
+        const COUNT     = 20 + Math.floor(Math.random() * 11); // 20–30
+        const LIFETIME  = 1.5;
+        const BASE_SIZE = 0.05;
+        const GROW_TO   = 0.12;
+
+        const positions  = new Float32Array(COUNT * 3);
+        const velocities = new Float32Array(COUNT * 3);
+        for (let i = 0; i < COUNT; i++) {
+          // Tight initial cluster so the plume starts at the mouth.
+          positions[i * 3 + 0] = cx + (Math.random() - 0.5) * 0.04;
+          positions[i * 3 + 1] = cy + (Math.random() - 0.5) * 0.03;
+          positions[i * 3 + 2] = cz + (Math.random() - 0.5) * 0.04;
+          // Forward 0.5–0.9 m/s, with tiny lateral & vertical jitter.
+          const fwd = 0.5 + Math.random() * 0.4;
+          const up  = 0.15 + Math.random() * 0.20;
+          const lat = (Math.random() - 0.5) * 0.20;
+          // Perpendicular to forward in the XZ plane = (-fz, 0, +fx).
+          velocities[i * 3 + 0] = a.fx * fwd + (-a.fz) * lat;
+          velocities[i * 3 + 1] = up;
+          velocities[i * 3 + 2] = a.fz * fwd + ( a.fx) * lat;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+          color:           0xf6f3ec, // warm cream-white vapor
+          size:            BASE_SIZE,
+          sizeAttenuation: true,
+          transparent:     true,
+          opacity:         0.70,
+          depthWrite:      false,
+          blending:        THREE.NormalBlending, // opaque vapor, not glow
+        });
+
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        this.scene.add(points);
+
+        this.plumes.push({
+          points,
+          velocities,
+          age:       0,
+          lifetime:  LIFETIME,
+          baseSize:  BASE_SIZE,
+          growTo:    GROW_TO,
+          baseAlpha: 0.70,
+        });
+      }
+
+      update(delta) {
+        for (let p = this.plumes.length - 1; p >= 0; p--) {
+          const plume = this.plumes[p];
+          plume.age += delta;
+          const t = plume.age / plume.lifetime; // 0→1
+
+          if (t >= 1.0) {
+            this.scene.remove(plume.points);
+            plume.points.geometry.dispose();
+            plume.points.material.dispose();
+            this.plumes.splice(p, 1);
+            continue;
+          }
+
+          // Bloom + fade: size grows BASE→GROW, opacity fades to 0.
+          plume.points.material.size    = plume.baseSize + (plume.growTo - plume.baseSize) * t;
+          plume.points.material.opacity = plume.baseAlpha * (1.0 - t);
+
+          // Integrate velocity + soft upward decay so the plume
+          // floats and dissipates rather than ballistic-arcing down.
+          const pos = plume.points.geometry.attributes.position;
+          const arr = pos.array;
+          const vel = plume.velocities;
+          const n   = arr.length / 3;
+          for (let i = 0; i < n; i++) {
+            arr[i * 3 + 0] += vel[i * 3 + 0] * delta;
+            arr[i * 3 + 1] += vel[i * 3 + 1] * delta;
+            arr[i * 3 + 2] += vel[i * 3 + 2] * delta;
+            // Gentle upward decay — vertical velocity bleeds off so
+            // the plume stalls and disperses near the apex instead
+            // of climbing forever. Horizontal drift untouched.
+            vel[i * 3 + 1] -= 0.08 * delta;
+          }
+          pos.needsUpdate = true;
+        }
+      }
+    }
+
+    const breathFogSystem = new BreathFogSystem(scene);
+    window.breathFogSystem = breathFogSystem;
+
+    window.spawnBreathFog = function spawnBreathFog(knightLabel) {
+      try {
+        breathFogSystem.spawn(knightLabel);
+      } catch (err) {
+        console.warn('[lkb-3d] breathFogSystem.spawn threw', err);
+      }
+    };
+
+    // Per-knight idle-breathing cadence. Each knight gets its own
+    // setInterval at a randomized 2.5–3.8 s so the two never sync;
+    // the puff only fires while the combatant is in 'idle' state so
+    // combat (attack/guard/hit/dead) cleanly suppresses it.
+    (function startBreathFogCadence() {
+      function scheduleNext(label) {
+        const wait = 2500 + Math.random() * 1300; // 2.5–3.8 s
+        setTimeout(() => {
+          try {
+            const c = (typeof combatants !== 'undefined' && combatants) ? combatants[label] : null;
+            if (c && c.state === 'idle') {
+              breathFogSystem.spawn(label);
+            }
+          } catch (e) { /* never let breathing break the loop */ }
+          scheduleNext(label);
+        }, wait);
+      }
+      scheduleNext('crimson');
+      scheduleNext('azure');
+    })();
 
     /* ── WeaponTrail ────────────────────────────────────────────────
        A brief glowing arc the FP sword tip leaves behind during a
@@ -6705,8 +7006,10 @@
       }
       updateDust(delta);
       try { snowPuffSystem.update(delta); } catch (e) {}
+      try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
+      try { updateSnowGlint(delta, time); } catch (e) {}
 
       // ── CINEMA: combat sync ─────────────────────────────────────
       // Poll combat state and translate edges into director overrides:
