@@ -7081,6 +7081,13 @@
       const attacker = combatants[attackerLabel];
       if (!attacker) { runAttackFn(); return; }
 
+      // r156: pre-attack micro flinch — azure coils backward (+2°) for 50 ms
+      // before the vignette fires. Only meaningful in FP mode where azure is
+      // the attacker; guard-lean is inactive during windup so no axis conflict.
+      if (attackerLabel === 'azure') {
+        try { triggerAzurePreAttackFlinch(); } catch (e) {}
+      }
+
       // Arm the swing-id immediately so the outer combatTick doesn't start
       // a second attack before the 350ms fires. State = 'windup' blocks
       // the re-entrant defer check added to combatTick.
@@ -7479,6 +7486,45 @@
       _azureSwordRef.rotation.x = base.x;
       _azureSwordRef.rotation.y = base.y + swayY;
       _azureSwordRef.rotation.z = base.z + swayZ;
+    }
+
+    // ── r156: azure pre-attack micro flinch ────────────────────────────
+    // 50 ms backward lean (+2°, +0.0349 rad on rotation.x) that fires at
+    // triggerEnemyTelegraph entry — the visual "coiling" cue before azure
+    // swings. Additive onto the same rotation.x as r155 guard lean; the two
+    // are timing-exclusive (azure cannot be in guard and starting an attack
+    // simultaneously) so no conflict arises. r141 death slump uses the same
+    // axis but state=dead is mutually exclusive with any attack trigger.
+    //
+    // Offset envelope: half-sine over 50 ms (0 → peak → 0), using
+    //   offset = sin(t * π) * AMP  where t = elapsed / 50
+    // This produces a fast recoil that self-resolves without a cleanup step.
+    //
+    // Orthogonality:
+    //   • r70 idle micro-motion  → rotation.y (yaw)         — different axis
+    //   • r155 guard lean        → timing exclusive (guard ≠ attack)
+    //   • r141 death slump       → state=dead, mutually exclusive
+    //   • r108 approach          → position.z, not rotation  — no conflict
+    const _FLINCH_AMP = 0.0349; // +2° in radians
+    const _FLINCH_MS  = 50;
+    const _azFlinch = { active: false, startMs: 0 };
+
+    function triggerAzurePreAttackFlinch() {
+      _azFlinch.active  = true;
+      _azFlinch.startMs = performance.now();
+    }
+
+    function updateAzurePreAttackFlinch() {
+      if (!_azFlinch.active) return;
+      const az = combatants && combatants.azure;
+      if (!az || !az.root) return;
+      const t = (performance.now() - _azFlinch.startMs) / _FLINCH_MS;
+      if (t >= 1) {
+        _azFlinch.active = false;
+        return;
+      }
+      // additive half-sine: 0→peak→0 over 50 ms — self-resolves cleanly
+      az.root.rotation.x += Math.sin(t * Math.PI) * _FLINCH_AMP;
     }
 
     // ── r155: updateAzureGuardLean ──────────────────────────────────────
@@ -14962,6 +15008,9 @@
       // r154: azure idle weapon sway — same 8s period as r98; active in idle/guard only.
       // Mirrors the player sway pattern so the opponent reads as alive, not a statue.
       updateAzureWeaponSway();
+      // r156: azure pre-attack micro flinch — 50 ms backward lean (+2°) additive
+      // to rotation.x at telegraph entry; half-sine envelope self-resolves cleanly.
+      updateAzurePreAttackFlinch();
       // r155: azure body forward lean in guard — additive rotation.x offset (-5°) that
       // lerps in on guard entry (200 ms) and back out on guard exit (300 ms).
       updateAzureGuardLean();
