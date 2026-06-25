@@ -76,6 +76,14 @@
       text-transform: uppercase;
     }
 
+    /* ── full-screen radial vignette ───────────────────────────── */
+    #vignette {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 5;
+      background: radial-gradient(ellipse at center,
+        transparent 40%, rgba(15,12,20,0.35) 80%, rgba(8,6,12,0.6) 100%);
+    }
+
     /* ── vignette anchors ───────────────────────────────────────── */
     #vignette-bottom {
       position: fixed;
@@ -141,6 +149,8 @@
 </head>
 <body>
 
+  <div id="vignette"></div>
+
   <div id="loading">
     LOADING<span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span>
   </div>
@@ -171,6 +181,8 @@
     import { SMAAPass }        from 'three/addons/postprocessing/SMAAPass.js';
     import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
     import { SSAOPass }        from 'three/addons/postprocessing/SSAOPass.js';
+    import { OutlinePass }     from 'three/addons/postprocessing/OutlinePass.js';
+    import { BokehPass }       from 'three/addons/postprocessing/BokehPass.js';
 
     /* ── renderer ──────────────────────────────────────────────── */
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -178,7 +190,7 @@
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
     renderer.toneMapping       = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.5;   // warmer dusk lift
+    renderer.toneMappingExposure = 1.42;  // tiny lift (+0.02) for vignette compensation
     renderer.outputColorSpace  = THREE.SRGBColorSpace;
 
     const host = document.getElementById('canvas-host');
@@ -273,8 +285,10 @@
 
     /* ── lighting ──────────────────────────────────────────────── */
     // Hemisphere: sky cool-blue, ground warm terracotta
-    const hemi = new THREE.HemisphereLight(0x8aa0d8, 0x443a3a, 1.0);
+    const hemi = new THREE.HemisphereLight(0x8aa0d8, 0x443a3a, 1.2);
     scene.add(hemi);
+    const ambientFill = new THREE.AmbientLight(0x9aa8c0, 0.25);
+    scene.add(ambientFill);
 
     // Key sun: warm amber directional, casts shadows
     const sun = new THREE.DirectionalLight(0xffc88a, 2.2);
@@ -294,6 +308,52 @@
     const rim = new THREE.PointLight(0xff9060, 0.6, 20);
     rim.position.set(-1.5, 4, 5);
     scene.add(rim);
+
+    // ── silhouette rim lights (four spots, two per knight) ────────
+    // Wrap in try/catch so a single light failure doesn't break the scene.
+    try {
+      // Crimson knight (x = -2) — warm amber back-rim + cool blue top-rim
+      const rim_crimson_back = new THREE.SpotLight(0xffc88a, 3.2);
+      rim_crimson_back.position.set(-2, 2.8, 4);
+      rim_crimson_back.target.position.set(-2, 1, 0);
+      rim_crimson_back.distance  = 6;
+      rim_crimson_back.angle     = Math.PI / 5;
+      rim_crimson_back.penumbra  = 0.7;
+      rim_crimson_back.castShadow = false;
+      scene.add(rim_crimson_back);
+      scene.add(rim_crimson_back.target);
+
+      const rim_crimson_top = new THREE.SpotLight(0x8ab4ff, 1.4);
+      rim_crimson_top.position.set(-2.5, 4, 0);
+      rim_crimson_top.target.position.set(-2, 1.5, 0);
+      rim_crimson_top.distance = 5;
+      rim_crimson_top.penumbra = 0.8;
+      rim_crimson_top.castShadow = false;
+      scene.add(rim_crimson_top);
+      scene.add(rim_crimson_top.target);
+
+      // Azure knight (x = +2) — cool blue back-rim + warm amber top-rim
+      const rim_azure_back = new THREE.SpotLight(0x8ab4ff, 3.2);
+      rim_azure_back.position.set(2, 2.8, 4);
+      rim_azure_back.target.position.set(2, 1, 0);
+      rim_azure_back.distance  = 6;
+      rim_azure_back.angle     = Math.PI / 5;
+      rim_azure_back.penumbra  = 0.7;
+      rim_azure_back.castShadow = false;
+      scene.add(rim_azure_back);
+      scene.add(rim_azure_back.target);
+
+      const rim_azure_top = new THREE.SpotLight(0xffc88a, 1.4);
+      rim_azure_top.position.set(2.5, 4, 0);
+      rim_azure_top.target.position.set(2, 1.5, 0);
+      rim_azure_top.distance = 5;
+      rim_azure_top.penumbra = 0.8;
+      rim_azure_top.castShadow = false;
+      scene.add(rim_azure_top);
+      scene.add(rim_azure_top.target);
+    } catch (err) {
+      console.warn('[lkb-3d] rim lights skipped', err);
+    }
 
     /* ── ground ────────────────────────────────────────────────── */
     const groundGeo = new THREE.PlaneGeometry(40, 40);
@@ -362,12 +422,39 @@
     ssaoPass.maxDistance  = 0.1;
     composer.addPass(ssaoPass);
 
+    // OutlinePass — amber rim outline on knights for silhouette punch.
+    // selectedObjects is populated after each knight GLB loads (see loaders below).
+    const outlinePass = new OutlinePass(
+      new THREE.Vector2(initialW, initialH),
+      scene,
+      camera
+    );
+    outlinePass.edgeStrength    = 6.0;
+    outlinePass.edgeGlow        = 0.55;
+    outlinePass.edgeThickness   = 2.6;
+    outlinePass.pulsePeriod     = 0;             // no pulse
+    outlinePass.visibleEdgeColor.set(0xd8a45a); // amber (PAL.skyAmber from 2D game)
+    outlinePass.hiddenEdgeColor.set(0x6a4e2a);  // warmer dark amber for occluded edges
+    outlinePass.selectedObjects = [];
+    composer.addPass(outlinePass);
+
+    // BokehPass — depth-of-field, focused on the knights (~7m from camera).
+    // Mild aperture so knights stay crisp; only the far log + ground blur.
+    const bokehPass = new BokehPass(scene, camera, {
+      focus:    7.0,
+      aperture: 0.0010,
+      maxblur:  0.013,
+      width:    initialW,
+      height:   initialH,
+    });
+    composer.addPass(bokehPass);
+
     // Bloom — soft glow on highlights.
     // Iter 67: strength 0.55 → 0.45. The dusk HDRI provides its own glow;
     // over-bloom blurs sprite/edge detail.
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(initialW, initialH),
-      0.5,   // strength
+      0.55,  // strength (amplifies amber outline rim glow)
       0.6,   // radius
       0.78   // threshold
     );
@@ -470,6 +557,7 @@
         // Do NOT re-anchor; meshes are already at their Blender world positions.
         applyShadows(root, true, false);
         scene.add(root);
+        outlinePass.selectedObjects.push(root);
         setupMixerFor(gltf, 'crimson');
         markLoaded();
       },
@@ -487,6 +575,7 @@
         const root = gltf.scene;
         applyShadows(root, true, false);
         scene.add(root);
+        outlinePass.selectedObjects.push(root);
         setupMixerFor(gltf, 'azure');
         markLoaded();
       },
@@ -566,6 +655,8 @@
       composer.setPixelRatio(pr);
       composer.setSize(w, h);
       ssaoPass.setSize(w, h);
+      outlinePass.setSize(w, h);
+      if (typeof bokehPass.setSize === 'function') bokehPass.setSize(w, h);
       bloomPass.setSize(w, h);
       smaaPass.setSize(w * pr, h * pr);
     }
