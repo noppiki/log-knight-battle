@@ -10286,6 +10286,18 @@
           combatants.azure.state = 'idle';
         }
       } catch (e) {}
+      // r141: clear azure death slump so root rotation delta doesn't carry
+      // into the next round. The per-frame delta accumulation uses _deathSlumpPrevZ/X
+      // as the running offset; nulling start + prev ensures clean additive from 0.
+      try {
+        const _azSlump = combatants && combatants.azure;
+        if (_azSlump) {
+          _azSlump._deathSlumpStart   = null;
+          _azSlump._deathSlumpApplied = false;
+          _azSlump._deathSlumpPrevZ   = 0;
+          _azSlump._deathSlumpPrevX   = 0;
+        }
+      } catch (e) {}
       // Advance the round counter and announce the new round. Initial
       // load is handled separately in onAllLoaded() with ROUND 1.
       window.gameState.round = (window.gameState.round || 1) + 1;
@@ -13665,6 +13677,51 @@
       }
     }
 
+    // ── r141: updateAzureDeathSlump ──────────────────────────────────────
+    // When azure enters 'dead' state, gently lean the root forward/sideways
+    // over ~1.4 s (ease-out curve) so the body settles with weight rather than
+    // snapping into the baked Death_A clip abruptly.  The slump is additive on
+    // root.rotation (Z-axis forward tilt + tiny X-axis side lean) so it
+    // composes on top of whatever the mixer has set.
+    //
+    // Constraints:
+    //   • Only fires when state === 'dead' and _deathSlumpStart is set.
+    //   • resetMatch() nulls _deathSlumpStart/_deathSlumpApplied so the root
+    //     returns to the idle pose captured by updateIdleBreathing on the next
+    //     idle frame — no separate restore needed.
+    //   • Target lean: ~4° forward (Z rotation) + ~1.5° side (X rotation).
+    //   • Duration: 1400 ms ease-out (1 - (1-t)²) so motion decelerates
+    //     into the resting lean and never overshoots.
+    const DEATH_SLUMP_DURATION_MS = 1400;
+    const DEATH_SLUMP_Z_RAD = 0.070;   // ~4° forward lean
+    const DEATH_SLUMP_X_RAD = 0.026;   // ~1.5° side lean (adds subtle fall)
+
+    function updateAzureDeathSlump() {
+      if (!combatants || !combatants.azure || !combatants.azure.root) return;
+      const az = combatants.azure;
+      if (az.state !== 'dead') {
+        // If we left 'dead' (shouldn't happen mid-match, but be safe), reset bookkeeping.
+        if (az._deathSlumpApplied) {
+          az._deathSlumpApplied = false;
+          az._deathSlumpStart   = null;
+        }
+        return;
+      }
+      // Arm the timer on the first dead frame.
+      if (!az._deathSlumpStart) {
+        az._deathSlumpStart = performance.now();
+      }
+      const elapsed = performance.now() - az._deathSlumpStart;
+      const rawT = Math.min(elapsed / DEATH_SLUMP_DURATION_MS, 1.0);
+      // Ease-out quadratic: fast start → decelerates to rest.
+      const t = 1 - (1 - rawT) * (1 - rawT);
+      az.root.rotation.z += DEATH_SLUMP_Z_RAD * t - (az._deathSlumpPrevZ || 0);
+      az.root.rotation.x += DEATH_SLUMP_X_RAD * t - (az._deathSlumpPrevX || 0);
+      az._deathSlumpPrevZ = DEATH_SLUMP_Z_RAD * t;
+      az._deathSlumpPrevX = DEATH_SLUMP_X_RAD * t;
+      az._deathSlumpApplied = true;
+    }
+
     /* ── resize handler ─────────────────────────────────────────── */
     // aspect-aware FOV: at portrait/narrow viewports we widen vertical FOV so
     // horizontal coverage stays constant (game is tuned for 16:9 landscape).
@@ -14161,6 +14218,11 @@
       // (so the sway is visible on this frame). No-op for any combatant
       // not in 'idle' state — attack/guard/hit/dead all skip cleanly.
       updateIdleBreathing(delta);
+      // r141: azure death body slump — additive root rotation lean that
+      // settles over 1.4 s ease-out when azure enters 'dead' state.
+      // Runs after updateIdleBreathing (which skips 'dead') so lean
+      // composes cleanly on top of the mixer's Death_A pose.
+      try { updateAzureDeathSlump(); } catch (e) { /* never break render loop */ }
       // Procedural cape secondary motion — runs AFTER mixers (so it
       // composes on top of the baked Idle hip sway) and BEFORE render.
       // capePhys lazily attaches once both knight GLBs are loaded; see
