@@ -5,6 +5,53 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Log Knight Battle — 3D vertical slice (iter 66)</title>
   <style>
+    /* ══════════════════════════════════════════════════════════════
+       Z-INDEX SPEC TABLE  —  r74 HUD audit (2026-06-25)
+       ──────────────────────────────────────────────────────────────
+       Add new overlays to the appropriate band. When two elements
+       share the same z-index, DOM source order determines paint order
+       (later element paints on top). Always verify spatial/temporal
+       disjoint before re-assigning a value.
+
+       z      element(s)                         role / notes
+       ─────  ─────────────────────────────────  ─────────────────────
+         5    #vignette                          full-screen radial vignette (bg atmosphere)
+        10    #vignette-bottom, #vignette-top-right  edge shadow anchors
+        20    #back-link, #mute-btn,             top-right chrome buttons (spatially disjoint)
+               #settings-btn, #hud,
+               #game-hud, #record-hud
+        22    #weather-pill, #fp-danger-vignette (r72) persistent low-HP red rim; below one-shot flashes
+        23    #fp-tg-warn                        amber telegraph vignette (r51); below hit flash
+        24    #fp-damage-vignette, #letterbox-*  hit flash vignette (r49); letterbox bars (r replay)
+        25    #ko-overlay, #fp-streak-hud,       KO text; FP streak; control hints; mp-bar;
+               #fp-control-hints, #mp-bar,        reticle; dmg-arrow; lock-bracket
+               #fp-reticle, #fp-dmg-arrow,
+               #fp-lock-bracket
+        26    #match-won-overlay, #fp-tg-alert,  match-won text; guard alert; charge ring; mp-toast
+               #charge-ring, #mp-toast
+        27    #match-hotkey-hint, #round-banner, rematch hint; round banner; dodge flash (r63)
+               #fp-dodge-flash
+        28    .dmg-floater, #fp-parry-flash      damage floaters (r57); parry flash (r52)
+        29    #combo-hud, #fp-parry-text         combo counter (r54); parry text (r52)
+        30    #match-intro-text, #desperate-flash, cinematic READY/FIGHT (r65); desperate burst (r73);
+               #charge-impact-flash, #loading     heavy-impact flash (r55); loading screen (startup)
+        31    #fp-edge-blur                      tier-2 motion blur; above charge-impact-flash (30)
+        40    #roster-popup                      opponent picker dropdown
+        50    #fp-lock-hint                      FP pointer-lock instruction hint
+        60    .exhaust-pill                      stamina-exhausted toast
+        80    .opponent-pill                     opponent-change announcement pill
+        95    #settings-backdrop                 settings modal backdrop
+       100    #settings-panel                    settings modal panel
+      9999    JS error overlay (inline style)    emergency / debug only
+       ──────────────────────────────────────────────────────────────
+       NOTE: #cinema-toggle, #view-toggle, #roster-toggle share z-30
+       with three full-screen elements (loading, match-intro, charge-
+       impact-flash). No collision: buttons are top-right corner (12px
+       tall strip), full-screen elements are semi-transparent. DOM
+       order ensures full-screen elements (declared later) paint on
+       top when active, which is correct.
+       ══════════════════════════════════════════════════════════════ */
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
@@ -804,9 +851,9 @@
     /* ── combo counter HUD (r54) ──────────────────────────────── */
     /* Displays "×N HIT" when the player lands 2+ consecutive unguarded
        hits on azure within 1.5s. Crimson-accent palette; sits at bottom-
-       center, z-index 29 — above damage floaters (28) and below KO (25).
-       We intentionally invert z-order perception: kombo is ephemeral
-       pop; match text is persistent. Both read cleanly. */
+       center, z-index 29 — above damage floaters (28) and above KO (25).
+       Combo is bottom-18% and KO is vertically centered so they never
+       overlap; the different z values only matter if layout ever shifts. */
     #combo-hud {
       position: fixed;
       bottom: 18%;
@@ -858,11 +905,9 @@
     }
 
     /* ── cinematic letterbox bars (KO_REPLAY slow-mo) ─────────── */
-    /* z-index 95 — above all HUD layers (max 80) but below settings panel
-       (95 backdrop / 100 panel) and below KO / MATCH WON text (25-26).
-       Wait — KO/MATCH WON are z-index 25-26 which is below 95.  We want
-       bars ABOVE the canvas/HUD but BELOW the match text overlays, so
-       z-index 24 keeps them sandwiched correctly. */
+    /* z-index 24 — above the 3D canvas and base HUD (z-20), but below
+       KO / MATCH WON overlays (z-25/26) so match text always reads over
+       the bars. Also below settings panel (z-95/100). */
     #letterbox-top,
     #letterbox-bottom {
       position: fixed;
