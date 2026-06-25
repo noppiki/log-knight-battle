@@ -12187,6 +12187,24 @@
             console.warn('[lkb-3d] HUD update threw', err);
           }
 
+          // r157: azure post-attack recovery breath — a brief "ハッ" exhale
+          // audible ~500ms after impact to signal azure returning to guard.
+          // Only fires for azure as attacker on a non-double-strike swing.
+          // 180Hz triangle 100ms vol 0.025 — distinct from r137 idle breath
+          // (150Hz 200ms) so the two never sound identical.
+          if (attackerLabel === 'azure' &&
+              swingAttacker._aiPattern !== 'double') {
+            const _breathSwing = mySwing;
+            setTimeout(() => {
+              if (swingAttacker._swingId !== _breathSwing) return; // cancelled / superseded
+              if (window._gamePaused) return;
+              if (window.gameState[attackerLabel] && window.gameState[attackerLabel].dead) return;
+              try {
+                tone({ freq: 180, freq2: 120, dur: 0.10, type: 'triangle', vol: 0.025, attack: 0.015 });
+              } catch (e) {}
+            }, 500);
+          }
+
           // r62: double strike — chain a 2nd attack after a 300ms gap.
           // Bump swingId immediately to cancel the 105%-dur idle-restore
           // below (the new id will be used for the follow-up instead).
