@@ -111,6 +111,37 @@
       text-transform: uppercase;
     }
 
+    /* ── CINEMA mode toggle (auto camera cycle) ──────────────────
+       Lives top-right of the canvas. pointer-events:auto so clicks
+       land (parent #hud has pointer-events:none — overridden here). */
+    #cinema-toggle {
+      position: fixed;
+      top: 14px;
+      right: 18px;
+      z-index: 30;
+      pointer-events: auto;
+      cursor: pointer;
+      user-select: none;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.8);
+      border-radius: 4px;
+      padding: 6px 12px;
+      font: bold 11px/1.2 system-ui, -apple-system, sans-serif;
+      letter-spacing: 0.08em;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #cinema-toggle.off {
+      color: #8a8070;
+      border-color: rgba(120, 110, 90, 0.5);
+    }
+    #cinema-toggle:hover {
+      background: rgba(40, 30, 20, 0.95);
+      border-color: rgba(255, 196, 120, 1);
+    }
+
     /* ── game HUD (HP/SP gauges, engraved player labels, VS badge) ─
        Sits on top of the canvas, z-index above the vignette but below
        the loading overlay. Pointer-events: none on the wrapper so the
@@ -463,6 +494,9 @@
     <div class="label">iter 66 vertical slice</div>
     crimson astride · drag to rotate
   </div>
+
+  <!-- CINEMA mode toggle — auto camera cycle on/off. JS wires click. -->
+  <button id="cinema-toggle" type="button" title="Toggle automatic camera cycle">&#x1F3A5; CYCLE: ON</button>
 
   <!-- Game HUD: HP/SP gauges + engraved player labels + VS badge.
        JS keeps window.gameState in sync; CSS bars read width from
@@ -1416,6 +1450,181 @@
     controls.autoRotate      = true;
     controls.autoRotateSpeed = 0.0; // static for capture clarity
     controls.update();
+
+    /* ── CINEMA director — cycles four preset shots ───────────────
+       Breaks the static side-view with a directed cycle:
+         A (SIDE_WIDE) → B (CLOSE_CRIMSON) → A → C (CLOSE_AZURE) →
+         A → D (HIGH_WIDE) → A → ...
+       Each "hold" is 4.5 s; transitions ease in/out over 0.9 s.
+
+       OWNERSHIP MODEL — IMPORTANT:
+       The ImpactSystem (combat shake) toggles `controls.enabled` for
+       its own bookkeeping (disable during 0.18 s shake, re-enable on
+       expiry — see lines ~1722 / ~1798). We do NOT infer cinema state
+       from `controls.enabled`; instead, an independent flag
+       `cinemaDirector.active` is the single source of truth. The
+       per-frame branch in animate() reasserts ownership: in cinema
+       mode the director writes camera.position + camera.lookAt and
+       skips `controls.update()` entirely (orbit's spherical solver
+       would otherwise overwrite our pose every frame). In manual mode
+       the director sleeps and `controls.update()` runs normally. */
+    const CINEMA_SHOTS = {
+      SIDE_WIDE:     { pos: new THREE.Vector3(0,    2.0, -7.0), look: new THREE.Vector3( 0,   1.1, 0) },
+      CLOSE_CRIMSON: { pos: new THREE.Vector3(-3.5, 0.9, -3.5), look: new THREE.Vector3(-2.0, 1.2, 0) },
+      CLOSE_AZURE:   { pos: new THREE.Vector3( 3.5, 0.9, -3.5), look: new THREE.Vector3( 2.0, 1.2, 0) },
+      HIGH_WIDE:     { pos: new THREE.Vector3(0,    5.5, -4.5), look: new THREE.Vector3( 0,   0.7, 0) },
+    };
+
+    class CameraDirector {
+      constructor(camera, controls, shots) {
+        this.camera   = camera;
+        this.controls = controls;
+        this.shots    = shots;     // cycle list: [A,B,A,C,A,D]
+        this.active   = true;      // independent of controls.enabled
+        this.state    = 'holding'; // 'holding' | 'transitioning'
+        this.holdTime       = 4.5;
+        this.transitionTime = 0.9;
+        this.elapsed        = 0;   // timer for current state
+        this.currentIndex   = 0;
+
+        // Working pose + travel anchors.
+        this.fromPos    = shots[0].pos.clone();
+        this.fromLook   = shots[0].look.clone();
+        this.toPos      = shots[0].pos.clone();
+        this.toLook     = shots[0].look.clone();
+        this.currentLookAt = shots[0].look.clone();
+
+        // Combat-sync override: when set, we ignore the cycle and
+        // hold the override shot until cleared. Cleared on idle return.
+        this._override = null; // { pos, look, reason } | null
+
+        // Seed camera at first shot so the very first frame is correct.
+        this.camera.position.copy(this.fromPos);
+        this.camera.lookAt(this.currentLookAt);
+      }
+
+      // ease in/out cubic — t in [0,1]
+      static easeInOutCubic(t) {
+        return t < 0.5
+          ? 4 * t * t * t
+          : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      }
+
+      // Begin transition from current pose to the next cycle shot.
+      _beginTransitionTo(targetShot) {
+        this.fromPos.copy(this.camera.position);
+        this.fromLook.copy(this.currentLookAt);
+        this.toPos.copy(targetShot.pos);
+        this.toLook.copy(targetShot.look);
+        this.state   = 'transitioning';
+        this.elapsed = 0;
+      }
+
+      // Combat sync: jump immediately to a named shot (kills any hold,
+      // begins a fresh transition). reason is a label for diagnostics.
+      jumpTo(shot, reason) {
+        if (!this.active) return;
+        this._override = { shot, reason };
+        this._beginTransitionTo(shot);
+      }
+
+      // Clear combat override and resume cycle from current index.
+      clearOverride() {
+        if (!this._override) return;
+        this._override = null;
+        this._beginTransitionTo(this.shots[this.currentIndex]);
+      }
+
+      setActive(on) {
+        this.active = !!on;
+        if (this.active) {
+          // Returning to cinema — sync orbit's notion of "target" so
+          // when we eventually hand back, the view does not jump.
+          this.controls.target.copy(this.currentLookAt);
+          // Re-seat from current camera so first transition is smooth.
+          this.fromPos.copy(this.camera.position);
+          this.fromLook.copy(this.currentLookAt);
+          this.state   = 'holding';
+          this.elapsed = 0;
+        } else {
+          // Handing back to OrbitControls — adopt our last lookAt as
+          // its target so the first user drag does not snap.
+          this.controls.target.copy(this.currentLookAt);
+          this.controls.update();
+        }
+      }
+
+      update(delta) {
+        if (!this.active) return;
+
+        if (this.state === 'holding') {
+          // While holding, camera sits exactly at toPos / toLook.
+          this.camera.position.copy(this.toPos);
+          this.currentLookAt.copy(this.toLook);
+          this.elapsed += delta;
+          // Overrides bypass hold expiry — they sit on the close-up
+          // until clearOverride() (or a new jumpTo) is invoked.
+          if (!this._override && this.elapsed >= this.holdTime) {
+            this.currentIndex = (this.currentIndex + 1) % this.shots.length;
+            this._beginTransitionTo(this.shots[this.currentIndex]);
+          }
+          return;
+        }
+
+        // 'transitioning' — ease pos + look over transitionTime.
+        this.elapsed += delta;
+        const raw = Math.min(this.elapsed / this.transitionTime, 1.0);
+        const t   = CameraDirector.easeInOutCubic(raw);
+        this.camera.position.lerpVectors(this.fromPos, this.toPos, t);
+        this.currentLookAt.lerpVectors(this.fromLook, this.toLook, t);
+
+        if (raw >= 1.0) {
+          this.state   = 'holding';
+          this.elapsed = 0;
+        }
+      }
+    }
+
+    // Cycle order: A → B → A → C → A → D (loops back to A).
+    const cameraDirector = new CameraDirector(camera, controls, [
+      CINEMA_SHOTS.SIDE_WIDE,
+      CINEMA_SHOTS.CLOSE_CRIMSON,
+      CINEMA_SHOTS.SIDE_WIDE,
+      CINEMA_SHOTS.CLOSE_AZURE,
+      CINEMA_SHOTS.SIDE_WIDE,
+      CINEMA_SHOTS.HIGH_WIDE,
+    ]);
+    // Start in cinema mode → orbit input gated off.
+    controls.enabled = false;
+
+    // Manual-takeover: any pointer-down on the canvas drops cinema and
+    // hands control to OrbitControls. The 🎥 button re-arms it. We bind
+    // to the renderer canvas (not window) so HUD clicks don't trigger.
+    renderer.domElement.addEventListener('pointerdown', () => {
+      if (cameraDirector.active) {
+        cameraDirector.setActive(false);
+        controls.enabled = true;
+        const btn = document.getElementById('cinema-toggle');
+        if (btn) {
+          btn.textContent = '🎥 CYCLE: OFF';
+          btn.classList.add('off');
+        }
+      }
+    });
+
+    // 🎥 toggle button — flips cinema on/off. When turning ON, we also
+    // disable orbit input; when OFF, we re-enable it so the user can
+    // drag freely (consistent with the pointer-down path above).
+    const cinemaBtn = document.getElementById('cinema-toggle');
+    if (cinemaBtn) {
+      cinemaBtn.addEventListener('click', () => {
+        const next = !cameraDirector.active;
+        cameraDirector.setActive(next);
+        controls.enabled = !next;
+        cinemaBtn.textContent = next ? '🎥 CYCLE: ON' : '🎥 CYCLE: OFF';
+        cinemaBtn.classList.toggle('off', !next);
+      });
+    }
 
     /* ── post-processing chain (EffectComposer) ────────────────── */
     // Render → SSAO → Bloom → SMAA → Output
@@ -2393,6 +2602,11 @@
     // Shared elapsed time accumulator for campfire flicker + ember wobble.
     let _sceneTime = 0;
 
+    // Combat-sync bookkeeping for CameraDirector — tracks last seen
+    // combat snapshot so jump-to-close-up fires only on state edges
+    // (not every frame). Reset when override clears.
+    let _lastCombatKey = null;
+
     function animate() {
       requestAnimationFrame(animate);
       // SAFETY GUARD: reset camera if it has drifted out of the playable bowl.
@@ -2419,8 +2633,61 @@
       }
       updateDust(delta);
       updateEmbers(delta, time);
-      controls.update(); // needed for damping (recomputes camera.position)
-      // Run impact FX AFTER controls so camera-shake jitter wins this frame.
+
+      // ── CINEMA: combat sync ─────────────────────────────────────
+      // Poll combat state and translate edges into director overrides:
+      //   any knight 'dead'    → jump to HIGH_WIDE for KO drama
+      //   any knight 'attack'  → jump to CLOSE_<attacker> close-up
+      //   otherwise            → clear override, resume cycle
+      // Only fires when active and only on edges (key change), so the
+      // director keeps cycling normally when nothing is happening.
+      if (cameraDirector.active && combatants) {
+        const cKnight = combatants.crimson;
+        const aKnight = combatants.azure;
+        const cState  = cKnight ? cKnight.state : null;
+        const aState  = aKnight ? aKnight.state : null;
+        let key  = null;
+        let shot = null;
+        if (cState === 'dead' || aState === 'dead') {
+          key  = 'ko';
+          shot = CINEMA_SHOTS.HIGH_WIDE;
+        } else if (cState === 'attack') {
+          key  = 'atk:crimson';
+          shot = CINEMA_SHOTS.CLOSE_CRIMSON;
+        } else if (aState === 'attack') {
+          key  = 'atk:azure';
+          shot = CINEMA_SHOTS.CLOSE_AZURE;
+        }
+        if (key !== _lastCombatKey) {
+          if (shot) {
+            cameraDirector.jumpTo(shot, key);
+          } else {
+            cameraDirector.clearOverride();
+          }
+          _lastCombatKey = key;
+        }
+      }
+
+      // ── CINEMA: per-frame camera ownership ──────────────────────
+      // In cinema mode the director owns position + lookAt; we SKIP
+      // controls.update() entirely because OrbitControls.update()
+      // rewrites camera.position from its internal spherical state
+      // every frame and would erase the director's pose.
+      // In manual mode the director sleeps and controls.update() runs
+      // normally to drive damping. Note: the ImpactSystem briefly
+      // disables controls.enabled during a shake (~0.18 s); we do NOT
+      // infer cinema state from that flag — cameraDirector.active is
+      // the single source of truth (see CameraDirector ownership doc).
+      if (cameraDirector.active) {
+        cameraDirector.update(delta);
+        camera.lookAt(cameraDirector.currentLookAt);
+      } else {
+        controls.update(); // damping (recomputes camera.position)
+      }
+
+      // Run impact FX AFTER camera ownership so camera-shake jitter
+      // wins this frame (its 0.18 s additive offset lands on top of
+      // either the director pose or the orbit-driven pose).
       impactSystem.update(delta);
       // NOTE: camera punch additive offset DISABLED (round-13 regression).
       // impactSystem.update() now forces punchOffset to (0,0,0); we also do
