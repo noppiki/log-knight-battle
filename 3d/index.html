@@ -6524,6 +6524,83 @@
     // back to whatever the lerp has set, so no conflict. resetMatch nulls
     // _azureShieldMat so the next round re-finds the mesh from the fresh GLB scene.
     let _azureShieldMat = null;   // cached material; null forces re-search on next call
+
+    // ── r144: azure helm slit eye glow blink ─────────────────────────────────
+    // r123 sets Knight_Head emissiveIntensity to a constant 0.08 cyan rim.
+    // This scheduler brightens it briefly (0.08→peak→0.08, 150 ms sin curve)
+    // every 6-10 s to simulate an eye-slit glow blink — "boss is watching you".
+    // Non-conflict strategy: only START a blink when emissiveIntensity is within
+    // 0.005 of the 0.08 baseline; this naturally skips desperate/hit-glow/winner
+    // states without enumerating every flag. If a blink is already in-flight and
+    // the state breaks (attack/hit/dead/desperate/winner), force-restore to baseline.
+    let _azureHelmMat        = null;  // cached knight_head material
+    let _helmBlinkNextAt     = 0;     // epoch-ms target; 0 = unscheduled
+    let _helmBlinkActive     = false;
+    let _helmBlinkStartMs    = 0;
+    const HELM_BLINK_DURATION_MS = 150;
+    const HELM_BLINK_BASE        = 0.08;
+    const HELM_BLINK_PEAK        = 0.15;
+    const HELM_BLINK_EPSILON     = 0.005; // proximity to baseline that allows blink start
+
+    function scheduleNextHelmBlink() {
+      _helmBlinkNextAt = performance.now() + 6000 + Math.random() * 4000;
+    }
+    function updateAzureHelmBlink() {
+      // Lazy-bind: find Knight_Head emissive material once, reuse forever.
+      if (!_azureHelmMat) {
+        const azRoot = combatants && combatants.azure && combatants.azure.root;
+        if (!azRoot) return;
+        azRoot.traverse((o) => {
+          if (_azureHelmMat || !o.isMesh || !o.material) return;
+          if (!/knight_head/i.test(o.name)) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          for (const m of mats) {
+            if (m.emissive) { _azureHelmMat = m; break; }
+          }
+        });
+        if (!_azureHelmMat) return;
+      }
+      const az = combatants && combatants.azure;
+      if (!az) return;
+      const state = az.state;
+      const isAllowedState = (state === 'idle' || state === 'guard');
+
+      if (_helmBlinkActive) {
+        // If we're mid-blink but state broke or a dramatic system is driving
+        // the material above near-baseline, force-restore and cancel.
+        if (!isAllowedState) {
+          _helmBlinkActive = false;
+          _azureHelmMat.emissiveIntensity = HELM_BLINK_BASE;
+          scheduleNextHelmBlink();
+          return;
+        }
+        const now = performance.now();
+        const t = (now - _helmBlinkStartMs) / HELM_BLINK_DURATION_MS;
+        if (t >= 1) {
+          _helmBlinkActive = false;
+          _azureHelmMat.emissiveIntensity = HELM_BLINK_BASE;
+          scheduleNextHelmBlink();
+          return;
+        }
+        // Sin-wave envelope: peak at t=0.5 for a smooth in-out flash.
+        _azureHelmMat.emissiveIntensity =
+          HELM_BLINK_BASE + (HELM_BLINK_PEAK - HELM_BLINK_BASE) * Math.sin(t * Math.PI);
+        return;
+      }
+
+      if (!isAllowedState) return;
+      // Arm scheduler on first tick.
+      if (_helmBlinkNextAt === 0) { scheduleNextHelmBlink(); return; }
+      if (performance.now() < _helmBlinkNextAt) return;
+      // Only start if no dramatic system is currently driving the material.
+      if (Math.abs(_azureHelmMat.emissiveIntensity - HELM_BLINK_BASE) > HELM_BLINK_EPSILON) {
+        scheduleNextHelmBlink(); // retry later
+        return;
+      }
+      _helmBlinkActive  = true;
+      _helmBlinkStartMs = performance.now();
+    }
+
     function updateAzureShieldGlow() {
       if (!_azureShieldMat) {
         const az = combatants && combatants.azure && combatants.azure.root;
@@ -10052,6 +10129,10 @@
       }
       // r111: reset glint scheduler so next round starts fresh without a stale timer.
       _glintNextAt = 0;
+      // r144: reset helm blink scheduler and cancel any in-flight blink.
+      _helmBlinkNextAt  = 0;
+      _helmBlinkActive  = false;
+      if (_azureHelmMat) _azureHelmMat.emissiveIntensity = HELM_BLINK_BASE;
       // r91: stop round timer immediately on any reset so it never leaks into the next round.
       try { stopRoundTimer(); } catch (e) {}
       // r78: if a finisher cinematic is still running on reset (R hotkey mid-cinematic),
@@ -14572,6 +14653,9 @@
       // r125: azure shield cyan rim glow on guard — lerp emissive toward 0.12 while
       // az.state === 'guard', else lerp back to 0. Visual cue: "enemy is blocking".
       try { updateAzureShieldGlow(); } catch (e) { /* never break the render loop */ }
+      // r144: azure helm slit eye glow blink — Knight_Head emissiveIntensity pulses
+      // 0.08→0.15→0.08 over 150 ms on a 6-10 s random interval (idle/guard only).
+      try { updateAzureHelmBlink(); } catch (e) { /* never break the render loop */ }
       // r139: azure HP-linked mesh brightness shift — dims envMapIntensity as HP falls.
       try { updateAzureHpBrightness(); } catch (e) { /* never break the render loop */ }
       // r76: dodge cooldown progress indicator — O(1) DOM attribute set.
