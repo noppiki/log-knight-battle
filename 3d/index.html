@@ -911,6 +911,28 @@
       transition: opacity 400ms linear;
     }
 
+    /* FP damage direction arrow — rotates to point toward the attacker's
+       world direction on player HP loss in FP mode. Opacity driven by
+       flashDmgArrow(); pointer-events: none so it never blocks input.
+       z-index 25 (above the vignette at 24). Arrow glyph "▲" always
+       starts at top (rotate(0deg) = forward → attacker ahead).
+       The translate(-50%, -50%) centers it on the anchor point. */
+    #fp-dmg-arrow {
+      position: fixed;
+      left: 50%;
+      top: calc(50% - 80px);
+      transform: translate(-50%, -50%) rotate(0deg);
+      pointer-events: none;
+      z-index: 25;
+      opacity: 0;
+      font-size: 52px;
+      line-height: 1;
+      color: rgba(255, 48, 48, 0.90);
+      text-shadow: 0 0 14px rgba(255, 0, 0, 0.75), 0 0 4px rgba(0, 0, 0, 0.9);
+      transition: opacity 250ms ease-out;
+      will-change: opacity, transform;
+    }
+
     /* Stamina (STM) bar — sits directly under the SP bar. Same chassis
        as .sp-bar (300×8 px, inset shadow, dark border) but a green-
        gradient fill so it reads as a separate resource at a glance.
@@ -1306,6 +1328,10 @@
   <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
        JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
   <div id="fp-damage-vignette"></div>
+
+  <!-- FP damage direction arrow — rotates toward attacker on player HP loss.
+       flashDmgArrow(yawRad) sets the CSS rotation then fades to 0 over 0.6s. -->
+  <div id="fp-dmg-arrow">▲</div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -4117,6 +4143,8 @@
     const FpPolish = {
       reticleEl:        document.getElementById('fp-reticle'),
       vignetteEl:       document.getElementById('fp-damage-vignette'),
+      dmgArrowEl:       document.getElementById('fp-dmg-arrow'),
+      dmgArrowTimer:    0,
       vignetteFadeTimer: 0,
       fovPunch: {
         active:  false,
@@ -4150,6 +4178,78 @@
       FpPolish.vignetteFadeTimer = setTimeout(() => {
         FpPolish.vignetteFadeTimer = 0;
       }, 400);
+    }
+
+    // flashDmgArrow — show the directional damage arrow pointing toward the
+    // attacker (azure, always on the +X side) for 600ms then fade out.
+    // The arrow glyph "▲" starts pointing up (rotate 0 = forward/north in
+    // CSS). We need the angle from camera-forward to world +X (azure's side)
+    // on the horizontal plane.
+    //
+    // Camera uses YXZ Euler order so camera.rotation.y === fpYaw.
+    // Camera forward in world space = (-sin(fpYaw), 0, -cos(fpYaw)).
+    // World +X in camera's horizontal frame:
+    //   dot  = -sin(fpYaw)   (x-component of forward dotted with +X)
+    //   cross-y = +cos(fpYaw) (right-hand cross: forward × +X).y = -(-cos) = cos
+    // angle = atan2(cross.y, dot) = atan2(cos(fpYaw), -sin(fpYaw))
+    //       = atan2(cos(fpYaw), -sin(fpYaw))
+    // Simplified: this equals (π/2 + fpYaw) modulo 2π.
+    // Sanity: fpYaw=0 (looking +X, straight at azure) → angle=π/2?
+    //   No wait — fpYaw=0 means forward = (-sin0, _, -cos0) = (0,_,-1) = world -Z.
+    //   That means facing away from azure (+X). So fpYaw starts at atan2(-dx,-dz).
+    //   The seed at line 3731: fpYaw = atan2(-_dx, -_dz) for _dx = azure.x-crimson.x = ~+4 → fpYaw ≈ atan2(-4, ~0) ≈ -π/2.
+    //   At fpYaw ≈ -π/2 (looking +X at azure): angle = atan2(cos(-π/2), -sin(-π/2)) = atan2(0, 1) = 0 → arrow points up. ✓
+    //   At fpYaw ≈ -π (looking -X, back to azure): angle = atan2(cos(-π), -sin(-π)) = atan2(-1, 0) = -π/2... hmm let's re-check.
+    //   Actually arrow should point down when looking directly away from azure.
+    //   atan2(-1, 0) = -π/2 → rotate(-90deg) → arrow points left. Not exactly ↓.
+    //   Better formula: rotateAngle = -fpYaw - π/2 so that:
+    //     fpYaw=-π/2 (looking at azure) → -(-π/2)-π/2 = π/2-π/2 = 0 → up ✓
+    //     fpYaw=0 (looking -Z, azure is 90° to left in FP) → 0-π/2 = -π/2 → arrow rotates left ✓
+    //     fpYaw=-π (looking away from azure) → π-π/2 = π/2 → arrow points right… not ↓.
+    //   Simplest correct derivation: angle = atan2(sin(fpYaw + π/2), cos(fpYaw + π/2)) = fpYaw + π/2.
+    //   No: we want arrow pointing at azure (world +X). CSS rotate is clockwise from top.
+    //   Camera yaw in THREE YXZ: rotation.y = fpYaw, meaning camera rotates fpYaw rad around world Y.
+    //   Camera's right vector: (cos(fpYaw), 0, -sin(fpYaw)).
+    //   Camera's forward vec:  (-sin(fpYaw), 0, -cos(fpYaw)).
+    //   To find world +X relative to camera-forward in screen space:
+    //     screen-right  = dot(+X, cam_right)  = cos(fpYaw)
+    //     screen-up     = dot(+X, cam_forward) = -sin(fpYaw)   [forward is "screen up" = away from us]
+    //   CSS rotate from ↑: clockwise angle = atan2(screen-right, screen-up)
+    //                                       = atan2(cos(fpYaw), -sin(fpYaw))
+    //   Sanity fpYaw=-π/2: atan2(cos(-π/2), -sin(-π/2)) = atan2(0, 1) = 0 → ↑ ✓ (azure dead ahead)
+    //   Sanity fpYaw=0   : atan2(cos(0),    -sin(0))    = atan2(1, 0) = π/2 → right ✓ (azure is to camera's left when fpYaw=0?)
+    //     Wait — fpYaw=0 means cam forward = (0,0,-1) = world -Z. Azure is at +X. From -Z facing, +X is to the LEFT.
+    //     CSS rotate π/2 = arrow points RIGHT. That's the opposite. Off by sign on screen-right.
+    //   Correction: screen-right = dot(+X, cam_right) = cos(fpYaw). But leftward on screen is negative.
+    //     With fpYaw=0: cam_right = (1,0,0) = +X, screen-right = 1.
+    //     But azure is to screen-LEFT, so we need screen-left. So sign flip: screenX = -cos(fpYaw).
+    //     CSS angle = atan2(-cos(fpYaw), -sin(fpYaw)).
+    //   Sanity fpYaw=0: atan2(-1, 0) = -π/2 → CSS rotate(-90deg) → arrow points LEFT ✓
+    //   Sanity fpYaw=-π/2: atan2(-cos(-π/2), -sin(-π/2)) = atan2(0, 1) = 0 → ↑ ✓ (facing azure)
+    //   Sanity fpYaw=π/2: atan2(-cos(π/2), -sin(π/2)) = atan2(0, 1)... wait cos(π/2)=0, sin(π/2)=1 → atan2(0,-1) = π → ↓
+    //     fpYaw=π/2 means cam_forward = (-sin(π/2), _, -cos(π/2)) = (-1,_,0) = world -X. Azure behind → ↓ ✓
+    // Final formula: arrowDeg = atan2(-cos(fpYaw), -sin(fpYaw)) * 180/π
+    function flashDmgArrow() {
+      const el = FpPolish.dmgArrowEl;
+      if (!el || !cameraDirector) return;
+      const yaw = cameraDirector.fpYaw;
+      const angleDeg = Math.atan2(-Math.cos(yaw), -Math.sin(yaw)) * (180 / Math.PI);
+      // Clear any pending fade timer so a rapid second hit re-arms cleanly.
+      if (FpPolish.dmgArrowTimer) {
+        clearTimeout(FpPolish.dmgArrowTimer);
+        FpPolish.dmgArrowTimer = 0;
+      }
+      // Kill transition for one frame so opacity jumps to 1 instantly,
+      // then restore it for the smooth 600ms fade-out (mirrors flashDamageVignette).
+      el.style.transition = 'none';
+      el.style.opacity    = '1';
+      el.style.transform  = `translate(-50%, -50%) rotate(${angleDeg}deg)`;
+      void el.offsetWidth; // force reflow
+      el.style.transition = 'opacity 600ms ease-out';
+      el.style.opacity    = '0';
+      FpPolish.dmgArrowTimer = setTimeout(() => {
+        FpPolish.dmgArrowTimer = 0;
+      }, 600);
     }
 
     // triggerFovPunch — kick FOV from rest → peak over 0.08s, then back
@@ -6112,6 +6212,7 @@
           cameraDirector && cameraDirector.viewMode === 'fp') {
         if (!guardAbsorbed) {
           flashDamageVignette();
+          flashDmgArrow();
           // Augmented hit-take shake — replaces the default 0.06/0.18 shake
           // applied by ImpactSystem.spawn with a stronger 0.10/0.25 kick so
           // a personal hit reads heavier than third-person impact shakes.
