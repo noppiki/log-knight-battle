@@ -516,6 +516,67 @@
     #fp-lock-hint.visible {
       opacity: 1;
     }
+
+    /* FP aim reticle — small bone-colored crosshair, centered. Visible
+       only when viewMode==='fp' AND pointer is locked. JS toggles the
+       .visible class (see refreshFpOverlays). Pointer-events: none
+       keeps it from blocking canvas hits. */
+    #fp-reticle {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
+      z-index: 25;
+      opacity: 0;
+      transition: opacity 120ms ease-out;
+    }
+    #fp-reticle.visible {
+      opacity: 1;
+    }
+    /* Horizontal bar — 12x2 px, 1px dark inset shadow for visibility
+       against bright backgrounds. PAL.bone = rgba(232,220,192,0.85). */
+    #fp-reticle::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 12px;
+      height: 2px;
+      background: rgba(232, 220, 192, 0.85);
+      box-shadow: 0 0 0 1px rgba(12, 8, 6, 0.65);
+    }
+    /* Vertical bar — 2x12 px. */
+    #fp-reticle::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 2px;
+      height: 12px;
+      background: rgba(232, 220, 192, 0.85);
+      box-shadow: 0 0 0 1px rgba(12, 8, 6, 0.65);
+    }
+
+    /* FP red damage vignette — radial gradient flash on player HP loss.
+       Opacity is driven by JS flashDamageVignette() (1.0 → 0 over 0.4s
+       via CSS transition). Pointer-events: none so it never blocks input. */
+    #fp-damage-vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 24;
+      opacity: 0;
+      background: radial-gradient(ellipse at center,
+        transparent 30%,
+        rgba(180, 30, 30, 0.55) 80%,
+        rgba(110, 10, 10, 0.85) 100%);
+      transition: opacity 400ms linear;
+    }
   </style>
 
   <script type="importmap">
@@ -601,6 +662,15 @@
        pointer is NOT locked. Click on the canvas grabs the lock; ESC
        releases. JS toggles .visible based on pointerlockchange + viewMode. -->
   <div id="fp-lock-hint">&#x1F3AF; click to aim &mdash; ESC to release</div>
+
+  <!-- FP aim reticle — bone-colored crosshair, visible only when
+       viewMode==='fp' AND pointer IS locked. Toggled together with
+       the lock hint by refreshFpOverlays(). -->
+  <div id="fp-reticle"></div>
+
+  <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
+       JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
+  <div id="fp-damage-vignette"></div>
 
   <!-- ── WebAudio block (verbatim port from 2D index.html) ─────────
        Plain (non-module) script so all SFX/BGM helpers live on the
@@ -1945,16 +2015,113 @@
     const FP_PITCH_MAX  =  Math.PI / 2 - 0.05;
     const fpLockHint = document.getElementById('fp-lock-hint');
 
-    function refreshFpLockHint() {
-      if (!fpLockHint) return;
-      // Hint visible iff (FP mode && pointer not locked).
-      const show = cameraDirector.viewMode === 'fp' && !window._mouseLocked;
-      fpLockHint.classList.toggle('visible', show);
+    // FpPolish — module-scope state for the FP polish overlays + FOV punch.
+    // Centralizes the reticle / damage-vignette DOM refs and the FOV-punch
+    // tween state so playerAttack(), applyDamage, and refreshFpOverlays
+    // share one source of truth. fovPunch.restFov is captured from
+    // FP_SHOT.fov so we always restore to the canonical FP baseline,
+    // not whatever the camera happened to be at when the punch started.
+    const FpPolish = {
+      reticleEl:        document.getElementById('fp-reticle'),
+      vignetteEl:       document.getElementById('fp-damage-vignette'),
+      vignetteFadeTimer: 0,
+      fovPunch: {
+        active:  false,
+        phase:   'in',   // 'in' (75→82 over inDur) | 'out' (82→75 over outDur)
+        elapsed: 0,
+        inDur:   0.08,
+        outDur:  0.18,
+        restFov: FP_SHOT.fov,
+        peakFov: FP_SHOT.fov + 7,  // 75 → 82
+      },
+    };
+
+    // flashDamageVignette — kick the red vignette to opacity 1 immediately
+    // then let CSS transition fade it back to 0 over 0.4s. We clear any
+    // pending fade-back so a rapid second hit re-triggers cleanly.
+    function flashDamageVignette() {
+      const el = FpPolish.vignetteEl;
+      if (!el) return;
+      if (FpPolish.vignetteFadeTimer) {
+        clearTimeout(FpPolish.vignetteFadeTimer);
+        FpPolish.vignetteFadeTimer = 0;
+      }
+      // Force an instant jump to 1 by killing the transition for one frame,
+      // then re-enable it and lerp back to 0 (CSS transition: opacity 400ms).
+      el.style.transition = 'none';
+      el.style.opacity = '1';
+      // Force reflow so the next style change picks up the new starting value.
+      void el.offsetWidth;
+      el.style.transition = '';
+      el.style.opacity = '0';
+      FpPolish.vignetteFadeTimer = setTimeout(() => {
+        FpPolish.vignetteFadeTimer = 0;
+      }, 400);
     }
+
+    // triggerFovPunch — kick FOV from rest → peak over 0.08s, then back
+    // over 0.18s. Total ~0.26s. The per-frame tween runs inside animate()
+    // via updateFovPunch(); we just arm the state here.
+    function triggerFovPunch() {
+      // Re-arm cleanly even if a previous punch is still tweening — restart
+      // from the 'in' phase so the player always sees a fresh kick.
+      FpPolish.fovPunch.active  = true;
+      FpPolish.fovPunch.phase   = 'in';
+      FpPolish.fovPunch.elapsed = 0;
+    }
+
+    // updateFovPunch — per-frame FOV interpolation, called from animate().
+    // Only mutates camera.fov when viewMode === 'fp' so cinematic / manual
+    // cameras keep their own fov baseline. On finish we restore the rest
+    // FOV exactly and call updateProjectionMatrix once.
+    function updateFovPunch(delta) {
+      const fp = FpPolish.fovPunch;
+      if (!fp.active) return;
+      if (cameraDirector.viewMode !== 'fp') {
+        // Bail without further fov writes — the punch is FP-only.
+        fp.active = false;
+        return;
+      }
+      fp.elapsed += delta;
+      let newFov;
+      if (fp.phase === 'in') {
+        const t = Math.min(fp.elapsed / fp.inDur, 1.0);
+        newFov = fp.restFov + (fp.peakFov - fp.restFov) * t;
+        if (t >= 1.0) {
+          fp.phase   = 'out';
+          fp.elapsed = 0;
+        }
+      } else {
+        const t = Math.min(fp.elapsed / fp.outDur, 1.0);
+        newFov = fp.peakFov + (fp.restFov - fp.peakFov) * t;
+        if (t >= 1.0) {
+          newFov = fp.restFov;
+          fp.active = false;
+        }
+      }
+      camera.fov = newFov;
+      camera.updateProjectionMatrix();
+    }
+
+    // refreshFpOverlays — single source of truth for the FP HUD overlays.
+    // Lock hint is shown when FP mode is on AND pointer is NOT locked
+    // (the click-to-aim prompt). Reticle is the inverse — FP mode AND
+    // pointer IS locked (player is actively aiming). Renamed from
+    // refreshFpLockHint; the old name is kept as an alias below for
+    // any external callers.
+    function refreshFpOverlays() {
+      const isFp = cameraDirector.viewMode === 'fp';
+      const locked = !!window._mouseLocked;
+      if (fpLockHint) fpLockHint.classList.toggle('visible', isFp && !locked);
+      if (FpPolish.reticleEl) FpPolish.reticleEl.classList.toggle('visible', isFp && locked);
+    }
+    // Back-compat alias — any earlier code paths that referenced the old
+    // name keep working without a separate edit.
+    const refreshFpLockHint = refreshFpOverlays;
 
     document.addEventListener('pointerlockchange', () => {
       window._mouseLocked = (document.pointerLockElement === renderer.domElement);
-      refreshFpLockHint();
+      refreshFpOverlays();
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -1975,9 +2142,9 @@
     const _origSetViewMode = cameraDirector.setViewMode.bind(cameraDirector);
     cameraDirector.setViewMode = function (mode) {
       _origSetViewMode(mode);
-      refreshFpLockHint();
+      refreshFpOverlays();
     };
-    refreshFpLockHint();
+    refreshFpOverlays();
 
     // 🎥 toggle button — flips cinema on/off. When turning ON, we also
     // disable orbit input; when OFF, we re-enable it so the user can
@@ -2712,9 +2879,34 @@
       // Guard absorbs the hit — chip damage only (20%) plus a clang sfx
       // so the player feels the contact even though most of it is blocked.
       const defenderCombatant = combatants[defenderId];
+      let guardAbsorbed = false;
       if (defenderCombatant && defenderCombatant.state === 'guard' && amount > 0) {
         amount = Math.max(1, Math.floor(amount * 0.2));
+        guardAbsorbed = true;
         try { if (window.sfxClang) window.sfxClang(); } catch (e) {}
+      }
+      // FP polish — damage vignette + heavier personal shake when the player
+      // (crimson) loses HP in FP mode. Both fire BEFORE HP subtraction so a
+      // reading of s.hp here still reflects the actual incoming-damage state.
+      // Skip on full guard absorption (clang is enough); fire on chip damage
+      // only when amount > 0 (always true here since chip damage is min 1).
+      // We additionally skip the heavier shake on guard absorption to keep
+      // the gray-zone "clang" feedback distinct from a real HP-take hit.
+      if (defenderId === 'crimson' && amount > 0 &&
+          cameraDirector && cameraDirector.viewMode === 'fp') {
+        if (!guardAbsorbed) {
+          flashDamageVignette();
+          // Augmented hit-take shake — replaces the default 0.06/0.18 shake
+          // applied by ImpactSystem.spawn with a stronger 0.10/0.25 kick so
+          // a personal hit reads heavier than third-person impact shakes.
+          try {
+            if (impactSystem && impactSystem.shake) {
+              impactSystem.shake.amplitude = 0.10;
+              impactSystem.shake.remaining = 0.25;
+              impactSystem.shake.duration  = 0.25;
+            }
+          } catch (e) {}
+        }
       }
       s.hp = Math.max(0, s.hp - amount);
       updateGaugeDOM();
@@ -2909,6 +3101,13 @@
         loop: false,
         weight: 1.0,
       });
+      // FP polish — kick FOV from 75 → 82 → 75 over ~0.26s on every player
+      // attack. FpPolish.fovPunch's per-frame tween lives in animate(),
+      // gated on viewMode === 'fp' so cinematic / manual cameras keep
+      // their own FOV baseline.
+      if (cameraDirector && cameraDirector.viewMode === 'fp') {
+        triggerFovPunch();
+      }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
       // Impact at ~70% through the swing — matches combatTick timing.
@@ -3251,6 +3450,12 @@
       } else {
         controls.update(); // damping (recomputes camera.position)
       }
+
+      // FP polish — advance the FOV-punch tween BEFORE impact FX so the
+      // FOV write lands on the same frame as the camera-shake jitter.
+      // updateFovPunch() bails out cheaply when the punch isn't active
+      // or when viewMode !== 'fp'.
+      updateFovPunch(delta);
 
       // Run impact FX AFTER camera ownership so camera-shake jitter
       // wins this frame (its 0.18 s additive offset lands on top of
