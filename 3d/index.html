@@ -7481,6 +7481,48 @@
       _azureSwordRef.rotation.z = base.z + swayZ;
     }
 
+    // ── r155: updateAzureGuardLean ──────────────────────────────────────
+    // Azure body forward lean while in guard state — AAA fighter "enemy is
+    // blocking" visual cue.  The root's rotation.x receives an additive
+    // offset that lerps to -5° (-0.0873 rad) on guard entry and returns to
+    // 0 on guard exit.  Two lerp speeds approximate the timing targets:
+    //   enter lean:  200 ms to peak  → lerpK ≈ 0.08 per frame @60 fps
+    //   exit  lean:  300 ms to base  → lerpK ≈ 0.055 per frame @60 fps
+    //
+    // Orthogonality with existing systems:
+    //   • r70 idle micro-motion  → rotation.y (yaw)         — different axis
+    //   • r135 sway / r119 trail → sword mesh / geometry     — different object
+    //   • r154 weapon sway       → sword mesh rotation       — different object
+    //   • r108 approach          → root.position, state=moving — mutually exclusive
+    //   • r141 death slump       → state=dead, additive ΔX accumulation; guard
+    //                              and dead are mutually exclusive so no conflict
+    //
+    // State:
+    //   _azGuardLean.current  — running additive rotation.x offset (radians)
+    //   _azGuardLean.target   — 0 or GUARD_LEAN_RAD
+    //   az.root._guardLeanBase — rotation.x baseline captured once per round
+    //                            (nulled in resetMatch for clean round start)
+    const GUARD_LEAN_RAD      = -0.0873; // -5 degrees
+    const GUARD_LEAN_ENTER_K  = 0.08;   // fast lean in  (~200 ms to 95% of peak)
+    const GUARD_LEAN_EXIT_K   = 0.055;  // slower lean out (~300 ms to 95% of base)
+    const _azGuardLean = { current: 0, target: 0 };
+    function updateAzureGuardLean() {
+      const az = combatants && combatants.azure;
+      if (!az || !az.root) return;
+      const azRoot = az.root;
+      const isGuard = az.state === 'guard';
+      _azGuardLean.target = isGuard ? GUARD_LEAN_RAD : 0;
+      // Capture the baseline rotation.x once per round (reset each round).
+      if (azRoot._guardLeanBase == null) {
+        azRoot._guardLeanBase = azRoot.rotation.x;
+      }
+      const k = isGuard ? GUARD_LEAN_ENTER_K : GUARD_LEAN_EXIT_K;
+      _azGuardLean.current += (_azGuardLean.target - _azGuardLean.current) * k;
+      // Clamp to avoid floating-point drift when near zero.
+      if (Math.abs(_azGuardLean.current) < 0.0001) _azGuardLean.current = 0;
+      azRoot.rotation.x = azRoot._guardLeanBase + _azGuardLean.current;
+    }
+
     // ── r116: updateWeaponPositionBreath ────────────────────────────────
     // Additive idle position micro-sway on fpSwordClone, phase-locked with
     // r97 updateBreatheFov (same 8s period / same performance.now() time base).
@@ -10708,6 +10750,14 @@
       // r154: null the cached azure sword ref so the next round re-resolves the mesh
       // from the freshly-loaded GLB (roster-swap safe).
       try { _azureSwordRef = null; } catch (e) {}
+      // r155: reset guard lean state so rotation.x additive offset doesn't carry
+      // across rounds. _guardLeanBase nulled so it re-captures from the fresh pose.
+      try {
+        _azGuardLean.current = 0;
+        _azGuardLean.target  = 0;
+        const _azR155 = combatants && combatants.azure && combatants.azure.root;
+        if (_azR155) _azR155._guardLeanBase = null;
+      } catch (e) {}
       // r139: null the envMap baseline array so next round re-captures from the
       // fresh scene at full HP. HP resets to HP_MAX above so ratio → 1.0 immediately.
       try { _azureEnvBase = null; } catch (e) {}
@@ -14912,6 +14962,9 @@
       // r154: azure idle weapon sway — same 8s period as r98; active in idle/guard only.
       // Mirrors the player sway pattern so the opponent reads as alive, not a statue.
       updateAzureWeaponSway();
+      // r155: azure body forward lean in guard — additive rotation.x offset (-5°) that
+      // lerps in on guard entry (200 ms) and back out on guard exit (300 ms).
+      updateAzureGuardLean();
       // r116: idle weapon position breath — 8s sin-wave ±0.005/0.003 unit Y/Z.
       // Phase-locked with r97/r98; additive onto _basePosition captured at attach.
       updateWeaponPositionBreath();
