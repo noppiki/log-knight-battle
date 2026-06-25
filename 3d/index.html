@@ -8060,6 +8060,30 @@
       combatant.state = 'idle';
       mixers.push(mixer);
       combatants[label] = combatant;
+
+      // r123: azure helm cyan rim light — constant subtle cyan emissive on the
+      // Knight_Head mesh to reinforce the "blue boss" identity.  Intensity 0.08
+      // is deliberately below the idle perception threshold; dramatic states
+      // (r73 desperate, r100 hit-glow, r120 winner-glow) capture their own
+      // baselines *after* this runs and therefore restore back to cyan.
+      // Must run before any lazy _hitGlowBase / _winnerGlowBase captures so
+      // those snapshots include the cyan value.
+      if (label === 'azure') {
+        let _helmRimBound = false;
+        gltf.scene.traverse((o) => {
+          if (!o.isMesh || !o.material) return;
+          if (!/knight_head/i.test(o.name)) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (!m.emissive) return;
+            m.emissive.setHex(0x4060a0);
+            m.emissiveIntensity = 0.08;
+            _helmRimBound = true;
+          });
+        });
+        console.log('[lkb-3d] r123 azure helm cyan rim:', _helmRimBound ? 'bound' : 'helm mesh not found — no-op');
+      }
+
       console.log(`[lkb-3d] ${label}: combatant ready (${gltf.animations.length} clips)`);
       return combatant;
     }
