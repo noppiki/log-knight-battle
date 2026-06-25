@@ -2399,6 +2399,7 @@
     import { SSAOPass }        from 'three/addons/postprocessing/SSAOPass.js';
     import { OutlinePass }     from 'three/addons/postprocessing/OutlinePass.js';
     import { BokehPass }       from 'three/addons/postprocessing/BokehPass.js';
+    import { ShaderPass }      from 'three/addons/postprocessing/ShaderPass.js';
     // Lensflare: optional, wrapped in try/catch at usage site (older three may not expose this path)
     let Lensflare = null, LensflareElement = null;
     try {
@@ -2959,6 +2960,138 @@
           }
         }
         pos.needsUpdate = true;
+      }
+    }
+
+    /* ── ramparts / palisade ring around the duel ────────────────
+     *
+     * A procedural ring of 24 wooden poles (palisade) surrounds the
+     * duel center at radius 14 m, connected by two tiers of
+     * horizontal brown bars (at y=0.6 and y=2.0). Every 4th pole
+     * carries a small iron fire bowl on top with a flickering warm
+     * point light, mirroring the torch flicker formula. The whole
+     * ring is built into a single THREE.Group ("Ramparts") so it can
+     * be toggled or moved as a unit. Each subcomponent build is
+     * wrapped in try/catch so a single geometry failure leaves the
+     * partial rampart in place rather than aborting scene init.
+     */
+    const rampartTorches = []; // { light, base, phase } — flicker driven in updateRamparts
+    const ramparts = new THREE.Group();
+    ramparts.name = 'Ramparts';
+    try {
+      const RAMPART_POLE_COUNT  = 24;
+      const RAMPART_RADIUS      = 14.0;
+      const RAMPART_POLE_HEIGHT = 2.5;
+      const RAMPART_POLE_Y      = RAMPART_POLE_HEIGHT * 0.5; // 1.25 — center of pole
+      const woodMat = new THREE.MeshStandardMaterial({
+        color:     0x5e4220, // dark wood brown
+        roughness: 0.85,
+        metalness: 0.0,
+      });
+      // Chord length between adjacent poles (palisade segment length)
+      const chordLen = 2 * RAMPART_RADIUS * Math.sin(Math.PI / RAMPART_POLE_COUNT);
+
+      // 1) Poles
+      for (let i = 0; i < RAMPART_POLE_COUNT; i++) {
+        try {
+          const a = (i / RAMPART_POLE_COUNT) * Math.PI * 2;
+          const px = Math.cos(a) * RAMPART_RADIUS;
+          const pz = Math.sin(a) * RAMPART_RADIUS;
+          const poleGeo = new THREE.CylinderGeometry(0.15, 0.18, RAMPART_POLE_HEIGHT, 8);
+          const pole = new THREE.Mesh(poleGeo, woodMat);
+          pole.position.set(px, RAMPART_POLE_Y, pz);
+          pole.rotation.y = a + Math.PI / 2; // face outward
+          pole.castShadow    = true;
+          pole.receiveShadow = true;
+          ramparts.add(pole);
+        } catch (pErr) {
+          console.warn('[lkb-3d] rampart pole skipped', i, pErr);
+        }
+      }
+
+      // 2) Connecting horizontal bars between adjacent poles at two heights
+      const barHeights = [0.6, 2.0];
+      for (let i = 0; i < RAMPART_POLE_COUNT; i++) {
+        const a0 = (i / RAMPART_POLE_COUNT) * Math.PI * 2;
+        const a1 = ((i + 1) / RAMPART_POLE_COUNT) * Math.PI * 2;
+        const x0 = Math.cos(a0) * RAMPART_RADIUS;
+        const z0 = Math.sin(a0) * RAMPART_RADIUS;
+        const x1 = Math.cos(a1) * RAMPART_RADIUS;
+        const z1 = Math.sin(a1) * RAMPART_RADIUS;
+        const mx = (x0 + x1) * 0.5;
+        const mz = (z0 + z1) * 0.5;
+        // Bar should align with the chord (z-axis of box runs along chord)
+        const chordAngle = Math.atan2(z1 - z0, x1 - x0);
+        for (const by of barHeights) {
+          try {
+            const barGeo = new THREE.BoxGeometry(0.08, 0.08, chordLen);
+            const bar = new THREE.Mesh(barGeo, woodMat);
+            bar.position.set(mx, by, mz);
+            // BoxGeometry's local Z runs along chordLen; rotate so it lies along the chord.
+            // chordAngle is the chord direction in XZ; rotateY by -(chordAngle - PI/2) so local +Z aligns with chord.
+            bar.rotation.y = -chordAngle + Math.PI / 2;
+            bar.castShadow    = true;
+            bar.receiveShadow = true;
+            ramparts.add(bar);
+          } catch (bErr) {
+            console.warn('[lkb-3d] rampart bar skipped', i, by, bErr);
+          }
+        }
+      }
+
+      // 3) Every 4th pole gets a small fire bowl + flickering point light on top
+      const bowlMat = new THREE.MeshStandardMaterial({
+        color:     0x191512,
+        roughness: 0.85,
+        metalness: 0.4,
+      });
+      for (let i = 0; i < RAMPART_POLE_COUNT; i += 4) {
+        try {
+          const a  = (i / RAMPART_POLE_COUNT) * Math.PI * 2;
+          const bx = Math.cos(a) * RAMPART_RADIUS;
+          const bz = Math.sin(a) * RAMPART_RADIUS;
+          // Bowl sits just above the pole top (pole top y = RAMPART_POLE_HEIGHT = 2.5)
+          const bowlGeo = new THREE.CylinderGeometry(0.16, 0.10, 0.10, 12);
+          const bowl = new THREE.Mesh(bowlGeo, bowlMat);
+          bowl.position.set(bx, RAMPART_POLE_HEIGHT + 0.05, bz);
+          bowl.castShadow    = true;
+          bowl.receiveShadow = false;
+          ramparts.add(bowl);
+
+          // Flickering point light just above bowl (flame core)
+          const baseIntensity = 1.6;
+          const light = new THREE.PointLight(0xff8848, baseIntensity, 5.5, 2);
+          light.position.set(bx, RAMPART_POLE_HEIGHT + 0.35, bz);
+          light.castShadow = false;
+          ramparts.add(light);
+
+          rampartTorches.push({
+            light,
+            base:  baseIntensity,
+            phase: (i / RAMPART_POLE_COUNT) * Math.PI * 2 + 0.4, // distinct phase per torch
+          });
+        } catch (rtErr) {
+          console.warn('[lkb-3d] rampart torch skipped', i, rtErr);
+        }
+      }
+
+      scene.add(ramparts);
+    } catch (rampErr) {
+      console.warn('[lkb-3d] ramparts creation skipped', rampErr);
+      // Add whatever was built so far so the partial palisade is still visible.
+      try { scene.add(ramparts); } catch (_) { /* noop */ }
+    }
+
+    function updateRamparts(time) {
+      if (!rampartTorches.length) return;
+      // Reuse the torch flicker formula so the palisade lights feel of-a-piece
+      // with the arena torches.
+      for (const t of rampartTorches) {
+        t.light.intensity = t.base * (
+          0.8
+          + 0.30 * Math.sin(time *  9 + t.phase)
+          + 0.12 * Math.sin(time * 15 + t.phase * 1.6)
+        );
       }
     }
 
@@ -3989,6 +4122,61 @@
     // SMAA — sub-pixel anti-aliasing (operates in device pixels).
     const smaaPass = new SMAAPass(initialW * pixelRatio, initialH * pixelRatio);
     composer.addPass(smaaPass);
+
+    /* Chromatic aberration + film grain ─────────────────────────────
+       Custom ShaderPass inserted AFTER bloom + SMAA, BEFORE OutputPass
+       so tone-mapping + color-space conversion still get the final
+       word. The radial RGB split (chromaticAberration / chromAmount)
+       sells the "looking through a lens" feel without smudging center
+       detail (offset scales by d² from screen center), and a tiny
+       per-frame hash noise (filmGrain) keeps flat lit areas alive
+       without reading as "AI-clean". Subtle by design — the brief is
+       "barely there, but you'd miss it if it were gone." */
+    const chromaPass = new ShaderPass({
+      uniforms: {
+        tDiffuse:  { value: null },
+        uTime:     { value: 0.0 },
+        uChroma:   { value: 0.004 },
+        uGrain:    { value: 0.04 }
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        uniform float uTime;
+        uniform float uChroma;
+        uniform float uGrain;
+        varying vec2 vUv;
+
+        void main() {
+          // Radial direction from screen center; offset grows with d²
+          // so the center stays clean and edges fringe more.
+          vec2 dir = (vUv - 0.5) * 2.0;
+          float d2 = dot(dir, dir);
+          vec2 offset = dir * d2 * uChroma;
+
+          // Per-channel sample — R outward, G center, B inward.
+          float r = texture2D(tDiffuse, vUv + offset).r;
+          float g = texture2D(tDiffuse, vUv).g;
+          float b = texture2D(tDiffuse, vUv - offset).b;
+          vec3 color = vec3(r, g, b);
+
+          // Film grain — cheap hash noise centered on zero, scaled
+          // by uGrain. Multiplying vUv by uTime de-correlates the
+          // pattern across frames so it animates instead of locking.
+          float noise = fract(sin(dot(vUv * uTime, vec2(12.9898, 78.233))) * 43758.5453);
+          color += vec3(noise * uGrain - uGrain * 0.5);
+
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `
+    });
+    composer.addPass(chromaPass);
 
     // OutputPass — handles tone mapping + color space conversion at the end.
     const outputPass = new OutputPass();
@@ -7334,6 +7522,7 @@
       try { breathFogSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
+      try { updateRamparts(time); } catch (e) {}
       try { updateSnowGlint(delta, time); } catch (e) {}
       try { updateAurora(delta, time); } catch (e) {}
 
@@ -7423,6 +7612,12 @@
       // sharp on the knights at any view (FP close shots, cinematic far shots).
       if (bokehPass && bokehPass.uniforms && bokehPass.uniforms.focus) {
         bokehPass.uniforms.focus.value = Math.max(3.0, Math.min(15.0, camera.position.length()));
+      }
+      // Drive the chromatic-aberration / film-grain shader's time uniform
+      // so the per-frame noise hash actually animates (otherwise the grain
+      // freezes into a static screen-door pattern).
+      if (chromaPass && chromaPass.uniforms && chromaPass.uniforms.uTime) {
+        chromaPass.uniforms.uTime.value = performance.now() * 0.001;
       }
       composer.render();
     }
