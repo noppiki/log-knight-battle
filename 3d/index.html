@@ -3020,7 +3020,7 @@
     /* ── ramparts / palisade ring around the duel ────────────────
      *
      * A procedural ring of 24 wooden poles (palisade) surrounds the
-     * duel center at radius 14 m, connected by two tiers of
+     * duel center at radius 9 m, connected by two tiers of
      * horizontal brown bars (at y=0.6 and y=2.0). Every 4th pole
      * carries a small iron fire bowl on top with a flickering warm
      * point light, mirroring the torch flicker formula. The whole
@@ -3034,7 +3034,7 @@
     ramparts.name = 'Ramparts';
     try {
       const RAMPART_POLE_COUNT  = 24;
-      const RAMPART_RADIUS      = 14.0;
+      const RAMPART_RADIUS      = 9.0;
       const RAMPART_POLE_HEIGHT = 2.5;
       const RAMPART_POLE_Y      = RAMPART_POLE_HEIGHT * 0.5; // 1.25 — center of pole
       const woodMat = new THREE.MeshStandardMaterial({
@@ -3267,7 +3267,7 @@
           uColorBot: { value: new THREE.Color(0x00aa88) }, // deep teal
           uColorMid: { value: new THREE.Color(0x88ffaa) }, // mint green
           uColorTop: { value: new THREE.Color(0xddaaff) }, // pale magenta
-          uIntensity:{ value: 0.6 },
+          uIntensity:{ value: 0.35 },
         },
         vertexShader: `
           varying vec2 vUv;
@@ -3331,7 +3331,7 @@
       const auroraMesh = new THREE.Mesh(auroraGeo, auroraMat);
       // High overhead, slightly behind so it fills the upper third of
       // most cinematic framings without intersecting the duel envelope.
-      auroraMesh.position.set(0, 12, 8);
+      auroraMesh.position.set(0, 18, 8);
       // Tilt the panel a hair toward the camera so the gradient reads
       // as a curtain hanging from the sky rather than a flat billboard.
       auroraMesh.rotation.x = -Math.PI / 8;
@@ -3507,7 +3507,7 @@
     // Iter 69: pull back to frame both knights (±2 m spread) comfortably
     // in 1600×900. fov 38 gives breathing room; target raised to 1.1 so
     // the log dominates the lower third.
-    const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 200);
+    const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 200);
     camera.position.set(0, 2.0, -7.0);
     camera.lookAt(0, 1.1, 0);
     camera.updateProjectionMatrix();
@@ -3542,7 +3542,7 @@
        would otherwise overwrite our pose every frame). In manual mode
        the director sleeps and `controls.update()` runs normally. */
     const CINEMA_SHOTS = {
-      SIDE_WIDE:     { pos: new THREE.Vector3(0,    2.0, -7.0), look: new THREE.Vector3( 0,   1.1, 0) },
+      SIDE_WIDE:     { pos: new THREE.Vector3(0,    1.7, -5.5), look: new THREE.Vector3( 0,   1.0, 0) },
       CLOSE_CRIMSON: { pos: new THREE.Vector3(-3.5, 0.9, -3.5), look: new THREE.Vector3(-2.0, 1.2, 0) },
       CLOSE_AZURE:   { pos: new THREE.Vector3( 3.5, 0.9, -3.5), look: new THREE.Vector3( 2.0, 1.2, 0) },
       HIGH_WIDE:     { pos: new THREE.Vector3(0,    5.5, -4.5), look: new THREE.Vector3( 0,   0.7, 0) },
@@ -7437,7 +7437,7 @@
       // Compute base FOV from current view mode; FP uses FP_SHOT.fov, others use settings.fov.
       const baseFov = (cameraDirector && cameraDirector.viewMode === 'fp')
         ? FP_SHOT.fov
-        : ((window.settings && window.settings.fov) || 36);
+        : ((window.settings && window.settings.fov) || 32);
       const REF_ASPECT = 16 / 9; // game tuned for landscape 1600×900
       if (aspect < REF_ASPECT) {
         // portrait/square: widen vertical FOV so horizontal FOV matches REF_ASPECT.
