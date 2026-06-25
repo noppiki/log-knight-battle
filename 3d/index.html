@@ -6809,6 +6809,43 @@
       fpSwordClone.rotation.z = base.z + swayZ;
     }
 
+    // ── r111: updateWeaponGlint ──────────────────────────────────────────
+    // Idle weapon glint — subtle warm-white emissive flash on fpSwordClone,
+    // Sekiro/MK style "blade life". Fires every 10s ± 2s (random per cycle),
+    // only while the player is genuinely idle. Uses setSwordEmissive (r59)
+    // so the generation-token re-entry guard prevents overlap with attack /
+    // charge glows and ensures baseline is always restored correctly.
+    //
+    // Guards (identical gate pattern to r97/r98):
+    //   • FP mode only.
+    //   • Skip during attack / windup / dodge / hit / dead.
+    //   • Skip during charge (_isCharging) and FP dodge / parry-kick.
+    //   • Skip during cinematic overrides (_finisherCamActive, _matchIntroActive).
+    //   • Schedule resets to 0 on resetMatch so each round starts fresh.
+    let _glintNextAt = 0; // epoch-ms target; 0 means "not yet scheduled"
+    function scheduleNextGlint() {
+      const BASE_MS   = 10000; // nominal 10 s period
+      const JITTER_MS = 4000;  // ±2 s uniform jitter
+      _glintNextAt = performance.now() + BASE_MS + (Math.random() - 0.5) * JITTER_MS;
+    }
+    function updateWeaponGlint() {
+      if (!fpSwordClone) return;
+      if (cameraDirector.viewMode !== 'fp') return;
+      if (window._finisherCamActive) return;
+      if (window._matchIntroActive)  return;
+      if (FpPolish.dodge.active)     return;
+      if (FpPolish.parryKick.active) return;
+      if (playerInput._isCharging)   return;
+      const cs = combatants?.crimson?.state;
+      if (cs === 'attack' || cs === 'windup' || cs === 'dodge' || cs === 'hit' || cs === 'dead') return;
+      // First tick of the round: arm the scheduler.
+      if (_glintNextAt === 0) { scheduleNextGlint(); return; }
+      if (performance.now() < _glintNextAt) return;
+      // Fire glint — warm white, intensity 0.6, 350 ms (subtle, not blinding).
+      setSwordEmissive(0xfff5d8, 0.6, 350);
+      scheduleNextGlint();
+    }
+
     // ── r61: triggerParryKick ────────────────────────────────────────────
     // Arms a 5° upward pitch kick on a successful parry. The per-frame
     // decay runs inside animate() via updateParryKick(delta), which is
@@ -9173,6 +9210,8 @@
     // r89: partialHeal=true → between-round HP carry-over (+30, capped at HP_MAX).
     //      partialHeal=false (default) → full HP_MAX heal (used by resetFullMatch).
     function resetMatch(partialHeal) {
+      // r111: reset glint scheduler so next round starts fresh without a stale timer.
+      _glintNextAt = 0;
       // r91: stop round timer immediately on any reset so it never leaks into the next round.
       try { stopRoundTimer(); } catch (e) {}
       // r78: if a finisher cinematic is still running on reset (R hotkey mid-cinematic),
@@ -13345,6 +13384,8 @@
       // r98: idle weapon micro-sway — 8s sin-wave ±0.5°/0.3° on Y/Z axes.
       // Phase-locked with updateBreatheFov so sword and FOV breathe together.
       updateWeaponSway();
+      // r111: idle weapon glint — warm-white emissive flash every ~10s when idle.
+      updateWeaponGlint();
       // FP lock-on bracket — world→screen projection of azure's AABB.
       // Runs after camera ownership so the projection uses the final
       // camera pose for this frame. Bails cheaply when not in FP mode.
