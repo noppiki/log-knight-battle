@@ -3395,6 +3395,14 @@
             tone({ freq: freq, freq2: freq, dur: noteDur, type: 'triangle', vol: 0.12, attack: 0.02 });
           }, i * stepMs);
         });
+        // r145: taiko boom — kabuki-style low sawtooth 50→30Hz, 0.5s after fanfare start
+        // (C6 fires at t=300ms; boom lands at t=500ms, 200ms after C6 = heavy punctuation)
+        // Routes through globalGain via tone() so mute compliance is automatic.
+        setTimeout(function () {
+          try {
+            tone({ freq: 50, freq2: 30, dur: 0.30, type: 'sawtooth', vol: 0.10, attack: 0.01 });
+          } catch (e) {}
+        }, 500);
       }
       // sfxStep — quick low thud for attack-windup footstep impact. Gated
       // on actx so the audio block never throws when init failed; called
