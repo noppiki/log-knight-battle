@@ -1886,6 +1886,31 @@
       background: rgba(150, 150, 150, 0.6);
     }
 
+    /* r142: aim deadzone indicator — subtle dotted circle showing the
+       ~5px dead-zone radius around the exact aim point. Gives precision
+       shooters a tactile "zero-movement zone" cue without cluttering the
+       crosshair. Matches reticle visibility state via .visible class so
+       it appears/disappears with the crosshair in lockstep.
+       z-index 24 — one below reticle (25) so it never occludes the
+       amber crosshair bars; above parry flash (20) and edge blur (22). */
+    #fp-deadzone {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px dotted rgba(255, 255, 255, 0.12);
+      pointer-events: none;
+      z-index: 24;
+      opacity: 0;
+      transition: opacity 120ms ease-out;
+    }
+    #fp-deadzone.visible {
+      opacity: 1;
+    }
+
     /* ── Multiplayer relay UI (phase-1) ───────────────────────────────
        Bottom-left cluster, sits ABOVE the #hud diagnostic strip so the
        two read as a stacked left-edge column. Same dark+amber plate as
@@ -2689,6 +2714,10 @@
        viewMode==='fp' AND pointer IS locked. Toggled together with
        the lock hint by refreshFpOverlays(). -->
   <div id="fp-reticle"><span id="fp-reticle-dot"></span></div>
+  <!-- r142: aim deadzone indicator — subtle dotted circle co-located with
+       the reticle, toggled by the same .visible class via refreshFpOverlays.
+       Communicates the ~5px aim dead-zone radius to precision players. -->
+  <div id="fp-deadzone"></div>
 
   <!-- FP lock-on bracket — four corner L-shapes that frame azure in
        screen space. JS projects azure's head/feet world-positions each
@@ -5886,6 +5915,7 @@
     // not whatever the camera happened to be at when the punch started.
     const FpPolish = {
       reticleEl:        document.getElementById('fp-reticle'),
+      deadzoneEl:       document.getElementById('fp-deadzone'),        // r142 aim deadzone circle
       vignetteEl:       document.getElementById('fp-damage-vignette'),
       dmgBorderEl:      document.getElementById('fp-dmg-border'),   // r92 border pulse
       _dmgBorderTimer:  0,                                            // r92 border clear timer
@@ -7534,6 +7564,8 @@
       const locked = !!window._mouseLocked;
       if (fpLockHint) fpLockHint.classList.toggle('visible', isFp && !locked);
       if (FpPolish.reticleEl) FpPolish.reticleEl.classList.toggle('visible', isFp && locked);
+      // r142: deadzone indicator mirrors reticle visibility exactly.
+      if (FpPolish.deadzoneEl) FpPolish.deadzoneEl.classList.toggle('visible', isFp && locked);
       // r53: reposition HUD to bottom corners in FP mode.
       document.body.classList.toggle('fp-mode', isFp);
     }
@@ -12956,6 +12988,8 @@
       }
       if (typeof FpPolish !== 'undefined' && FpPolish && FpPolish.reticleEl) {
         FpPolish.reticleEl.classList.toggle('visible', isFp && !!window._mouseLocked);
+        // r142: mirror deadzone visibility alongside reticle in mpForceLock path.
+        if (FpPolish.deadzoneEl) FpPolish.deadzoneEl.classList.toggle('visible', isFp && !!window._mouseLocked);
       }
       return !!window._mouseLocked;
     };
