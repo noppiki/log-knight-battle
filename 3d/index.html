@@ -743,6 +743,42 @@
       margin-top: 8px;
     }
 
+    /* ── r70: rematch hotkey hint ─────────────────────────────── */
+    /* Fixed to bottom-centre, shown only while match-won-overlay is
+       visible. Pointer-events: none so it never swallows clicks.
+       kbd pills match the engraved-metal palette of the player labels. */
+    #match-hotkey-hint {
+      display: none;
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 27;
+      pointer-events: none;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: #c0ae88;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+      white-space: nowrap;
+      opacity: 0.80;
+    }
+    #match-hotkey-hint kbd {
+      display: inline-block;
+      background: rgba(40, 36, 28, 0.80);
+      border: 1px solid rgba(180, 155, 100, 0.55);
+      border-radius: 3px;
+      padding: 1px 6px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: #d8c490;
+      box-shadow: inset 0 1px 0 rgba(255, 220, 140, 0.15), 0 2px 4px rgba(0,0,0,0.6);
+      margin-right: 2px;
+    }
+
     /* ── r66: FP bottom-left streak HUD ──────────────────────── */
     /* Current-streak + best-combo, always visible in FP mode.
        12 px pill — unobtrusive, purely informational.
@@ -1859,6 +1895,10 @@
     <div class="mw-winner" id="mw-winner-text"></div>
     <!-- r66: post-match stats — filled by refreshPostMatchStats() -->
     <div id="post-match-stats" aria-live="polite"></div>
+  </div>
+  <!-- r70: rematch hotkey hint — shown when match-won-overlay is active -->
+  <div id="match-hotkey-hint" aria-hidden="true">
+    <kbd>R</kbd> Rematch &nbsp;&nbsp; <kbd>Esc</kbd> Menu
   </div>
   <!-- r66: FP bottom-left streak HUD — visible only in body.fp-mode -->
   <div id="fp-streak-hud" aria-hidden="true"></div>
@@ -5945,6 +5985,36 @@
       });
     })();
 
+    /* ── r70: rematch / menu hotkeys ────────────────────────────── */
+    // Activate only when the match-won-overlay is shown (_matchEndShown).
+    // R → immediate rematch (resetFullMatch + cancel pending auto-reset).
+    // Esc → go to the back-link destination (2D lobby / parent index).
+    // Neither fires when focus is in an input field (mirrors P-key guard).
+    window.addEventListener('keydown', function (ev) {
+      if (!window._matchEndShown) return;
+      const tg = ev.target;
+      if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA')) return;
+      if (ev.key === 'r' || ev.key === 'R') {
+        ev.preventDefault();
+        window._matchEndShown = false;
+        const hint = document.getElementById('match-hotkey-hint');
+        if (hint) hint.style.display = 'none';
+        // Cancel the 6s auto-reset so it doesn't fire on top of our immediate one.
+        if (typeof resetTimerHandle !== 'undefined' && resetTimerHandle) {
+          clearTimeout(resetTimerHandle);
+          resetTimerHandle = null;
+        }
+        resetFullMatch();
+      } else if (ev.key === 'Escape') {
+        // Esc navigates to the menu (back-link target).
+        // Only fire when the settings panel is NOT open (avoid double-close).
+        const settingsPanel = document.getElementById('settings-panel');
+        if (settingsPanel && settingsPanel.classList.contains('is-open')) return;
+        window._matchEndShown = false;
+        window.location.href = '../index.html';
+      }
+    });
+
     /* ── GLB loader ─────────────────────────────────────────────── */
     const loader = new GLTFLoader();
     let loaded = 0;
@@ -7549,6 +7619,10 @@
     // between matches. The new env pops in when the HDR finishes loading
     // (non-blocking); the round reset proceeds immediately.
     function resetFullMatch() {
+      // r70: clear match-end hotkey state so R/Esc don't fire mid-match.
+      window._matchEndShown = false;
+      const _hint = document.getElementById('match-hotkey-hint');
+      if (_hint) _hint.style.display = 'none';
       window.gameState.crimson.wins = 0;
       window.gameState.azure.wins   = 0;
       // Force round back to 1: resetMatch() below will pre-increment to 1.
@@ -7653,6 +7727,13 @@
           if (mwWinnerText) mwWinnerText.textContent = winnerId.toUpperCase() + ' WINS THE MATCH';
           matchWonOverlay.classList.add('visible');
         }
+        // r70: flag match end so R/Esc hotkeys activate, show hint after
+        // the KO_REPLAY cinematic (3s) so it doesn't clutter the slow-mo beat.
+        window._matchEndShown = true;
+        setTimeout(() => {
+          const hint = document.getElementById('match-hotkey-hint');
+          if (hint && window._matchEndShown) hint.style.display = 'block';
+        }, 3200);
         console.log(`[lkb-3d] MATCH WON by ${winnerId}`);
 
         // ── Record tracker update ────────────────────────────────────
@@ -9962,13 +10043,24 @@
       for (const id of ['crimson', 'azure']) {
         const c = combatants[id];
         if (!c || !c.root) continue;
-        if (c.state !== 'idle') continue;
+        // r70: extend breathing to guard state as well (subtle life when guarding)
+        const isBreathing = c.state === 'idle' || c.state === 'guard';
+        if (!isBreathing) {
+          // Restore base pose when leaving idle/guard so the offsets don't freeze.
+          if (c._idleBreathApplied) {
+            if (typeof c._baseY    === 'number') c.root.position.y = c._baseY;
+            if (typeof c._baseRotY === 'number') c.root.rotation.y = c._baseRotY;
+            c._idleBreathApplied = false;
+          }
+          continue;
+        }
         // Lazy-capture the base pose ONCE — never mutate after.
         if (typeof c._baseY    !== 'number') c._baseY    = c.root.position.y;
         if (typeof c._baseRotY !== 'number') c._baseRotY = c.root.rotation.y;
         const phase = IDLE_BREATH_PHASE[id] || 0;
         c.root.position.y = c._baseY    + Math.sin(t * IDLE_BREATH_BOB_FREQ + phase) * IDLE_BREATH_BOB_AMP;
         c.root.rotation.y = c._baseRotY + Math.sin(t * IDLE_BREATH_YAW_FREQ + phase) * IDLE_BREATH_YAW_AMP;
+        c._idleBreathApplied = true;
       }
     }
 
