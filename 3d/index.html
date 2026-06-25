@@ -10606,14 +10606,19 @@
               setTimeout(() => hpBarEl.classList.remove('hit-flash'), 250);
             }
           } catch (e) {}
-          // Augmented hit-take shake — replaces the default 0.06/0.18 shake
-          // applied by ImpactSystem.spawn with a stronger 0.10/0.25 kick so
-          // a personal hit reads heavier than third-person impact shakes.
+          // r133: damage-scaled hit-take shake — light hits (1-3 dmg) feel
+          // distinctly lighter than heavy blows (7+ dmg); replaces the flat
+          // 0.10/0.25 kick with a 3-tier amp+dur ladder so AAA-fighter tactile
+          // feedback maps to actual incoming damage rather than a uniform jolt.
           try {
             if (impactSystem && impactSystem.shake) {
-              impactSystem.shake.amplitude = 0.10;
-              impactSystem.shake.remaining = 0.25;
-              impactSystem.shake.duration  = 0.25;
+              const _dmg133 = Math.abs(amount);
+              let _shakeAmp133 = 0.08, _shakeDur133 = 0.10;
+              if      (_dmg133 >= 7) { _shakeAmp133 = 0.18; _shakeDur133 = 0.22; }
+              else if (_dmg133 >= 4) { _shakeAmp133 = 0.12; _shakeDur133 = 0.15; }
+              impactSystem.shake.amplitude = Math.max(impactSystem.shake.amplitude || 0, _shakeAmp133);
+              impactSystem.shake.remaining = Math.max(impactSystem.shake.remaining || 0, _shakeDur133);
+              impactSystem.shake.duration  = Math.max(impactSystem.shake.duration  || 0, _shakeDur133);
             }
           } catch (e) {}
         }
