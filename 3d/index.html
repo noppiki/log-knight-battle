@@ -5889,9 +5889,10 @@
     const DANGER_HP_THRESHOLD = 0.25; // 25% of HP_MAX
 
     window._dangerState = {
-      active:    false,
-      audioNode: null,  // { osc, gain } while rumble is running
-      fadingTimer: 0,   // timer for .fading class cleanup
+      active:       false,
+      audioNode:    null,  // { osc, gain } while rumble is running
+      fadingTimer:  0,     // timer for .fading class cleanup
+      heartbeatId:  0,     // r113: setInterval id for low-HP heartbeat pulse
     };
 
     const _dangerVigEl   = document.getElementById('fp-danger-vignette');
@@ -5953,6 +5954,8 @@
       _startDangerRumble();
       // (4) r90: first-cross sharp tone — 1000→500Hz triangle, 150ms, through sfxGain→globalGain.
       tone({ freq: 1000, freq2: 500, dur: 0.15, type: 'triangle', vol: 0.1, attack: 0.02 });
+      // (5) r113: heartbeat pulse — 60Hz triangle, 80ms, 1.5s interval.
+      _startHeartbeat();
     }
 
     // deactivateDanger — called once when HP recovers or on death/reset.
@@ -5972,6 +5975,8 @@
       if (_dangerReticle) _dangerReticle.style.removeProperty('--reticle-color');
       // (3) Audio.
       _stopDangerRumble();
+      // (4) r113: stop heartbeat pulse.
+      _stopHeartbeat();
     }
 
     // _startDangerRumble — 40Hz sine oscillator through globalGain.
@@ -6006,6 +6011,29 @@
           try { gain.disconnect(); } catch (_) {}
         }, 500);
       } catch (e) {}
+    }
+
+    // ── r113: low-HP heartbeat pulse ────────────────────────────────────
+    // 60Hz triangle, 80ms, gain 0.05 — fired every 1500ms (BPM 40) while
+    // danger state is active.  Runs in parallel with the 40Hz rumble but at
+    // a distinct frequency + short envelope so the two don't mask each other.
+    // Routed through sfxGain → globalGain so mute button silences it.
+    function _playHeartbeatTick() {
+      try {
+        tone({ freq: 60, freq2: 40, dur: 0.08, type: 'triangle', vol: 0.05, attack: 0.005 });
+      } catch (e) {}
+    }
+
+    function _startHeartbeat() {
+      if (window._dangerState.heartbeatId) return; // already running
+      _playHeartbeatTick(); // fire immediately so player hears it right away
+      window._dangerState.heartbeatId = setInterval(_playHeartbeatTick, 1500);
+    }
+
+    function _stopHeartbeat() {
+      if (!window._dangerState.heartbeatId) return;
+      clearInterval(window._dangerState.heartbeatId);
+      window._dangerState.heartbeatId = 0;
     }
 
     // ── r82: BGM combat tension sub layer ──────────────────────────────
@@ -9475,6 +9503,8 @@
       // the round banner fires).
       try { if (typeof deactivateDanger === 'function' && window._dangerState && window._dangerState.active) deactivateDanger(); } catch (e) {}
       try { if (typeof _stopDangerRumble === 'function') _stopDangerRumble(); } catch (e) {}
+      // r113: safety stop heartbeat in case deactivateDanger wasn't called (e.g. R hotkey reset).
+      try { if (typeof _stopHeartbeat === 'function') _stopHeartbeat(); } catch (e) {}
       // r101: reset low-stamina cue edge-crossing flag so the next round can re-fire
       // the cue if stamina drops below threshold again.
       try { _stamLowActive = false; } catch (e) {}
