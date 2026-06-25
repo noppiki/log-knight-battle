@@ -5940,6 +5940,11 @@
       const c = combatants[defenderId];
       if (!c) return;
       window.gameState[defenderId].dead = true;
+      // Race fix: invalidate any pending swing-impact timeouts on the
+      // dying knight (and, for safety, the winner — round is over).
+      c._swingId = (c._swingId || 0) + 1;
+      const winner = combatants[defenderId === 'crimson' ? 'azure' : 'crimson'];
+      if (winner) winner._swingId = (winner._swingId || 0) + 1;
       c.state = 'dead';
       playClip(c, 'Death_A', { fadeIn: 0.15, loop: false });
       // ── SFX wiring: KO fall thud + brass horn fanfare. Sequenced so
@@ -6483,6 +6488,11 @@
 
       attacker.state = 'attack';
       attacker.impactScheduled = false;
+      // Race fix: monotonic swing id. The impact timeout below captures
+      // this id at swing-start time and only fires if it's still current.
+      // Prevents zero-damage swings when the defender lands first and
+      // flips the attacker into state='hit' before our 70% impact tick.
+      const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
       const chosenAttack = pickAttackClip();
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15, loop: false, weight: 1.0,
@@ -6499,7 +6509,7 @@
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
       setTimeout(() => {
-        if (attacker.state !== 'attack') return;
+        if (attacker._swingId !== mySwing) return; // superseded / cancelled
         attacker.impactScheduled = true;
         if (defender && !window.gameState[defenderLabel].dead && defender.state !== 'guard' && defender.state !== 'attack') {
           const hitClip = pickHitClip(defender.state);
@@ -6601,6 +6611,12 @@
       // outer setInterval keeps running, so combat resumes on the next
       // tick after the panel closes.
       if (window._gamePaused) return;
+      // Defer azure CPU attack when crimson is mid-swing so the CPU
+      // doesn't interrupt or race the player's ongoing attack animation.
+      if (combatants.crimson && combatants.crimson.state === 'attack') {
+        setTimeout(combatTick, 800);
+        return;
+      }
       // MP phase-3: guest never runs the AI loop locally. All combat
       // resolution happens on the host; the guest just displays the
       // host's snapshots via applySnapshot().
@@ -6838,6 +6854,11 @@
 
       attacker.state = 'attack';
       attacker.impactScheduled = false;
+      // Race fix: monotonic swing id. The impact timeout below captures
+      // this id at swing-start time and only fires if it's still current.
+      // Prevents zero-damage swings when azure lands first and flips
+      // crimson into state='hit' before our 70% impact tick.
+      const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
       const chosenAttack = pickAttackClip();
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15,
@@ -6861,7 +6882,7 @@
 
       // Impact at ~70% through the swing — matches combatTick timing.
       setTimeout(() => {
-        if (attacker.state !== 'attack') return; // got interrupted (e.g. died)
+        if (attacker._swingId !== mySwing) return; // superseded / cancelled
         attacker.impactScheduled = true;
 
         // Only play hit reaction on defender if they aren't dead, attacking,
@@ -6922,6 +6943,9 @@
         showExhaustPill('EXHAUSTED');
         return;
       }
+      // Race fix: invalidate any pending swing-impact timeout — guarding
+      // mid-swing must not still deal damage at the 70% tick.
+      c._swingId = (c._swingId || 0) + 1;
       c.state = 'guard';
       playClip(c, CLIP_NAMES.BLOCK, { fadeIn: 0.12, loop: true, weight: 1.0 });
     }
@@ -6936,6 +6960,8 @@
       if (!c) return;
       if (window.gameState.crimson.dead) return;
       if (c.state !== 'guard') return;
+      // Race fix: invalidate any pending swing-impact timeout.
+      c._swingId = (c._swingId || 0) + 1;
       playClip(c, CLIP_NAMES.IDLE, { fadeIn: 0.2, loop: true });
       c.state = 'idle';
     }
@@ -6976,6 +7002,38 @@
         }
       }
     });
+
+    // ── QA / headless bridge ────────────────────────────────────────
+    // Expose FP input internals on window so synthetic-key drivers and
+    // headless verification harnesses can invoke the same code paths
+    // the real keydown handler hits, without depending on Pointer Lock
+    // (which is impossible to satisfy without a real user gesture).
+    //
+    // These are the module-scoped symbols the keydown handler at the
+    // top of this section funnels into; `fpInputActive()` is the gate
+    // that blocks input unless viewMode==='fp' AND window._mouseLocked
+    // is true. `mpForceLock(bool)` is the bypass — it flips the lock
+    // flag manually and mirrors the same UI side-effects the real
+    // pointerlockchange listener fires (hide/show fp-lock-hint, toggle
+    // reticle visibility), so the on-screen state stays consistent.
+    window.playerAttack     = playerAttack;
+    window.playerGuardEnter = playerGuardEnter;
+    window.playerGuardExit  = playerGuardExit;
+    window.fpInputActive    = fpInputActive;
+    window.combatants       = combatants;
+    window.mpForceLock = function (locked) {
+      window._mouseLocked = !!locked;
+      // Mirror the pointerlockchange handler's UI updates so reticle
+      // and lock-hint reflect the simulated state.
+      const isFp = !!(cameraDirector && cameraDirector.viewMode === 'fp');
+      if (typeof fpLockHint !== 'undefined' && fpLockHint) {
+        fpLockHint.classList.toggle('visible', isFp && !window._mouseLocked);
+      }
+      if (typeof FpPolish !== 'undefined' && FpPolish && FpPolish.reticleEl) {
+        FpPolish.reticleEl.classList.toggle('visible', isFp && !!window._mouseLocked);
+      }
+      return !!window._mouseLocked;
+    };
 
     // ── log.glb ────────────────────────────────────────────────── */
     loader.load(
