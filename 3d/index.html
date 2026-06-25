@@ -4316,19 +4316,142 @@
     // would restore to the boot-time baseline, not the live setting).
     window.impactSystem = impactSystem;
 
+    /* ── SnowPuffSystem ─────────────────────────────────────────────
+       Soft footstep snow puffs spawned at attacker feet on each
+       attack windup. Each puff is 18-30 THREE.Points particles:
+         - Flat horizontal disk velocity (0.4–1.0 m/s outward)
+           + slight upward component (0.2–0.5 m/s)
+         - Lifetime 0.6 s with linear size fade + opacity fade
+         - Off-white snow color #f0e8d8, NormalBlending, depthWrite off
+       spawnSnowPuff(knightRoot) takes a THREE.Object3D root; puff
+       center is placed at (root.x, root.y + 0.05, root.z).
+    ─────────────────────────────────────────────────────────────────*/
+    class SnowPuffSystem {
+      constructor(scene) {
+        this.scene = scene;
+        this.puffs = []; // active puff entries
+      }
+
+      spawn(knightRoot) {
+        if (!knightRoot) return;
+        const cx = knightRoot.position.x;
+        const cy = knightRoot.position.y + 0.05;
+        const cz = knightRoot.position.z;
+
+        const COUNT = 18 + Math.floor(Math.random() * 13); // 18–30
+        const LIFETIME = 0.6;
+        const BASE_SIZE = 0.07;
+
+        const positions  = new Float32Array(COUNT * 3);
+        const velocities = new Float32Array(COUNT * 3);
+        for (let i = 0; i < COUNT; i++) {
+          positions[i * 3 + 0] = cx;
+          positions[i * 3 + 1] = cy;
+          positions[i * 3 + 2] = cz;
+          // Flat horizontal disk: random azimuth, outward speed 0.4–1.0 m/s
+          const phi    = Math.random() * Math.PI * 2;
+          const radial = 0.4 + Math.random() * 0.6;
+          const up     = 0.2 + Math.random() * 0.3;
+          velocities[i * 3 + 0] = Math.cos(phi) * radial;
+          velocities[i * 3 + 1] = up;
+          velocities[i * 3 + 2] = Math.sin(phi) * radial;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+          color:           0xf0e8d8, // off-white snow
+          size:            BASE_SIZE,
+          sizeAttenuation: true,
+          transparent:     true,
+          opacity:         0.85,
+          depthWrite:      false,
+          blending:        THREE.NormalBlending,
+        });
+
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        this.scene.add(points);
+
+        this.puffs.push({
+          points,
+          velocities,
+          age:      0,
+          lifetime: LIFETIME,
+          baseSize: BASE_SIZE,
+        });
+      }
+
+      update(delta) {
+        for (let p = this.puffs.length - 1; p >= 0; p--) {
+          const puff = this.puffs[p];
+          puff.age += delta;
+          const t = puff.age / puff.lifetime; // 0→1
+
+          if (t >= 1.0) {
+            this.scene.remove(puff.points);
+            puff.points.geometry.dispose();
+            puff.points.material.dispose();
+            this.puffs.splice(p, 1);
+            continue;
+          }
+
+          // Fade opacity and shrink size as puff ages
+          puff.points.material.opacity = 0.85 * (1.0 - t);
+          puff.points.material.size    = puff.baseSize * (1.0 - t * 0.5);
+
+          // Move particles
+          const pos = puff.points.geometry.attributes.position;
+          const arr = pos.array;
+          const vel = puff.velocities;
+          const n   = arr.length / 3;
+          for (let i = 0; i < n; i++) {
+            arr[i * 3 + 0] += vel[i * 3 + 0] * delta;
+            arr[i * 3 + 1] += vel[i * 3 + 1] * delta;
+            arr[i * 3 + 2] += vel[i * 3 + 2] * delta;
+            // Gentle gravity drags upward particles back down
+            vel[i * 3 + 1] -= 2.0 * delta;
+          }
+          pos.needsUpdate = true;
+        }
+      }
+    }
+
+    const snowPuffSystem = new SnowPuffSystem(scene);
+    window.snowPuffSystem = snowPuffSystem;
+
+    window.spawnSnowPuff = function spawnSnowPuff(knightRoot) {
+      try {
+        snowPuffSystem.spawn(knightRoot);
+      } catch (err) {
+        console.warn('[lkb-3d] snowPuffSystem.spawn threw', err);
+      }
+    };
+
     /* ── WeaponTrail ────────────────────────────────────────────────
        A brief glowing arc the FP sword tip leaves behind during a
-       swing. Built as a single LineBasicMaterial polyline whose
-       vertices are a ring buffer of recent sword-tip *world*
-       positions, rebuilt each frame.
+       swing. Built as a camera-billboarded *ribbon strip*: a mesh of
+       indexed triangles whose centerline is a ring buffer of recent
+       sword-tip *world* positions. Each centerline sample expands to
+       two vertices (top/bottom) offset perpendicular to the local
+       trail direction, projected onto the screen via the camera's
+       forward axis so the ribbon always faces the viewer.
+
+       Ribbon look:
+         - Width tapers from ~6 cm at the newest sample (sword tip
+           "now") to 0 at the oldest sample (start of the streak).
+         - Vertex colors carry an alpha gradient (amber → transparent
+           toward the tail) and are drawn additively, so the ribbon
+           reads as a glowing arc rather than a flat decal.
 
        Lifecycle:
          - activate()   — clear buffer, set active=true; update() will
-                          start pushing new tip samples and the line
+                          start pushing new tip samples and the ribbon
                           is shown at full opacity.
          - deactivate() — set active=false; update() stops pushing
                           and fades opacity to 0 over ~0.2 s, then
-                          hides + empties the line. Re-activating
+                          hides + empties the mesh. Re-activating
                           during fade picks up cleanly.
 
        The sword-tip offset is in *sword-local* space; KayKit blades
@@ -4343,40 +4466,83 @@
         // Ring buffer of THREE.Vector3 — most recent tip sample last.
         this.points    = [];
         this.active    = false;
-        // 0..1 — line is hidden when this hits 0 *and* !active.
+        // 0..1 — mesh is hidden when this hits 0 *and* !active.
         this.opacity   = 0;
         this.fadeRate  = 1 / 0.2; // 0→1 (or 1→0) in 0.2 s
+
+        // Ribbon half-width at the newest end, in world meters. Tapers
+        // linearly to 0 at the oldest sample so the trail "pinches off".
+        this.ribbonWidth = 0.06;
+
+        // Base color as THREE.Color so we can pre-multiply into the
+        // per-vertex color attribute (additive blending only respects
+        // RGB; alpha controls the actual fade).
+        this._baseColor = new THREE.Color(color);
 
         // Tip offset in sword-local coords. KayKit blade extends roughly
         // along +Y from the grip; tweak here if visually wrong.
         this._tipLocal = new THREE.Vector3(0, 0.9, 0);
-        // Scratch vector so we don't allocate per-frame.
-        this._tipWorld = new THREE.Vector3();
+        // Scratch vectors so we don't allocate per-frame.
+        this._tipWorld   = new THREE.Vector3();
+        this._dir        = new THREE.Vector3();
+        this._camForward = new THREE.Vector3();
+        this._side       = new THREE.Vector3();
 
+        // Ribbon geometry: 2 vertices per centerline sample (top/bottom),
+        // (maxPoints - 1) quads × 2 triangles × 3 indices = 6 indices/quad.
         this.geometry = new THREE.BufferGeometry();
-        // Pre-allocate position buffer for maxPoints vertices (xyz each).
-        this._positions = new Float32Array(this.maxPoints * 3);
+        this._positions = new Float32Array(this.maxPoints * 2 * 3);
+        // RGBA per vertex — alpha carries the gradient + global fade.
+        this._colors    = new Float32Array(this.maxPoints * 2 * 4);
+        const indexCount = Math.max(0, (this.maxPoints - 1) * 6);
+        this._indices   = new Uint16Array(indexCount);
+        // Pre-fill indices — they never change, only drawRange does.
+        // Quad i uses centerline samples i and i+1:
+        //   verts: 2i   (top_i),    2i+1 (bot_i)
+        //          2i+2 (top_i+1),  2i+3 (bot_i+1)
+        for (let i = 0; i < this.maxPoints - 1; i++) {
+          const o = i * 6;
+          const a = i * 2;       // top_i
+          const b = i * 2 + 1;   // bot_i
+          const c = i * 2 + 2;   // top_i+1
+          const d = i * 2 + 3;   // bot_i+1
+          this._indices[o + 0] = a;
+          this._indices[o + 1] = b;
+          this._indices[o + 2] = c;
+          this._indices[o + 3] = c;
+          this._indices[o + 4] = b;
+          this._indices[o + 5] = d;
+        }
         this.geometry.setAttribute(
           'position',
           new THREE.BufferAttribute(this._positions, 3),
         );
+        this.geometry.setAttribute(
+          'color',
+          new THREE.BufferAttribute(this._colors, 4),
+        );
+        this.geometry.setIndex(new THREE.BufferAttribute(this._indices, 1));
         this.geometry.setDrawRange(0, 0);
 
-        this.material = new THREE.LineBasicMaterial({
-          color,
-          transparent: true,
-          opacity:     0,
-          depthTest:   false,
-          depthWrite:  false,
-          blending:    THREE.AdditiveBlending,
-          linewidth:   3, // WebGL ignores >1 on most browsers; bright color compensates.
+        // Mesh-based ribbon material: vertexColors drive the amber→
+        // transparent gradient, AdditiveBlending makes it glow over
+        // the sword, DoubleSide so the strip is visible no matter
+        // which way the swing direction curves.
+        this.material = new THREE.MeshBasicMaterial({
+          vertexColors: true,
+          transparent:  true,
+          opacity:      1,
+          depthTest:    false,
+          depthWrite:   false,
+          blending:     THREE.AdditiveBlending,
+          side:         THREE.DoubleSide,
         });
 
-        this.line = new THREE.Line(this.geometry, this.material);
-        this.line.frustumCulled = false;
-        this.line.renderOrder   = 10000;
-        this.line.visible       = false;
-        this.scene.add(this.line);
+        this.mesh = new THREE.Mesh(this.geometry, this.material);
+        this.mesh.frustumCulled = false;
+        this.mesh.renderOrder   = 10000;
+        this.mesh.visible       = false;
+        this.scene.add(this.mesh);
       }
 
       activate() {
@@ -4384,7 +4550,7 @@
         this.opacity = 1;
         this.points.length = 0;
         this.geometry.setDrawRange(0, 0);
-        this.line.visible = true;
+        this.mesh.visible = true;
       }
 
       deactivate() {
@@ -4410,32 +4576,100 @@
           if (this.opacity === 0) {
             this.points.length = 0;
             this.geometry.setDrawRange(0, 0);
-            this.line.visible = false;
-            this.material.opacity = 0;
+            this.mesh.visible = false;
             return;
           }
         } else {
           // Fully idle — nothing to draw.
-          if (this.line.visible) this.line.visible = false;
+          if (this.mesh.visible) this.mesh.visible = false;
           return;
         }
 
-        // Rebuild vertex buffer from ring.
         const n = this.points.length;
-        for (let i = 0; i < n; i++) {
-          const p = this.points[i];
-          this._positions[i * 3 + 0] = p.x;
-          this._positions[i * 3 + 1] = p.y;
-          this._positions[i * 3 + 2] = p.z;
+        if (n < 2) {
+          // Need at least 2 samples to form a segment.
+          this.geometry.setDrawRange(0, 0);
+          return;
         }
+
+        // Camera forward in world space — used to billboard the ribbon
+        // so its width is always perpendicular to the view direction.
+        this._camForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+
+        const halfW   = this.ribbonWidth;
+        const baseR   = this._baseColor.r;
+        const baseG   = this._baseColor.g;
+        const baseB   = this._baseColor.b;
+        const globalA = this.opacity;
+
+        // Build ribbon vertices: for each centerline sample i, compute
+        // direction to neighbor sample, take side = normalize(dir × camForward),
+        // emit (p + side*w, p - side*w) where w tapers 0→halfW (oldest→newest).
+        for (let i = 0; i < n; i++) {
+          const p     = this.points[i];
+          // Local tangent: forward difference, falling back to backward
+          // at the ring's tail so endpoints still get a direction.
+          if (i < n - 1) {
+            const q = this.points[i + 1];
+            this._dir.set(q.x - p.x, q.y - p.y, q.z - p.z);
+          } else {
+            const q = this.points[i - 1];
+            this._dir.set(p.x - q.x, p.y - q.y, p.z - q.z);
+          }
+          const dlen = this._dir.length();
+          if (dlen > 1e-6) this._dir.multiplyScalar(1 / dlen);
+          else             this._dir.set(1, 0, 0);
+
+          // Billboard side vector: ⟂ both motion and camera forward.
+          this._side.crossVectors(this._dir, this._camForward);
+          const slen = this._side.length();
+          if (slen > 1e-6) this._side.multiplyScalar(1 / slen);
+          else             this._side.set(0, 1, 0);
+
+          // Linear taper: 0 at oldest (i=0), full width at newest (i=n-1).
+          const tWidth = (n === 1) ? 1 : (i / (n - 1));
+          const w      = halfW * tWidth;
+
+          const sx = this._side.x * w;
+          const sy = this._side.y * w;
+          const sz = this._side.z * w;
+
+          // Top vertex (p + side*w).
+          const oTop = i * 6;
+          this._positions[oTop + 0] = p.x + sx;
+          this._positions[oTop + 1] = p.y + sy;
+          this._positions[oTop + 2] = p.z + sz;
+          // Bottom vertex (p - side*w).
+          const oBot = oTop + 3;
+          this._positions[oBot + 0] = p.x - sx;
+          this._positions[oBot + 1] = p.y - sy;
+          this._positions[oBot + 2] = p.z - sz;
+
+          // Alpha gradient: transparent at oldest sample, fully opaque
+          // at the newest (sword-tip "now"). Multiplied by globalA so
+          // deactivate()'s fade-out applies on top of the gradient.
+          const aGrad = tWidth;
+          const a     = aGrad * globalA;
+          const cTop  = i * 8;       // 2 verts × 4 channels
+          this._colors[cTop + 0] = baseR;
+          this._colors[cTop + 1] = baseG;
+          this._colors[cTop + 2] = baseB;
+          this._colors[cTop + 3] = a;
+          this._colors[cTop + 4] = baseR;
+          this._colors[cTop + 5] = baseG;
+          this._colors[cTop + 6] = baseB;
+          this._colors[cTop + 7] = a;
+        }
+
         this.geometry.attributes.position.needsUpdate = true;
-        this.geometry.setDrawRange(0, n);
-        this.material.opacity = 0.9 * this.opacity;
-        if (!this.line.visible) this.line.visible = true;
+        this.geometry.attributes.color.needsUpdate    = true;
+        // n centerline samples → (n-1) quads → 6*(n-1) indices to draw.
+        this.geometry.setDrawRange(0, (n - 1) * 6);
+        if (!this.mesh.visible) this.mesh.visible = true;
       }
 
       dispose() {
-        try { this.scene.remove(this.line); } catch (e) {}
+        try { this.scene.remove(this.mesh); } catch (e) {}
         try { this.geometry.dispose(); } catch (e) {}
         try { this.material.dispose(); } catch (e) {}
       }
@@ -5161,6 +5395,8 @@
 
       try { if (window.sfxSwing) window.sfxSwing(); } catch (e) {}
       try { if (window.sfxStep)  window.sfxStep();  } catch (e) {}
+      // Snow puff at attacker's feet on attack windup
+      try { if (window.spawnSnowPuff && attacker.root) window.spawnSnowPuff(attacker.root); } catch (e) {}
 
       attacker.state = 'attack';
       attacker.impactScheduled = false;
@@ -6056,6 +6292,46 @@
       pos.needsUpdate = true;
     }
 
+    // ── idle breathing additive sway ───────────────────────────────
+    // Subtle vertical bob + yaw modulation layered ON TOP of the KayKit
+    // Idle mixer animation. Only runs when combatant.state === 'idle' so
+    // attack/guard/hit/dead poses are never perturbed. Per-side phase
+    // offsets desync crimson and azure (otherwise they'd breathe in
+    // lockstep, which reads as "AI rig" rather than two people standing).
+    //
+    // baseY/baseRotY are captured ONCE per combatant on the first idle
+    // frame and treated as constants forever after. Writing
+    //   root.position.y = baseY + sin(...) * AMP
+    // means MP snapshot lerps applied earlier in the frame *can* be
+    // overwritten on the Y axis, but on both host and guest baseY is the
+    // same (knights stand on the same log, y≈0), so the values converge
+    // to the same orbit. X/Z (the locomotion axes the host actually moves)
+    // are untouched.
+    //
+    // Amplitudes are deliberately tiny: 1.2 cm vertical, ~0.46° yaw.
+    // Anything bigger reads as wobble or motion sickness in FP view.
+    const IDLE_BREATH_BOB_AMP   = 0.012;  // 1.2 cm
+    const IDLE_BREATH_BOB_FREQ  = 1.7;    // rad/s — gentle ~3.7 s cycle when × 2π
+    const IDLE_BREATH_YAW_AMP   = 0.008;  // ~0.46°
+    const IDLE_BREATH_YAW_FREQ  = 0.9;    // rad/s — slower than bob
+    const IDLE_BREATH_PHASE = { crimson: 0, azure: 2.3 };
+
+    function updateIdleBreathing(delta) {
+      if (!combatants) return;
+      const t = _sceneTime;
+      for (const id of ['crimson', 'azure']) {
+        const c = combatants[id];
+        if (!c || !c.root) continue;
+        if (c.state !== 'idle') continue;
+        // Lazy-capture the base pose ONCE — never mutate after.
+        if (typeof c._baseY    !== 'number') c._baseY    = c.root.position.y;
+        if (typeof c._baseRotY !== 'number') c._baseRotY = c.root.rotation.y;
+        const phase = IDLE_BREATH_PHASE[id] || 0;
+        c.root.position.y = c._baseY    + Math.sin(t * IDLE_BREATH_BOB_FREQ + phase) * IDLE_BREATH_BOB_AMP;
+        c.root.rotation.y = c._baseRotY + Math.sin(t * IDLE_BREATH_YAW_FREQ + phase) * IDLE_BREATH_YAW_AMP;
+      }
+    }
+
     /* ── resize handler ─────────────────────────────────────────── */
     // aspect-aware FOV: at portrait/narrow viewports we widen vertical FOV so
     // horizontal coverage stays constant (game is tuned for 16:9 landscape).
@@ -6108,6 +6384,113 @@
     // (not every frame). Reset when override clears.
     let _lastCombatKey = null;
 
+    /* ── procedural cape secondary motion (capePhys) ──────────────
+       KayKit knight has a static "Knight_Cape" mesh (Crimson_Knight_Cape,
+       Azure_Knight_Cape) with no physics baked in. We add a lightweight
+       verlet-style inertia: track each cape's parent-space velocity per
+       frame and lean the cape's local pivot opposite to forward motion
+       (running ⇒ cape trails back), plus a low-amplitude sine "wind" so
+       even idle capes drift gently. Damped lerp + hard clamp prevents
+       runaway flips. Mesh visibility (e.g. FP-mode hide) is preserved —
+       we simply skip the rotation write when the cape isn't visible. */
+    const capeVerlet = {
+      /** @type {Map<THREE.Object3D, {posPrev:THREE.Vector3, posCur:THREE.Vector3, phase:number, baseX:number, baseY:number, baseZ:number, attached:boolean}>} */
+      states: new Map(),
+      _tmpWorld: new THREE.Vector3(),
+      _tmpParentInv: new THREE.Quaternion(),
+      _tmpParentQ: new THREE.Quaternion(),
+      _tmpVel: new THREE.Vector3(),
+      _tmpLocalVel: new THREE.Vector3(),
+      // Lazily walk a combatant root and register every node whose name
+      // contains "Cape" (case-insensitive). Idempotent — already-known
+      // nodes are skipped. Safe to call every frame.
+      attachFrom(root) {
+        if (!root) return;
+        try {
+          root.traverse((obj) => {
+            if (!obj || !obj.name) return;
+            if (!/cape/i.test(obj.name)) return;
+            if (this.states.has(obj)) return;
+            const wp = new THREE.Vector3();
+            obj.getWorldPosition(wp);
+            this.states.set(obj, {
+              posPrev: wp.clone(),
+              posCur: wp.clone(),
+              phase: this.states.size * 1.37, // stagger sine phase per cape
+              baseX: obj.rotation.x,
+              baseY: obj.rotation.y,
+              baseZ: obj.rotation.z,
+              attached: true,
+            });
+          });
+        } catch (e) { /* defensive — traverse should never throw */ }
+      },
+      // Per-frame integration. Computes parent-local velocity from world
+      // position deltas and drives rotation.x/.z toward a target that
+      // combines (a) inertia lean opposite to motion and (b) ambient wind.
+      update(delta, time) {
+        if (this.states.size === 0 || delta <= 0) return;
+        const dtInv = 1 / Math.max(delta, 1e-4);
+        for (const [node, st] of this.states) {
+          try {
+            if (!node.parent) continue;
+            // Skip when hidden (e.g. FP-mode hides crimson body+cape).
+            // We still update posPrev so when it reappears we don't get a
+            // spurious giant velocity from the gap.
+            node.getWorldPosition(this._tmpWorld);
+            st.posPrev.copy(st.posCur);
+            st.posCur.copy(this._tmpWorld);
+            if (node.visible === false) continue;
+
+            // World-space velocity → parent-local frame, so the lean is
+            // relative to the body (not the world axes). Forward motion
+            // in body-local +Z should tilt cape backward (+rotX).
+            this._tmpVel.copy(st.posCur).sub(st.posPrev).multiplyScalar(dtInv);
+            node.parent.getWorldQuaternion(this._tmpParentQ);
+            this._tmpParentInv.copy(this._tmpParentQ).invert();
+            this._tmpLocalVel.copy(this._tmpVel).applyQuaternion(this._tmpParentInv);
+
+            // Inertia lean — gentle gain so a 2 m/s sprint produces ~0.2 rad.
+            // Sign flips so the cape lags BEHIND the direction of travel.
+            const leanGain = 0.10;
+            let targetX = st.baseX + this._tmpLocalVel.z * leanGain;
+            let targetZ = st.baseZ - this._tmpLocalVel.x * leanGain;
+            let targetY = st.baseY;
+
+            // Ambient wind — barely-perceptible idle drift so the cape
+            // never feels frozen. Independent phase per cape avoids sync.
+            const t = time + st.phase;
+            targetX += Math.sin(t * 1.3) * 0.04;
+            targetZ += Math.sin(t * 1.1) * 0.03;
+
+            // Hard clamp to ±0.3 rad around the rest pose — keeps the
+            // cape from flipping inside-out even at peak velocity.
+            const clamp = 0.3;
+            targetX = Math.max(st.baseX - clamp, Math.min(st.baseX + clamp, targetX));
+            targetZ = Math.max(st.baseZ - clamp, Math.min(st.baseZ + clamp, targetZ));
+
+            // Damped spring lerp — α=0.10 yields ~6-frame settle at 60fps.
+            const a = 0.10;
+            node.rotation.x = node.rotation.x + (targetX - node.rotation.x) * a;
+            node.rotation.y = node.rotation.y + (targetY - node.rotation.y) * a;
+            node.rotation.z = node.rotation.z + (targetZ - node.rotation.z) * a;
+          } catch (e) { /* one bad cape shouldn't kill the loop */ }
+        }
+      },
+    };
+
+    function updateCapes(delta, time) {
+      try {
+        // Lazy attach — call every frame, but the Map dedupes so the cost
+        // collapses to a no-op once both knights are loaded.
+        if (typeof combatants !== 'undefined' && combatants) {
+          if (combatants.crimson && combatants.crimson.root) capeVerlet.attachFrom(combatants.crimson.root);
+          if (combatants.azure   && combatants.azure.root)   capeVerlet.attachFrom(combatants.azure.root);
+        }
+        capeVerlet.update(delta, time);
+      } catch (e) { /* never let cape FX break the render loop */ }
+    }
+
     function animate() {
       requestAnimationFrame(animate);
       // SAFETY GUARD: reset camera if it has drifted out of the playable bowl.
@@ -6132,6 +6515,16 @@
       if (mixers.length > 0) {
         mixers.forEach(m => m.update(delta));
       }
+      // Idle breathing — layered AFTER mixers (so the additive sway
+      // rides on top of the baked Idle clip) and BEFORE composer.render
+      // (so the sway is visible on this frame). No-op for any combatant
+      // not in 'idle' state — attack/guard/hit/dead all skip cleanly.
+      updateIdleBreathing(delta);
+      // Procedural cape secondary motion — runs AFTER mixers (so it
+      // composes on top of the baked Idle hip sway) and BEFORE render.
+      // capePhys lazily attaches once both knight GLBs are loaded; see
+      // capeVerlet definition above the animate() function for details.
+      updateCapes(delta, time);
       // ── stamina tick ─────────────────────────────────────────────
       // Per-frame stamina drain/regen for both knights. Costs:
       //   guard  → -STM_GUARD_DRAIN/s, auto-release at 0 + exhaust pill
@@ -6174,6 +6567,7 @@
         }
       }
       updateDust(delta);
+      try { snowPuffSystem.update(delta); } catch (e) {}
       updateEmbers(delta, time);
       updateTorches(delta, time);
 
