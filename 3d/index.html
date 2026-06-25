@@ -6440,9 +6440,12 @@
         this.bursts = []; // { points, velocities, age, lifetime, baseSize, baseOpacity }
       }
 
-      spawn(worldPos) {
+      // r68: count and velScale are optional (defaults keep legacy callers working).
+      //   count    — particle count (default 30)
+      //   velScale — radial velocity multiplier; ~1.0→0.4m, 1.5→0.6m, 2.5→1.0m spread
+      spawn(worldPos, count = 30, velScale = 1.0) {
         if (!worldPos) return;
-        const COUNT    = 30;
+        const COUNT    = count;
         const LIFETIME = 0.50;  // seconds
         const BASE_SIZE    = 0.09;
         const BASE_OPACITY = 0.65;
@@ -6458,7 +6461,7 @@
 
           // Flat radial disk with a small upward kick
           const phi    = (i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
-          const radial = 1.0 + Math.random() * 0.6; // 1.0–1.6 m/s
+          const radial = (1.0 + Math.random() * 0.6) * velScale; // velScale drives spread radius
           const up     = 0.12 + Math.random() * 0.14; // slight lift
           velocities[i * 3 + 0] = Math.cos(phi) * radial;
           velocities[i * 3 + 1] = up;
@@ -6646,9 +6649,10 @@
 
     const ambientGustSystem = new AmbientGustSystem(scene, camera);
 
-    window.spawnGroundDust = function spawnGroundDust(worldPos) {
+    // r68: count/velScale optional — legacy callers (no args) keep old behaviour.
+    window.spawnGroundDust = function spawnGroundDust(worldPos, count, velScale) {
       try {
-        groundDustSystem.spawn(worldPos);
+        groundDustSystem.spawn(worldPos, count, velScale);
       } catch (err) {
         console.warn('[lkb-3d] groundDustSystem.spawn threw', err);
       }
@@ -7299,6 +7303,16 @@
       if (window._koReplayRestoreFn) {
         try { window._koReplayRestoreFn(); } catch (e) {}
         window._koReplayRestoreFn = null;
+      }
+      // r68: cancel any in-flight stagger-boost timeScale so azure's hit anim
+      // doesn't stay at 0.6× across rounds.
+      if (window._staggerBoostHandle) {
+        clearTimeout(window._staggerBoostHandle);
+        window._staggerBoostHandle = null;
+      }
+      if (window._staggerBoostAction) {
+        try { window._staggerBoostAction.timeScale = 1.0; } catch (_e) {}
+        window._staggerBoostAction = null;
       }
       // r56: also cancel any in-flight hit-stop so mixers don't stay at 0
       // when a round resets mid-freeze.
@@ -8927,6 +8941,21 @@
       const mySwing = (attacker._swingId = (attacker._swingId || 0) + 1);
       // r55: capture tier into a local so the setTimeout closure reads a stable value
       const myChargeTier = chargeTier;
+      // r68: footstep dust at player feet on swing start — tier scales count + spread.
+      // Fires even on whiff so the charge weight reads regardless of hit.
+      try {
+        const _swingDustCounts   = [8,   15,  25];
+        const _swingDustVelScale = [1.0, 1.5, 2.5]; // → ~0.4m, 0.6m, 1.0m radius
+        const _swingDustPos = attacker.root
+          ? attacker.root.position.clone()
+          : new THREE.Vector3(0, 0, 0);
+        _swingDustPos.y = 0; // snap to ground plane
+        window.spawnGroundDust(
+          _swingDustPos,
+          _swingDustCounts[myChargeTier] || 8,
+          _swingDustVelScale[myChargeTier] || 1.0
+        );
+      } catch (_e) {}
       const chosenAttack = pickAttackClip();
       const attackAction = playClip(attacker, chosenAttack, {
         fadeIn: 0.15,
@@ -9002,7 +9031,24 @@
         if (defender && !window.gameState.azure.dead && defender.state !== 'guard' && defender.state !== 'attack') {
           const hitClip = pickHitClip(defender.state);
           defender.state = 'hit';
-          playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+          const hitAction = playClip(defender, hitClip, { fadeIn: 0.1, loop: false, weight: 1.0 });
+          // r68: tier-2 stagger boost — slow the hit anim to 0.6× so azure
+          // visibly staggers heavier. timeScale on the action only; does NOT
+          // touch mixer.timeScale (which KO-replay/hitLag systems own).
+          if (myChargeTier >= 2 && hitAction) {
+            hitAction.timeScale = 0.6;
+            if (window._staggerBoostHandle) clearTimeout(window._staggerBoostHandle);
+            window._staggerBoostAction = hitAction;
+            window._staggerBoostHandle = setTimeout(() => {
+              try {
+                if (window._staggerBoostAction) {
+                  window._staggerBoostAction.timeScale = 1.0;
+                }
+              } catch (_e) {}
+              window._staggerBoostHandle = null;
+              window._staggerBoostAction = null;
+            }, 500);
+          }
         }
 
         const defenderRoot = defender && defender.root;
