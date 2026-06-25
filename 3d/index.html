@@ -1383,6 +1383,23 @@
     }
     #fp-parry-flash.active { opacity: 1; }
 
+    /* r63: retreat dodge — cyan edge vignette flash (120ms).
+       Distinct from parry flash: edge-only radial (center transparent)
+       so it reads as a directional "speed burst" rather than a hit flash. */
+    #fp-dodge-flash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 27;
+      opacity: 0;
+      background: radial-gradient(ellipse at center,
+        transparent 40%,
+        rgba(80, 200, 220, 0.25) 70%,
+        rgba(40, 160, 190, 0.50) 100%);
+      transition: opacity 120ms ease-out;
+    }
+    #fp-dodge-flash.active { opacity: 1; }
+
     /* r52: ⚡ PARRY! HUD text — appears center-top on successful parry. */
     #fp-parry-text {
       position: fixed;
@@ -1697,6 +1714,9 @@
   <!-- r52: perfect-parry cyan-white flash (full-screen) + HUD text. -->
   <div id="fp-parry-flash"></div>
   <div id="fp-parry-text">⚡ PARRY!</div>
+
+  <!-- r63: retreat dodge edge vignette — cyan burst on Shift dodge. -->
+  <div id="fp-dodge-flash"></div>
 
   <!-- r55: charge-swing ring — SVG arc centered on reticle. JS drives
        stroke-dashoffset (0..138) and .tier1/.tier2 class for color. -->
@@ -4566,6 +4586,16 @@
       _lbProj:          new THREE.Vector3(),
       dmgArrowTimer:    0,
       vignetteFadeTimer: 0,
+      // r63: retreat dodge tween state — camera-position offset in world -X.
+      // triggerRetreatDodge() arms this; updateDodge(delta) advances it each
+      // frame; the result is applied in animate() after cameraDirector.update().
+      dodgeFlashEl:     null, // resolved below after DOM ready
+      dodge: {
+        active:   false,
+        elapsed:  0,
+        duration: 0.30,  // seconds — full out-and-back cycle
+        peakOffset: 0.8, // metres along world -X at apex (t=0.5)
+      },
       fovPunch: {
         active:  false,
         phase:   'in',   // 'in' (70→78 over inDur) | 'out' (78→70 over outDur)
@@ -4576,6 +4606,8 @@
         peakFov: FP_SHOT.fov + 8,  // 70 → 78
       },
     };
+    // r63: resolve dodge flash DOM ref now that the element exists.
+    FpPolish.dodgeFlashEl = document.getElementById('fp-dodge-flash');
 
     // flashDamageVignette — kick the red vignette to opacity 1 immediately
     // then let CSS transition fade it back to 0 over 0.4s. We clear any
@@ -4959,6 +4991,77 @@
         el.classList.remove('active');
         FpPolish.edgeBlurTimer = 0;
       }, 80);
+    }
+
+    // ── r63: triggerRetreatDodge ─────────────────────────────────────────
+    // Retreat dodge on Shift key — camera slides 0.8m toward world -X
+    // (away from azure at +X) over 0.3s with an ease-out-back-in shape,
+    // granting 100ms i-frames. The movement is a camera-position OFFSET
+    // (not root mesh tween) because FP_SHOT.getPosition() is a fixed anchor.
+    //
+    // Offset curve: sin(π * t) scaled to peakOffset — peaks at t=0.5
+    // giving a smooth out-and-back lunge. World direction is always -X
+    // (azure is hardcoded at +X; no live vector math needed).
+    function triggerRetreatDodge() {
+      if (!fpInputActive()) return;
+      const gs = window.gameState.crimson;
+      if (!gs) return;
+      if (gs.stamina < STM_DODGE_COST) {
+        showExhaustPill('EXHAUSTED');
+        return;
+      }
+      const now = performance.now();
+      if (now < (window._dodgeCooldownUntil || 0)) return;
+      // Commit
+      gs.stamina = Math.max(0, gs.stamina - STM_DODGE_COST);
+      window._dodgeCooldownUntil = now + 800;
+      window._dodgeIFrameUntil   = now + 100;
+      // Arm the per-frame tween (updateDodge in animate() drives the offset).
+      FpPolish.dodge.active  = true;
+      FpPolish.dodge.elapsed = 0;
+      // FOV zoom-in: −2° for 80ms (uses FP_SHOT.fov as baseline, not restFov
+      // which fovPunch already owns — guard against simultaneous use).
+      const baseFov = FP_SHOT.fov;
+      camera.fov = baseFov - 2;
+      camera.updateProjectionMatrix();
+      setTimeout(() => {
+        if (cameraDirector.viewMode === 'fp' && !FpPolish.fovPunch.active) {
+          camera.fov = baseFov;
+          camera.updateProjectionMatrix();
+        }
+      }, 80);
+      // Edge cyan flash — 120ms via CSS class toggle.
+      const dfEl = FpPolish.dodgeFlashEl;
+      if (dfEl) {
+        if (FpPolish._dodgeFlashTimer) {
+          clearTimeout(FpPolish._dodgeFlashTimer);
+          FpPolish._dodgeFlashTimer = 0;
+        }
+        dfEl.style.transition = 'none';
+        dfEl.style.opacity = '0';
+        void dfEl.offsetWidth;
+        dfEl.classList.add('active');
+        dfEl.style.transition = '';
+        FpPolish._dodgeFlashTimer = setTimeout(() => {
+          dfEl.classList.remove('active');
+          FpPolish._dodgeFlashTimer = 0;
+        }, 120);
+      }
+    }
+
+    // updateDodge — per-frame camera offset computation, called from animate().
+    // Returns the additive world-X offset for the camera (negative = toward -X = away from azure).
+    // Shape: sin(π * t) ramps from 0, peaks at midpoint, returns to 0 — transient lunge.
+    function updateDodge(delta) {
+      const d = FpPolish.dodge;
+      if (!d.active) return 0;
+      if (cameraDirector.viewMode !== 'fp') { d.active = false; return 0; }
+      d.elapsed += delta;
+      const t = d.elapsed / d.duration;
+      if (t >= 1.0) { d.active = false; return 0; }
+      // sin(π*t): 0 at t=0, peak 1 at t=0.5, 0 at t=1.
+      const offset = Math.sin(Math.PI * t) * d.peakOffset;
+      return -offset; // -X direction (away from azure)
     }
 
     // refreshFpOverlays — single source of truth for the FP HUD overlays.
@@ -6725,6 +6828,7 @@
     const STM_ATTACK_COST = 20;       // per swing
     const STM_GUARD_DRAIN = 10;       // per second while guarding
     const STM_IDLE_REGEN  = 25;       // per second while not attacking/guarding
+    const STM_DODGE_COST  = 8;        // r63: retreat dodge (Shift key)
     const WINS_MAX = 3;
     const koOverlay = document.getElementById('ko-overlay');
     const matchWonOverlay = document.getElementById('match-won-overlay');
@@ -6929,6 +7033,21 @@
         if (FpPolish.edgeBlurEl) {
           FpPolish.edgeBlurEl.classList.remove('active');
           FpPolish.edgeBlurEl.style.opacity = '0';
+        }
+      } catch (e) {}
+      // r63: clear retreat dodge state so cooldown/i-frame/camera don't leak between rounds.
+      try {
+        FpPolish.dodge.active  = false;
+        FpPolish.dodge.elapsed = 0;
+        window._dodgeCooldownUntil = 0;
+        window._dodgeIFrameUntil   = 0;
+        if (FpPolish._dodgeFlashTimer) {
+          clearTimeout(FpPolish._dodgeFlashTimer);
+          FpPolish._dodgeFlashTimer = 0;
+        }
+        if (FpPolish.dodgeFlashEl) {
+          FpPolish.dodgeFlashEl.classList.remove('active');
+          FpPolish.dodgeFlashEl.style.opacity = '0';
         }
       } catch (e) {}
       // Advance the round counter and announce the new round. Initial
@@ -7186,6 +7305,9 @@
     window.applyDamage = function applyDamage(defenderId, amount, opts) {
       const s = window.gameState[defenderId];
       if (!s || s.dead) return;
+      // r63: retreat dodge i-frame — skip all damage to crimson during the
+      // 100ms invincibility window immediately after a Shift dodge fires.
+      if (defenderId === 'crimson' && performance.now() < (window._dodgeIFrameUntil || 0)) return;
       // Guard absorbs the hit — chip damage only (20%) plus a clang sfx
       // so the player feels the contact even though most of it is blocked.
       const defenderCombatant = combatants[defenderId];
@@ -8600,6 +8722,11 @@
         if (e.repeat) return;
         e.preventDefault();
         swapFpWeapon();
+      } else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        // r63: retreat dodge — Shift key while in FP+locked, gates on stamina + cooldown.
+        if (e.repeat) return;
+        e.preventDefault();
+        triggerRetreatDodge();
       }
     });
 
@@ -8644,11 +8771,14 @@
     // flag manually and mirrors the same UI side-effects the real
     // pointerlockchange listener fires (hide/show fp-lock-hint, toggle
     // reticle visibility), so the on-screen state stays consistent.
-    window.playerAttack     = playerAttack;
-    window.playerGuardEnter = playerGuardEnter;
-    window.playerGuardExit  = playerGuardExit;
-    window.fpInputActive    = fpInputActive;
-    window.combatants       = combatants;
+    window.playerAttack        = playerAttack;
+    window.playerGuardEnter    = playerGuardEnter;
+    window.playerGuardExit     = playerGuardExit;
+    window.fpInputActive       = fpInputActive;
+    window.combatants          = combatants;
+    // r63: expose retreat dodge for QA headless bridge (synthetic key drivers).
+    // triggerRetreatDodge() already fires — this alias makes it discoverable.
+    window.triggerRetreatDodge = triggerRetreatDodge;
     // r52: QA hook — simulates a perfect parry without requiring real timing.
     // Usage: window.__triggerParryTest() — arms azure as if in telegraph windup
     // at elapsed 200ms, then calls playerGuardEnter so the parry path fires.
@@ -9890,6 +10020,10 @@
           // on the same frame it's computed (not one frame stale like updateFovPunch).
           const _pkOffset = updateParryKick(delta);
           camera.rotation.set(cameraDirector.fpPitch + _pkOffset, cameraDirector.fpYaw, 0);
+          // r63: apply retreat dodge camera offset AFTER director sets position.
+          // updateDodge() returns a world-X delta (negative = away from azure).
+          const _dodgeOffset = updateDodge(delta);
+          if (_dodgeOffset !== 0) camera.position.x += _dodgeOffset;
         } else {
           camera.lookAt(cameraDirector.currentLookAt);
         }
