@@ -9352,6 +9352,43 @@
     // and the trail share lifetime with the FP viewmodel.
     let weaponTrail = null;
 
+    // ── r119: azure swing slash trail ──────────────────────────────
+    // Cyan-blue additive ribbon that tracks azure's sword tip during
+    // attack swings. Uses the same WeaponTrail class as the player
+    // trail. Lazy-initialized on first activation to avoid a race
+    // with GLB load order. Sword mesh resolved fresh on each activate
+    // so roster swaps (switchOpponent) are handled automatically.
+    let azureWeaponTrail = null;
+
+    function activateAzureTrail() {
+      try {
+        const azRoot = combatants && combatants.azure && combatants.azure.root;
+        if (!azRoot) return;
+        // Lazy-resolve sword mesh: exact name first, then /sword/i fallback.
+        let swordNode = null;
+        azRoot.traverse((o) => {
+          if (!swordNode && o.isMesh && o.name === 'Azure_1H_Sword') swordNode = o;
+        });
+        if (!swordNode) {
+          azRoot.traverse((o) => {
+            if (!swordNode && o.isMesh && /sword/i.test(o.name)) swordNode = o;
+          });
+        }
+        if (!swordNode) return; // GLB has no sword mesh — silent skip
+        // Re-wire sword reference on every activate so roster swaps work.
+        if (!azureWeaponTrail) {
+          azureWeaponTrail = new WeaponTrail(scene, swordNode, 0x8aafff, 24);
+        } else {
+          azureWeaponTrail.sword = swordNode;
+        }
+        azureWeaponTrail.activate();
+      } catch (e) { console.warn('[r119] azureTrail activate failed', e); }
+    }
+
+    function deactivateAzureTrail() {
+      try { if (azureWeaponTrail) azureWeaponTrail.deactivate(); } catch (e) {}
+    }
+
     /* ── game state, HUD bars, death & reset ───────────────────────
        window.gameState holds per-knight HP/SP. updateGaugeDOM() pushes
        the values into the bar widths in the top HUD. window.applyDamage
@@ -10502,12 +10539,14 @@
           const saved = mixers.map(m => m.timeScale);
           mixers.forEach(m => { m.timeScale = 0; });
           if (weaponTrail) weaponTrail.frozen = true;
+          if (azureWeaponTrail) azureWeaponTrail.frozen = true; // r119
 
           window._hitLagRestoreFn = function () {
             for (let i = 0; i < mixers.length; i++) {
               mixers[i].timeScale = (saved[i] != null) ? saved[i] : 1;
             }
             if (weaponTrail) weaponTrail.frozen = false;
+            if (azureWeaponTrail) azureWeaponTrail.frozen = false; // r119
             window._hitLagHandle    = null;
             window._hitLagRestoreFn = null;
           };
@@ -10840,6 +10879,7 @@
       if (local && weaponTrail) {
         try { weaponTrail.activate(); } catch (e) {}
       }
+      if (attackerLabel === 'azure') activateAzureTrail(); // r119
 
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
@@ -10869,6 +10909,9 @@
             try { weaponTrail.deactivate(); } catch (e) {}
           }
         }, dur * 1.00 * 1000);
+      }
+      if (attackerLabel === 'azure') { // r119
+        setTimeout(() => deactivateAzureTrail(), dur * 1.00 * 1000);
       }
 
       setTimeout(() => {
@@ -11068,6 +11111,7 @@
           loop: false,
           weight: 1.0,
         });
+        if (attackerLabel === 'azure') activateAzureTrail(); // r119
 
         // r51: In FP mode (azure attacking crimson), defender auto-guard is
         // suppressed — the player must press E themselves during the telegraph
@@ -11184,6 +11228,7 @@
                 curSwingAttacker2.state = 'attack';
                 const atk2 = playClip(curSwingAttacker2, pickAttackClip(attackerLabel), { fadeIn: 0.15, loop: false, weight: 1.0 });
                 const dur2 = (atk2 && curSwingAttacker2.currentDuration) || 1.0;
+                if (attackerLabel === 'azure') activateAzureTrail(); // r119: re-activate for 2nd strike
 
                 // 2nd impact at 70% of 2nd swing — damage 3 (follow-up is weaker).
                 setTimeout(() => {
@@ -11207,6 +11252,9 @@
                 }, dur2 * 0.70 * 1000);
 
                 // Idle restore after 2nd swing.
+                if (attackerLabel === 'azure') { // r119: deactivate azure trail after 2nd strike
+                  setTimeout(() => deactivateAzureTrail(), dur2 * 1.00 * 1000);
+                }
                 setTimeout(() => {
                   if (curSwingAttacker2._swingId !== doubleSwing) return;
                   if (combatants[attackerLabel] && !window.gameState[attackerLabel].dead) {
@@ -11228,6 +11276,9 @@
         // is a one-shot clampWhenFinished clip we want to hold.
         // r62: guarded by swingId — double strike bumps it at 1st impact,
         // so this restore naturally no-ops when chaining to 2nd strike.
+        if (attackerLabel === 'azure') { // r119: deactivate azure trail at swing end
+          setTimeout(() => deactivateAzureTrail(), dur * 1.00 * 1000);
+        }
         setTimeout(() => {
           if (swingAttacker._swingId !== mySwing) return; // superseded
           const aDead = window.gameState[attackerLabel].dead;
@@ -13781,6 +13832,7 @@
       // on the camera-parented sword reads the correct transform, and
       // BEFORE composer.render() so the new line geometry gets drawn.
       if (weaponTrail) weaponTrail.update(delta);
+      if (azureWeaponTrail) azureWeaponTrail.update(delta); // r119
       // BokehPass auto-focus per frame: track camera distance so DoF stays
       // sharp on the knights at any view (FP close shots, cinematic far shots).
       if (bokehPass && bokehPass.uniforms && bokehPass.uniforms.focus) {
