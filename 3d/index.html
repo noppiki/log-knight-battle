@@ -2097,6 +2097,18 @@
        .active on any path automatically neutralises the dim (no leak risk). */
     #fp-tg-warn.active.feint  { opacity: 0.35; }
     #fp-tg-alert.active.feint { opacity: 0.70; }
+    /* r148: double-strike telegraph pulse — sin-wave opacity warns player of
+       incoming 2nd hit. Compound selector requires .active so removing .active
+       on any exit path automatically cancels the animation (no stuck-animation
+       leak). Feint and double are mutually exclusive (random selection), no
+       class collision risk. */
+    @keyframes tgWarnPulse {
+      0%, 100% { opacity: 0.55; }
+      50%      { opacity: 0.85; }
+    }
+    #fp-tg-warn.active.double-pulse {
+      animation: tgWarnPulse 0.15s ease-in-out infinite;
+    }
 
     /* r51: "⚠ GUARD" HUD alert — flashes above reticle during telegraph.
        r122: color changed amber→cyan-blue (#8aafff) to match azure weapon trail (r119)
@@ -7032,8 +7044,8 @@
 
       // ── Delayed attack launch ─────────────────────────────────────
       setTimeout(() => {
-        // Clear telegraph overlays (r117: also remove .feint to avoid residual dim).
-        if (warnEl)  { warnEl.classList.remove('active', 'feint'); }
+        // Clear telegraph overlays (r117: .feint; r148: .double-pulse).
+        if (warnEl)  { warnEl.classList.remove('active', 'feint', 'double-pulse'); }
         if (alertEl) { alertEl.classList.remove('active', 'feint'); }
         FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
         // r52: clear parry window timestamp — attack is now launching.
@@ -7106,7 +7118,7 @@
         // Clear telegraph overlays (r117: also remove .feint).
         const warnEl  = FpPolish.tgWarnEl;
         const alertEl = FpPolish.tgAlertEl;
-        if (warnEl)  warnEl.classList.remove('active', 'feint');
+        if (warnEl)  warnEl.classList.remove('active', 'feint', 'double-pulse'); // r148
         if (alertEl) alertEl.classList.remove('active', 'feint');
         if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
         // r75: hide range ring on feint-parry path.
@@ -7133,7 +7145,7 @@
       // ── 2) Clear telegraph overlays immediately ──────────────────────
       const warnEl  = FpPolish.tgWarnEl;
       const alertEl = FpPolish.tgAlertEl;
-      if (warnEl)  warnEl.classList.remove('active', 'feint'); // r117: clear feint dim
+      if (warnEl)  warnEl.classList.remove('active', 'feint', 'double-pulse'); // r117/r148
       if (alertEl) alertEl.classList.remove('active', 'feint');
       if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
       // r75: hide range ring on successful parry.
@@ -11885,15 +11897,16 @@
               const alertEl = FpPolish.tgAlertEl;
               if (FpPolish.tgFadeTimer) { clearTimeout(FpPolish.tgFadeTimer); FpPolish.tgFadeTimer = 0; }
               if (warnEl)  { warnEl.style.transition = 'none'; void warnEl.offsetWidth;
-                             warnEl.style.transition = ''; warnEl.classList.add('active'); }
+                             warnEl.style.transition = '';
+                             warnEl.classList.add('active', 'double-pulse'); } // r148: pulse warns 2nd hit
               if (alertEl) { alertEl.style.transition = 'none'; void alertEl.offsetWidth;
                              alertEl.style.transition = ''; alertEl.classList.add('active'); }
               // Arm parry window for the 2nd hit.
               swingAttacker._telegraphAt = performance.now();
 
               setTimeout(() => {
-                // Clear 2nd-strike telegraph overlays (r117: also remove .feint).
-                if (warnEl)  warnEl.classList.remove('active', 'feint');
+                // Clear 2nd-strike telegraph overlays (r117: .feint; r148: .double-pulse).
+                if (warnEl)  warnEl.classList.remove('active', 'feint', 'double-pulse');
                 if (alertEl) alertEl.classList.remove('active', 'feint');
                 FpPolish.tgFadeTimer = setTimeout(() => { FpPolish.tgFadeTimer = 0; }, 200);
                 swingAttacker._telegraphAt = 0;
