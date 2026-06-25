@@ -5799,7 +5799,15 @@
         const cy = knightRoot.position.y + 0.05;
         const cz = knightRoot.position.z;
 
-        const COUNT = 18 + Math.floor(Math.random() * 13); // 18–30
+        // r57: in FP view the camera is 1–2 m from the feet, so footstep
+        // puffs feel visually light with the baseline 18–30 count. Scale up
+        // by _FP_SNOW_PUFF_SCALE (1.6×) when in FP mode; fall back cleanly
+        // if the director isn't ready yet (belt-and-suspenders guard).
+        const _fpPuffScale = (typeof _FP_SNOW_PUFF_SCALE === 'number' &&
+                              window.cameraDirector &&
+                              window.cameraDirector.viewMode === 'fp')
+                             ? _FP_SNOW_PUFF_SCALE : 1.0;
+        const COUNT = Math.round((18 + Math.floor(Math.random() * 13)) * _fpPuffScale); // 18–30 (×1.6 in FP)
         const LIFETIME = 0.6;
         const BASE_SIZE = 0.07;
 
@@ -8812,6 +8820,18 @@
       };
     }
 
+    // r57: FP environment FX density boost — when in first-person view the
+    // camera sits inside the arena volume rather than outside it, so the same
+    // particle count looks visually sparse compared with the cinematic view
+    // (particles are farther from the eye and more of them are behind the
+    // field of view). A flat +0.8 additive boost on snowDensityMul when
+    // viewMode==='fp' compensates: calm goes 0.7→1.5 (full field), windy
+    // goes 1.4→2.2, blizzard goes 2.2→3.0 (clamped to 1.5 = all 500 shown).
+    // SnowPuffSystem spawn count is also scaled × FP_SNOW_PUFF_SCALE so
+    // footstep puffs feel heavier in close-quarter view.
+    const _FP_DENSITY_BOOST    = 0.8;  // additive to snowDensityMul in FP mode
+    const _FP_SNOW_PUFF_SCALE  = 1.6;  // spawn count multiplier for SnowPuffSystem in FP
+
     // Apply the currently-resolved `cur` params to every downstream system.
     // Pure side-effect function — called once per frame from updateWeather.
     function _weatherApply(cur) {
@@ -8825,9 +8845,13 @@
           if (sizeAttr && base) {
             const arr = sizeAttr.array;
             const n = arr.length;
+            // r57: boost particle density in FP view — camera is inside the
+            // volume, so the same count looks sparser than in cinematic mode.
+            const isFpNow = cameraDirector && cameraDirector.viewMode === 'fp';
+            const densityMul = cur.snowDensityMul + (isFpNow ? _FP_DENSITY_BOOST : 0);
             // Clamp visible fraction to [0, 1.5] — values >1 just mean
             // "show all" (we can't render more particles than exist).
-            const frac = Math.max(0, Math.min(1.5, cur.snowDensityMul));
+            const frac = Math.max(0, Math.min(1.5, densityMul));
             const visibleN = Math.min(n, Math.round(n * frac));
             for (let i = 0; i < n; i++) arr[i] = (i < visibleN) ? base[i] : 0;
             sizeAttr.needsUpdate = true;
