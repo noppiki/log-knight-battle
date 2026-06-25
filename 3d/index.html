@@ -496,11 +496,11 @@
        viewMode==='fp' && !pointerLocked. JS toggles .visible. */
     #fp-lock-hint {
       position: fixed;
-      top: 50%;
+      bottom: 60px;
       left: 50%;
-      transform: translate(-50%, -50%);
-      padding: 10px 18px;
-      font: 600 13px/1.2 system-ui, -apple-system, sans-serif;
+      transform: translateX(-50%);
+      padding: 6px 14px;
+      font: 600 12px/1.2 system-ui, -apple-system, sans-serif;
       letter-spacing: 0.08em;
       color: #f4e4c1;
       background: rgba(12, 8, 6, 0.62);
@@ -517,7 +517,7 @@
       opacity: 1;
     }
 
-    /* FP aim reticle — small bone-colored crosshair, centered. Visible
+    /* FP aim reticle — amber crosshair + center dot, centered. Visible
        only when viewMode==='fp' AND pointer is locked. JS toggles the
        .visible class (see refreshFpOverlays). Pointer-events: none
        keeps it from blocking canvas hits. */
@@ -536,30 +536,43 @@
     #fp-reticle.visible {
       opacity: 1;
     }
-    /* Horizontal bar — 12x2 px, 1px dark inset shadow for visibility
-       against bright backgrounds. PAL.bone = rgba(232,220,192,0.85). */
+    /* Horizontal bar — 14x3 px. PAL.skyAmber #d8a45a with dark inset
+       glow so the crosshair pops against bright HDRI + bloom. */
     #fp-reticle::before {
       content: '';
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      width: 12px;
-      height: 2px;
-      background: rgba(232, 220, 192, 0.85);
-      box-shadow: 0 0 0 1px rgba(12, 8, 6, 0.65);
+      width: 14px;
+      height: 3px;
+      background: #d8a45a;
+      box-shadow: 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
     }
-    /* Vertical bar — 2x12 px. */
+    /* Vertical bar — 3x14 px. */
     #fp-reticle::after {
       content: '';
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      width: 2px;
-      height: 12px;
-      background: rgba(232, 220, 192, 0.85);
-      box-shadow: 0 0 0 1px rgba(12, 8, 6, 0.65);
+      width: 3px;
+      height: 14px;
+      background: #d8a45a;
+      box-shadow: 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
+    }
+
+    /* Center aim dot — 4x4 px, unambiguous exact aim point. */
+    #fp-reticle-dot {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 4px;
+      height: 4px;
+      background: #d8a45a;
+      box-shadow: 0 0 4px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
+      pointer-events: none;
     }
 
     /* FP red damage vignette — radial gradient flash on player HP loss.
@@ -663,10 +676,10 @@
        releases. JS toggles .visible based on pointerlockchange + viewMode. -->
   <div id="fp-lock-hint">&#x1F3AF; click to aim &mdash; ESC to release</div>
 
-  <!-- FP aim reticle — bone-colored crosshair, visible only when
+  <!-- FP aim reticle — amber crosshair + center dot, visible only when
        viewMode==='fp' AND pointer IS locked. Toggled together with
        the lock hint by refreshFpOverlays(). -->
-  <div id="fp-reticle"></div>
+  <div id="fp-reticle"><span id="fp-reticle-dot"></span></div>
 
   <!-- FP red damage vignette — radial flash on player HP loss in FP mode.
        JS flashDamageVignette() drives opacity 1 → 0 over 0.4s. -->
@@ -1620,9 +1633,9 @@
     // (at x≈2) is centered and the view stays level.
     const FP_SHOT = {
       name: 'FP_CRIMSON',
-      getPosition: () => new THREE.Vector3(-2, 1.4, 0),
-      getLookAt:   () => new THREE.Vector3( 5, 1.2, 0),
-      fov: 75,
+      getPosition: () => new THREE.Vector3(-1.6, 1.4, 0),
+      getLookAt:   () => new THREE.Vector3( 4, 1.2, 0),
+      fov: 70,
     };
 
     class CameraDirector {
@@ -1938,11 +1951,25 @@
       // (it just gets read by the renderer), so ensure it is now.
       if (!camera.parent) scene.add(camera);
       fpSwordClone = clone;
+      // Wire up the sword-tip trail. We pass `scene` (not `camera`)
+      // because we sample tip *world* positions and draw the line in
+      // world space — anchoring under the camera would also rotate
+      // the trail with the head and erase the arc.
+      try {
+        weaponTrail = new WeaponTrail(scene, fpSwordClone, 0xffd089, 24);
+      } catch (err) {
+        console.warn('[fp] weaponTrail init failed', err);
+        weaponTrail = null;
+      }
     }
 
     function detachFpSword() {
       // Cancel any pending boot-restore retry — user has left FP.
       fpPendingAttach = false;
+      if (weaponTrail) {
+        try { weaponTrail.dispose(); } catch (e) {}
+        weaponTrail = null;
+      }
       if (!fpSwordClone) return;
       camera.remove(fpSwordClone);
       try { fpSwordClone.geometry?.dispose?.(); } catch (e) {}
@@ -2027,12 +2054,12 @@
       vignetteFadeTimer: 0,
       fovPunch: {
         active:  false,
-        phase:   'in',   // 'in' (75→82 over inDur) | 'out' (82→75 over outDur)
+        phase:   'in',   // 'in' (70→78 over inDur) | 'out' (78→70 over outDur)
         elapsed: 0,
         inDur:   0.08,
         outDur:  0.18,
         restFov: FP_SHOT.fov,
-        peakFov: FP_SHOT.fov + 7,  // 75 → 82
+        peakFov: FP_SHOT.fov + 8,  // 70 → 78
       },
     };
 
@@ -2671,6 +2698,133 @@
 
     const impactSystem = new ImpactSystem(scene, camera, bloomPass);
 
+    /* ── WeaponTrail ────────────────────────────────────────────────
+       A brief glowing arc the FP sword tip leaves behind during a
+       swing. Built as a single LineBasicMaterial polyline whose
+       vertices are a ring buffer of recent sword-tip *world*
+       positions, rebuilt each frame.
+
+       Lifecycle:
+         - activate()   — clear buffer, set active=true; update() will
+                          start pushing new tip samples and the line
+                          is shown at full opacity.
+         - deactivate() — set active=false; update() stops pushing
+                          and fades opacity to 0 over ~0.2 s, then
+                          hides + empties the line. Re-activating
+                          during fade picks up cleanly.
+
+       The sword-tip offset is in *sword-local* space; KayKit blades
+       point roughly along their local +Y from the grip, with the
+       hilt at the origin. (0, 0.9, 0) lands near the tip for the
+       crimson sword mesh at the FP rest-pose scale. */
+    class WeaponTrail {
+      constructor(scene, sword, color = 0xffd089, maxPoints = 24) {
+        this.scene     = scene;
+        this.sword     = sword;
+        this.maxPoints = maxPoints;
+        // Ring buffer of THREE.Vector3 — most recent tip sample last.
+        this.points    = [];
+        this.active    = false;
+        // 0..1 — line is hidden when this hits 0 *and* !active.
+        this.opacity   = 0;
+        this.fadeRate  = 1 / 0.2; // 0→1 (or 1→0) in 0.2 s
+
+        // Tip offset in sword-local coords. KayKit blade extends roughly
+        // along +Y from the grip; tweak here if visually wrong.
+        this._tipLocal = new THREE.Vector3(0, 0.9, 0);
+        // Scratch vector so we don't allocate per-frame.
+        this._tipWorld = new THREE.Vector3();
+
+        this.geometry = new THREE.BufferGeometry();
+        // Pre-allocate position buffer for maxPoints vertices (xyz each).
+        this._positions = new Float32Array(this.maxPoints * 3);
+        this.geometry.setAttribute(
+          'position',
+          new THREE.BufferAttribute(this._positions, 3),
+        );
+        this.geometry.setDrawRange(0, 0);
+
+        this.material = new THREE.LineBasicMaterial({
+          color,
+          transparent: true,
+          opacity:     0,
+          depthTest:   false,
+          depthWrite:  false,
+          blending:    THREE.AdditiveBlending,
+          linewidth:   3, // WebGL ignores >1 on most browsers; bright color compensates.
+        });
+
+        this.line = new THREE.Line(this.geometry, this.material);
+        this.line.frustumCulled = false;
+        this.line.renderOrder   = 10000;
+        this.line.visible       = false;
+        this.scene.add(this.line);
+      }
+
+      activate() {
+        this.active  = true;
+        this.opacity = 1;
+        this.points.length = 0;
+        this.geometry.setDrawRange(0, 0);
+        this.line.visible = true;
+      }
+
+      deactivate() {
+        // Let the existing buffer fade out — don't clear it yet.
+        this.active = false;
+      }
+
+      update(delta) {
+        if (this.active) {
+          // Push current sword-tip world position into ring buffer.
+          this._tipWorld.copy(this._tipLocal);
+          this.sword.localToWorld(this._tipWorld);
+          this.points.push(this._tipWorld.clone());
+          if (this.points.length > this.maxPoints) {
+            this.points.shift();
+          }
+          this.opacity = Math.min(1, this.opacity + this.fadeRate * delta);
+        } else if (this.opacity > 0) {
+          this.opacity = Math.max(0, this.opacity - this.fadeRate * delta);
+          if (this.opacity === 0) {
+            this.points.length = 0;
+            this.geometry.setDrawRange(0, 0);
+            this.line.visible = false;
+            this.material.opacity = 0;
+            return;
+          }
+        } else {
+          // Fully idle — nothing to draw.
+          if (this.line.visible) this.line.visible = false;
+          return;
+        }
+
+        // Rebuild vertex buffer from ring.
+        const n = this.points.length;
+        for (let i = 0; i < n; i++) {
+          const p = this.points[i];
+          this._positions[i * 3 + 0] = p.x;
+          this._positions[i * 3 + 1] = p.y;
+          this._positions[i * 3 + 2] = p.z;
+        }
+        this.geometry.attributes.position.needsUpdate = true;
+        this.geometry.setDrawRange(0, n);
+        this.material.opacity = 0.9 * this.opacity;
+        if (!this.line.visible) this.line.visible = true;
+      }
+
+      dispose() {
+        try { this.scene.remove(this.line); } catch (e) {}
+        try { this.geometry.dispose(); } catch (e) {}
+        try { this.material.dispose(); } catch (e) {}
+      }
+    }
+
+    // Lives as long as fpSwordClone does — created in attachFpSword,
+    // disposed in detachFpSword. Module-scoped because both the sword
+    // and the trail share lifetime with the FP viewmodel.
+    let weaponTrail = null;
+
     /* ── game state, HUD bars, death & reset ───────────────────────
        window.gameState holds per-knight HP/SP. updateGaugeDOM() pushes
        the values into the bar widths in the top HUD. window.applyDamage
@@ -3101,12 +3255,18 @@
         loop: false,
         weight: 1.0,
       });
-      // FP polish — kick FOV from 75 → 82 → 75 over ~0.26s on every player
+      // FP polish — kick FOV from 70 → 78 → 70 over ~0.26s on every player
       // attack. FpPolish.fovPunch's per-frame tween lives in animate(),
       // gated on viewMode === 'fp' so cinematic / manual cameras keep
       // their own FOV baseline.
       if (cameraDirector && cameraDirector.viewMode === 'fp') {
         triggerFovPunch();
+      }
+      // Sword-tip trail — only meaningful in FP where fpSwordClone exists.
+      // activate() clears the ring buffer so we don't draw a smear from
+      // the rest pose to the first swing frame.
+      if (weaponTrail) {
+        try { weaponTrail.activate(); } catch (e) {}
       }
       const dur = (attackAction && attacker.currentDuration) || 1.0;
 
@@ -3134,6 +3294,14 @@
           gainSP('azure', 5);
         } catch (err) { console.warn('[lkb-3d] HUD update threw', err); }
       }, dur * 0.70 * 1000);
+
+      // Stop accumulating tip samples right at the end of the swing —
+      // update() will fade the existing arc out over ~0.2s.
+      setTimeout(() => {
+        if (weaponTrail) {
+          try { weaponTrail.deactivate(); } catch (e) {}
+        }
+      }, dur * 1.00 * 1000);
 
       // Return crimson to idle after the swing — but only if E isn't held
       // (in which case the keyup handler will own the state).
@@ -3465,6 +3633,11 @@
       // impactSystem.update() now forces punchOffset to (0,0,0); we also do
       // not add it here. Camera shake jitter (handled inside update()) is
       // unaffected — only the zoom-punch additive mutation is neutralized.
+      // Sword-tip trail — sampled in world space; must run AFTER the
+      // camera has been positioned this frame (above) so localToWorld
+      // on the camera-parented sword reads the correct transform, and
+      // BEFORE composer.render() so the new line geometry gets drawn.
+      if (weaponTrail) weaponTrail.update(delta);
       composer.render();
     }
     animate();
