@@ -7719,6 +7719,47 @@
       azRoot.rotation.x = azRoot._guardLeanBase + _azGuardLean.current;
     }
 
+    // ── r166: updateCameraGuardLean ─────────────────────────────────────
+    // Subtle FP camera forward lean while crimson holds guard (E key).
+    // Additive pitch-offset -1° (= -0.0175 rad) + position +0.02m toward
+    // azure (world +X axis, the FP forward direction).
+    //
+    // Pattern follows r61 parryKick (pitch returned and folded into
+    // rotation.set arg) + r63 dodge (position +=).
+    //
+    // Orthogonality:
+    //   • r61 parryKick  — also pitch additive; state-exclusive: parry fires
+    //                      only on block, guard-hold is a separate state
+    //   • r63 dodge      — position.x; guard and dodge-roll are mutually
+    //                      exclusive (FpPolish.dodge.active check guards r63)
+    //   • r155 azure lean — different object (azure.root), different axis intent
+    //
+    // Lerp speeds (no delta-scale — mirrors r155 convention):
+    //   enter: 0.10/frame → ~200 ms to 95%
+    //   exit:  0.06/frame → ~300 ms to 95%
+    const _camGuardLean = {
+      current: 0,
+      target: 0,
+      pitchAmp: -0.0175, // -1 degree in radians
+      posAmp:    0.02,   // meters toward azure (+X world forward)
+    };
+    const CAM_GUARD_LEAN_ENTER_K = 0.10;
+    const CAM_GUARD_LEAN_EXIT_K  = 0.06;
+    // updateCameraGuardLean advances the lerp and returns the pitch offset
+    // (radians). Caller must fold the return value into camera.rotation.set
+    // and also apply camera.position.x += separately.
+    // Returns 0 when not in FP mode.
+    function updateCameraGuardLean() {
+      if (!camera) return 0;
+      if (cameraDirector?.viewMode !== 'fp') { _camGuardLean.current = 0; _camGuardLean.target = 0; return 0; }
+      const cs = combatants && combatants.crimson && combatants.crimson.state;
+      _camGuardLean.target = (cs === 'guard') ? 1 : 0;
+      const k = (_camGuardLean.target > _camGuardLean.current) ? CAM_GUARD_LEAN_ENTER_K : CAM_GUARD_LEAN_EXIT_K;
+      _camGuardLean.current += (_camGuardLean.target - _camGuardLean.current) * k;
+      if (Math.abs(_camGuardLean.current) < 0.0001) _camGuardLean.current = 0;
+      return _camGuardLean.pitchAmp * _camGuardLean.current;
+    }
+
     // ── r116: updateWeaponPositionBreath ────────────────────────────────
     // Additive idle position micro-sway on fpSwordClone, phase-locked with
     // r97 updateBreatheFov (same 8s period / same performance.now() time base).
@@ -10977,6 +11018,8 @@
         const _azR155 = combatants && combatants.azure && combatants.azure.root;
         if (_azR155) _azR155._guardLeanBase = null;
       } catch (e) {}
+      // r166: reset camera guard lean so pitch/position additive don't carry across rounds.
+      try { _camGuardLean.current = 0; _camGuardLean.target = 0; } catch (e) {}
       // r139: null the envMap baseline array so next round re-captures from the
       // fresh scene at full HP. HP resets to HP_MAX above so ratio → 1.0 immediately.
       try { _azureEnvBase = null; } catch (e) {}
@@ -15209,11 +15252,15 @@
           // r61: advance parry-kick tween BEFORE rotation.set so the offset lands
           // on the same frame it's computed (not one frame stale like updateFovPunch).
           const _pkOffset = updateParryKick(delta);
-          camera.rotation.set(cameraDirector.fpPitch + _pkOffset, cameraDirector.fpYaw, 0);
+          // r166: advance guard-lean tween; fold pitch into rotation.set arg.
+          const _glPitch = updateCameraGuardLean();
+          camera.rotation.set(cameraDirector.fpPitch + _pkOffset + _glPitch, cameraDirector.fpYaw, 0);
           // r63: apply retreat dodge camera offset AFTER director sets position.
           // updateDodge() returns a world-X delta (negative = away from azure).
           const _dodgeOffset = updateDodge(delta);
           if (_dodgeOffset !== 0) camera.position.x += _dodgeOffset;
+          // r166: guard lean forward position offset (+X toward azure).
+          if (_camGuardLean.current !== 0) camera.position.x += _camGuardLean.posAmp * _camGuardLean.current;
         } else {
           camera.lookAt(cameraDirector.currentLookAt);
         }
