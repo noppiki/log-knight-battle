@@ -2380,8 +2380,8 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
-    renderer.toneMapping       = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.42;  // tiny lift (+0.02) for vignette compensation
+    renderer.toneMapping       = THREE.AgXToneMapping;
+    renderer.toneMappingExposure = 1.55;  // AgX has softer shoulder than ACES; slight lift to compensate
     renderer.outputColorSpace  = THREE.SRGBColorSpace;
 
     const host = document.getElementById('canvas-host');
@@ -6491,6 +6491,137 @@
       } catch (e) { /* never let cape FX break the render loop */ }
     }
 
+    /* ── head IK (look-at-opponent) ──────────────────────────────────
+       KayKit knights have a "Knight_Head" mesh and an internal "head" bone
+       in the rig armature. Without IK both knights stare straight ahead
+       regardless of the opponent's position — kills engagement intensity
+       in close-up framings (especially FP cam and CINEMA close-ups).
+       We resolve the head bone (preferring an actual bone, falling back to
+       the Knight_Head mesh if no bone is found), then per-frame rotate it
+       toward the opponent's torso. The rotation is computed in head-parent
+       local space so it composes cleanly with the baked Idle animation
+       (which already drives the bone's parent chain). We clamp yaw/pitch
+       to a believable cone (±60° / ±20°) so the neck never breaks, and
+       slerp gently (α=0.10) so the head settles instead of snapping. We
+       SKIP the IK entirely while the combatant is in 'hit' or 'dead'
+       state — those clips have authored head motion we shouldn't fight. */
+    const headIK = {
+      /** @type {Map<string, THREE.Object3D>} */
+      bones: new Map(),
+      _tmpTarget: new THREE.Vector3(),
+      _tmpHeadWorld: new THREE.Vector3(),
+      _tmpDesiredDirWorld: new THREE.Vector3(),
+      _tmpDesiredDirLocal: new THREE.Vector3(),
+      _tmpForward: new THREE.Vector3(0, 0, 1),
+      _tmpParentQ: new THREE.Quaternion(),
+      _tmpParentInv: new THREE.Quaternion(),
+      _tmpTargetQ: new THREE.Quaternion(),
+      _tmpEuler: new THREE.Euler(),
+      // Walk the combatant root and resolve a head bone (preferred) or
+      // the Knight_Head mesh as fallback. Returns null if nothing matches.
+      _resolveHead(root) {
+        if (!root) return null;
+        let bone = null;
+        let mesh = null;
+        try {
+          root.traverse((obj) => {
+            if (!obj || !obj.name) return;
+            const n = obj.name.toLowerCase();
+            // KayKit rigs commonly expose a Bone named "head" (sometimes
+            // "Head", "spine.head", "neck.head", etc). Prefer Bone subclass
+            // when available, otherwise accept any object whose name is
+            // exactly "head" or ends in ".head".
+            if (!bone) {
+              const isBone = obj.isBone === true;
+              if (isBone && (n === 'head' || n.endsWith('.head') || n.endsWith('_head'))) {
+                bone = obj;
+              }
+            }
+            // Fallback: Knight_Head mesh (Crimson_Knight_Head /
+            // Azure_Knight_Head / generic Knight_Head).
+            if (!mesh && /knight_head/i.test(obj.name)) {
+              mesh = obj;
+            }
+          });
+        } catch (e) { /* defensive */ }
+        return bone || mesh || null;
+      },
+      // Lazy resolve — cached in this.bones once found. Called every
+      // frame; the Map dedupes so the cost is one-time per combatant.
+      attachFrom(label, root) {
+        if (!root) return null;
+        if (this.bones.has(label)) return this.bones.get(label);
+        const head = this._resolveHead(root);
+        if (head) {
+          this.bones.set(label, head);
+          try { console.log(`[lkb-3d] headIK ${label}: bound to "${head.name}" (${head.isBone ? 'bone' : 'mesh'})`); } catch (e) {}
+        }
+        return head;
+      },
+      // Per-combatant IK step. Reads opponent root world position,
+      // computes desired forward in head-parent local space, clamps to a
+      // believable cone, and slerps the head's local quaternion.
+      _stepOne(self, opp) {
+        if (!self || !opp || !self.root || !opp.root) return;
+        // Don't fight authored hit/dead head motion.
+        if (self.state === 'hit' || self.state === 'dead') return;
+        const head = this.attachFrom(self.label, self.root);
+        if (!head || !head.parent) return;
+
+        // Target = opponent torso (~1.0m above root).
+        this._tmpTarget.copy(opp.root.position);
+        this._tmpTarget.y += 1.0;
+
+        // Head world position + parent world quaternion (inverse).
+        head.getWorldPosition(this._tmpHeadWorld);
+        head.parent.getWorldQuaternion(this._tmpParentQ);
+        this._tmpParentInv.copy(this._tmpParentQ).invert();
+
+        // Desired forward in world → parent-local.
+        this._tmpDesiredDirWorld.copy(this._tmpTarget).sub(this._tmpHeadWorld);
+        const len = this._tmpDesiredDirWorld.length();
+        if (len < 1e-4) return;
+        this._tmpDesiredDirWorld.multiplyScalar(1 / len);
+        this._tmpDesiredDirLocal.copy(this._tmpDesiredDirWorld).applyQuaternion(this._tmpParentInv);
+
+        // Build a target quaternion that rotates the bone's local
+        // "forward" (+Z) onto the desired direction. KayKit head bones
+        // align with +Z on the rig, so +Z is the right local axis here.
+        this._tmpTargetQ.setFromUnitVectors(this._tmpForward, this._tmpDesiredDirLocal);
+
+        // Decompose to Euler so we can clamp yaw/pitch independently.
+        // Order 'YXZ' = yaw first (around Y), then pitch (around X),
+        // matching natural neck mechanics.
+        this._tmpEuler.setFromQuaternion(this._tmpTargetQ, 'YXZ');
+        const YAW_LIMIT = Math.PI / 3;    // ±60°
+        const PITCH_LIMIT = Math.PI / 9;  // ±20°
+        this._tmpEuler.y = Math.max(-YAW_LIMIT, Math.min(YAW_LIMIT, this._tmpEuler.y));
+        this._tmpEuler.x = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this._tmpEuler.x));
+        this._tmpEuler.z = 0; // no roll
+        this._tmpTargetQ.setFromEuler(this._tmpEuler);
+
+        // Gentle slerp so the head settles rather than snaps. α=0.10
+        // ≈ 6-frame settle at 60fps, matching capeVerlet's feel.
+        head.quaternion.slerp(this._tmpTargetQ, 0.10);
+      },
+      update(delta) {
+        try {
+          if (typeof combatants === 'undefined' || !combatants) return;
+          const c = combatants.crimson;
+          const a = combatants.azure;
+          if (!c || !a) return;
+          this._stepOne(c, a);
+          this._stepOne(a, c);
+        } catch (e) { /* never let head IK break the render loop */ }
+      },
+    };
+
+    function updateHeadIK(delta) {
+      try {
+        headIK.update(delta);
+      } catch (e) { /* never let head IK break the render loop */ }
+    }
+
     function animate() {
       requestAnimationFrame(animate);
       // SAFETY GUARD: reset camera if it has drifted out of the playable bowl.
@@ -6525,6 +6656,12 @@
       // capePhys lazily attaches once both knight GLBs are loaded; see
       // capeVerlet definition above the animate() function for details.
       updateCapes(delta, time);
+      // Head IK — both knights' head bones track the opposing torso so
+      // close-up framings show genuine eye contact. Runs AFTER cape (so
+      // head rotation composes on top of any cape-driven parent motion)
+      // and AFTER mixers (so it overrides the baked Idle's head pose).
+      // Skips internally for 'hit'/'dead' combatants.
+      updateHeadIK(delta);
       // ── stamina tick ─────────────────────────────────────────────
       // Per-frame stamina drain/regen for both knights. Costs:
       //   guard  → -STM_GUARD_DRAIN/s, auto-release at 0 + exhaust pill
