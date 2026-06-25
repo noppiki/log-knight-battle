@@ -3354,6 +3354,22 @@
         if (!actx) return;
         blip(60, 0.08, 'triangle', 0.25);
       }
+      // r140: playShieldBash — metallic shield-block impact sfx.
+      // Fires when a player attack is absorbed by azure's guard so the
+      // player hears "didn't get through" without any ambiguity.
+      // Two-layer design: a sharp 1500Hz square ring (metallic edge)
+      // plus a 600Hz sine body 15ms later (mass/weight of the shield).
+      function playShieldBash() {
+        if (!actx) return;
+        try {
+          // metallic ring — high square wave, short and bright
+          tone({ freq: 1500, dur: 0.06, type: 'square', vol: 0.10, attack: 0.002 });
+          // sub body — lower sine, trails the ring by 15ms for layered feel
+          setTimeout(function() {
+            tone({ freq: 600, dur: 0.04, type: 'sine', vol: 0.07, attack: 0.002 });
+          }, 15);
+        } catch (e) {}
+      }
       // Public sfx* wrappers (netRecordSfx is a no-op in 3D but kept for parity).
       function sfxSwing(pitchRatio) { _sfxSwing(pitchRatio); netRecordSfx("swing"); }
       function sfxHit()     { _sfxHit();     netRecordSfx("hit"); }
@@ -10814,6 +10830,12 @@
         amount = Math.max(1, Math.floor(amount * 0.2));
         guardAbsorbed = true;
         try { if (window.sfxClang) window.sfxClang(); } catch (e) {}
+        // r140: azure shield bash sfx — player attack blocked by azure guard;
+        // layered metallic ring + body tone signals "attack absorbed" to player.
+        // Only fires for azure (defender), not crimson, to stay on correct trigger path.
+        if (defenderId === 'azure') {
+          try { playShieldBash(); } catch (e) {}
+        }
       }
       // FP polish — damage vignette + heavier personal shake when the player
       // (crimson) loses HP in FP mode. Both fire BEFORE HP subtraction so a
