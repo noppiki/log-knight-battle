@@ -959,6 +959,121 @@
     #fp-reticle.exhausted #fp-reticle-dot {
       background: rgba(150, 150, 150, 0.6);
     }
+
+    /* ── Multiplayer relay UI (phase-1) ───────────────────────────────
+       Bottom-left cluster, sits ABOVE the #hud diagnostic strip so the
+       two read as a stacked left-edge column. Same dark+amber plate as
+       the rest of the chrome. Pipe-only: connects to a Cloudflare DO
+       relay, exchanges hello/peer-ready, then does nothing else (no
+       gameplay sync yet — that's phase 2). Buttons + status pill kept
+       in one row so the connect/disconnect affordance reads at a glance. */
+    #mp-bar {
+      position: fixed;
+      bottom: 70px;
+      left: 18px;
+      z-index: 25;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      pointer-events: none; /* children re-enable */
+    }
+    #mp-bar .mp-btn {
+      pointer-events: auto;
+      cursor: pointer;
+      user-select: none;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.8);
+      border-radius: 4px;
+      padding: 6px 12px;
+      font: bold 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    #mp-bar .mp-btn:hover {
+      background: rgba(40, 30, 20, 0.95);
+      border-color: rgba(255, 196, 120, 1);
+    }
+    #mp-bar .mp-btn.is-active {
+      color: #1a1208;
+      background: #d8a45a;
+      border-color: #ffd07a;
+    }
+    /* Status pill — color-coded dot + label. Red = disconnected,
+       yellow = connecting, green = connected, cyan = peer-ready. */
+    #mp-status {
+      pointer-events: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #e8dcc0;
+      background: rgba(20, 20, 30, 0.85);
+      border: 1px solid rgba(216, 164, 90, 0.5);
+      border-radius: 4px;
+      padding: 5px 10px;
+      font: bold 10px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+      white-space: nowrap;
+    }
+    #mp-status .mp-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #a23030;
+      box-shadow: 0 0 6px rgba(162, 48, 48, 0.8);
+    }
+    #mp-status.is-connecting .mp-dot { background: #d8a45a; box-shadow: 0 0 6px rgba(216, 164, 90, 0.9); }
+    #mp-status.is-connected  .mp-dot { background: #4ac06a; box-shadow: 0 0 6px rgba(74, 192, 106, 0.9); }
+    #mp-status.is-ready      .mp-dot { background: #5ad4e8; box-shadow: 0 0 8px rgba(90, 212, 232, 0.95); }
+    /* Room code pill — only visible while connected. Click to copy. */
+    #mp-room {
+      pointer-events: auto;
+      cursor: pointer;
+      display: none;
+      color: #1a1208;
+      background: #d8a45a;
+      border: 1px solid #ffd07a;
+      border-radius: 4px;
+      padding: 5px 10px;
+      font: 900 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.18em;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    #mp-room.is-visible { display: inline-block; }
+    #mp-room:hover { background: #f0b870; }
+    #mp-room .mp-room-label { color: rgba(26, 18, 8, 0.7); margin-right: 4px; font-weight: 700; letter-spacing: 0.1em; }
+    /* Peer-ready toast — brief flash near the bar when handshake completes. */
+    #mp-toast {
+      position: fixed;
+      bottom: 110px;
+      left: 18px;
+      z-index: 26;
+      pointer-events: none;
+      opacity: 0;
+      color: #0c1a18;
+      background: #5ad4e8;
+      border: 1px solid #9fefff;
+      border-radius: 4px;
+      padding: 6px 14px;
+      font: 900 11px/1.2 'Trebuchet MS', Verdana, sans-serif;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      box-shadow: 0 4px 16px rgba(90, 212, 232, 0.4), 0 4px 16px rgba(0, 0, 0, 0.6);
+      transition: opacity 220ms ease-out, transform 220ms ease-out;
+      transform: translateY(6px);
+    }
+    #mp-toast.is-visible { opacity: 1; transform: translateY(0); }
   </style>
 
   <script type="importmap">
@@ -1042,6 +1157,21 @@
     <div class="label">iter 66 vertical slice</div>
     crimson astride · drag to rotate
   </div>
+
+  <!-- ── Multiplayer relay (phase-1: connection only) ────────────────
+       HOST opens a fresh random room. JOIN prompts for a code. Status
+       pill mirrors window.mp.status. Room pill becomes visible once the
+       socket is open and shows the 5-char code; click to copy. No game
+       state is touched here — just establishes the pipe via the same
+       Cloudflare DO relay used by the 2D build. -->
+  <div id="mp-bar">
+    <button id="mp-host-btn" class="mp-btn" type="button" title="Host a new room">&#x1F3F0; HOST</button>
+    <button id="mp-join-btn" class="mp-btn" type="button" title="Join a room by code">&#x1F517; JOIN</button>
+    <button id="mp-leave-btn" class="mp-btn" type="button" title="Disconnect" style="display:none;">&#x2715; LEAVE</button>
+    <div id="mp-room" title="Click to copy room code"><span class="mp-room-label">ROOM</span><span id="mp-room-code">----</span></div>
+    <div id="mp-status"><span class="mp-dot"></span><span id="mp-status-text">OFFLINE</span></div>
+  </div>
+  <div id="mp-toast">PEER READY</div>
 
   <!-- CINEMA mode toggle — auto camera cycle on/off. JS wires click. -->
   <button id="cinema-toggle" type="button" title="Toggle automatic camera cycle">&#x1F3A5; CYCLE: ON</button>
@@ -1777,6 +1907,406 @@
     document.addEventListener('DOMContentLoaded', window.updateRecordHUD);
     // Also call immediately in case DOMContentLoaded already fired.
     if (document.readyState !== 'loading') window.updateRecordHUD();
+  })();
+  </script>
+
+  <!-- ── Multiplayer relay client (phase-1) ──────────────────────────
+       PIPE-ONLY: opens a WebSocket to the same Cloudflare DO relay the
+       2D build uses (wss://lkb-relay.noppiki.workers.dev/r/<code>),
+       exchanges a hello handshake, and surfaces connection state in the
+       bottom-left HUD. NO gameplay/state sync happens here — that lands
+       in phase-2 once the relay protocol is proven across two browsers.
+       Kept in a plain (non-module) script so it stays alive even if the
+       3D module above takes time to boot, and so it never depends on
+       three.js / scene state. -->
+  <script>
+  (function () {
+    "use strict";
+
+    // ── Constants ────────────────────────────────────────────────────
+    // Same Cloudflare Worker + Durable Object the 2D build uses. Room
+    // code is appended verbatim (uppercase, 5 chars in this build).
+    var MP_RELAY_BASE = "wss://lkb-relay.noppiki.workers.dev/r/";
+    var MP_CONNECT_TIMEOUT_MS = 12000; // matches NET_CONNECT_TIMEOUT in 2D
+    var MP_RETRY_DELAY_MS     = 2000;  // single auto-retry on early close
+    // Room code charset — same as 2D (no 0/O/1/I to avoid confusion when
+    // sharing verbally / via screenshot). 5 chars per the phase-1 spec.
+    var MP_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    var MP_CODE_LEN   = 5;
+
+    // ── Public state object ──────────────────────────────────────────
+    // window.mp is the single source of truth for multiplayer status.
+    // Phase-2 will mutate this same object (adding host/guest snapshots
+    // etc.); phase-1 only needs the pipe-level fields below.
+    window.mp = {
+      mode: 'offline',     // 'offline' | 'host' | 'guest'
+      ws: null,
+      room: null,
+      role: null,          // 'host' | 'guest' (post-handshake; may equal mode)
+      status: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
+      peerReady: false,
+      // internals (not part of the documented contract; phase-2 may rework):
+      _retryUsed: false,
+      _connectTimer: null,
+      _toastTimer: null,
+      _lastIntendedRole: null
+    };
+
+    // ── DOM refs ─────────────────────────────────────────────────────
+    // Resolved after DOMContentLoaded; kept null otherwise so bare calls
+    // from console don't crash before the document is ready.
+    var els = {
+      bar:       null, hostBtn:    null, joinBtn:  null, leaveBtn: null,
+      roomPill:  null, roomCode:   null,
+      statusPill:null, statusText: null,
+      toast:     null
+    };
+
+    function _$(id) { return document.getElementById(id); }
+    function _resolveEls() {
+      els.bar        = _$('mp-bar');
+      els.hostBtn    = _$('mp-host-btn');
+      els.joinBtn    = _$('mp-join-btn');
+      els.leaveBtn   = _$('mp-leave-btn');
+      els.roomPill   = _$('mp-room');
+      els.roomCode   = _$('mp-room-code');
+      els.statusPill = _$('mp-status');
+      els.statusText = _$('mp-status-text');
+      els.toast      = _$('mp-toast');
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+    function mpRandomCode() {
+      var s = "";
+      for (var i = 0; i < MP_CODE_LEN; i++) {
+        s += MP_CODE_CHARS.charAt(Math.floor(Math.random() * MP_CODE_CHARS.length));
+      }
+      return s;
+    }
+
+    // Normalize user-typed room code — uppercase, strip non-charset chars.
+    // We don't enforce length here so a partially-typed code can still
+    // surface a clear "invalid" error in the prompt loop above.
+    function _normalizeCode(raw) {
+      if (!raw) return "";
+      var up = String(raw).toUpperCase().replace(/[^A-Z0-9]/g, "");
+      // Replace forbidden chars (O→0 reverse not done; we just drop) and
+      // collapse to allowed charset for parity with mpRandomCode().
+      var out = "";
+      for (var i = 0; i < up.length; i++) {
+        if (MP_CODE_CHARS.indexOf(up.charAt(i)) >= 0) out += up.charAt(i);
+      }
+      return out;
+    }
+
+    // Re-render the status pill + button states from window.mp.
+    // Single source of truth for UI: any state change should call this.
+    function _renderStatus() {
+      if (!els.statusPill) return;
+      var mp = window.mp;
+      // Status pill color class
+      els.statusPill.classList.remove('is-connecting', 'is-connected', 'is-ready');
+      var label = "OFFLINE";
+      if (mp.status === 'connecting') {
+        els.statusPill.classList.add('is-connecting');
+        label = mp.role ? ("CONNECTING (" + mp.role.toUpperCase() + ")") : "CONNECTING";
+      } else if (mp.status === 'connected') {
+        if (mp.peerReady) {
+          els.statusPill.classList.add('is-ready');
+          label = "READY (" + (mp.role || mp.mode).toUpperCase() + ")";
+        } else {
+          els.statusPill.classList.add('is-connected');
+          label = "WAITING (" + (mp.role || mp.mode).toUpperCase() + ")";
+        }
+      }
+      els.statusText.textContent = label;
+
+      // Room pill — visible whenever we have a code, regardless of state.
+      if (mp.room) {
+        els.roomCode.textContent = mp.room;
+        els.roomPill.classList.add('is-visible');
+      } else {
+        els.roomPill.classList.remove('is-visible');
+      }
+
+      // Button visibility — HOST/JOIN while offline, LEAVE while live.
+      var live = (mp.status === 'connecting' || mp.status === 'connected');
+      els.hostBtn.style.display  = live ? 'none' : '';
+      els.joinBtn.style.display  = live ? 'none' : '';
+      els.leaveBtn.style.display = live ? '' : 'none';
+      els.hostBtn.classList.toggle('is-active', mp.mode === 'host');
+      els.joinBtn.classList.toggle('is-active', mp.mode === 'guest');
+    }
+
+    function _showToast(text) {
+      if (!els.toast) return;
+      els.toast.textContent = text;
+      els.toast.classList.add('is-visible');
+      if (window.mp._toastTimer) clearTimeout(window.mp._toastTimer);
+      window.mp._toastTimer = setTimeout(function () {
+        els.toast.classList.remove('is-visible');
+      }, 1800);
+    }
+
+    // Reset internal state on disconnect. Does NOT close the socket
+    // (caller's responsibility) — purely a state cleaner.
+    function _resetState() {
+      var mp = window.mp;
+      if (mp._connectTimer) { clearTimeout(mp._connectTimer); mp._connectTimer = null; }
+      mp.mode      = 'offline';
+      mp.ws        = null;
+      mp.room      = null;
+      mp.role      = null;
+      mp.status    = 'disconnected';
+      mp.peerReady = false;
+    }
+
+    // ── Connection lifecycle ─────────────────────────────────────────
+    //
+    // mpConnect(room, intendedRole) — opens the relay WebSocket.
+    //   room: 5-char uppercase code (will be normalized).
+    //   intendedRole: 'host' | 'guest' (advisory; relay assigns final).
+    //
+    // Phase-1 protocol on the wire:
+    //   ↓ client→relay (on open): { type: "hello", role: <intendedRole>,
+    //                                client: "lkb-3d", phase: 1 }
+    //   ↑ relay→client (any time): { type: "role", role: "host"|"guest" }
+    //                              → mirror into mp.role
+    //   ↑ relay→client: { type: "ready" }
+    //                              → mp.status='connected'; if peerReady
+    //                                already set by a prior peer-hello
+    //                                msg, toast immediately
+    //   ↑ relay→client: { type: "peer-hello", role: ... }
+    //                              → mp.peerReady=true; toast "PEER READY"
+    //   ↑ relay→client: { type: "peer-left" } → toast + mp.peerReady=false
+    //   ↑ relay→client: { type: "full" }     → reject, surface error,
+    //                                          tear down
+    //
+    // NOTE: the 2D build's protocol uses { type: "role" } + { type: "ready" }
+    // as the readiness handshake. Phase-1 here is intentionally laxer —
+    // we accept either the 2D-style messages OR our own "peer-hello"
+    // fan-out so the relay doesn't need code changes today. Phase-2 will
+    // re-align the message schema with the 2D source.
+    function mpConnect(room, intendedRole) {
+      var mp = window.mp;
+      // Hard reset any prior connection. _resetState() preserves the
+      // _retryUsed flag set above intentionally? No — we want a fresh
+      // retry budget for each user-initiated connect, so reset it too.
+      if (mp.ws) {
+        try { mp.ws.close(); } catch (e) {}
+      }
+      _resetState();
+      mp._retryUsed = false;
+
+      var code = _normalizeCode(room);
+      if (code.length !== MP_CODE_LEN) {
+        console.warn("[lkb-3d/mp] invalid room code:", room);
+        _showToast("BAD CODE");
+        return false;
+      }
+      mp.room   = code;
+      mp.mode   = (intendedRole === 'guest') ? 'guest' : 'host';
+      mp.role   = mp.mode; // optimistic; relay may override via "role" msg
+      mp.status = 'connecting';
+      mp._lastIntendedRole = mp.mode;
+      _renderStatus();
+
+      var url = MP_RELAY_BASE + code;
+      console.log("[lkb-3d/mp] connecting", { url: url, role: mp.mode });
+
+      var ws;
+      try {
+        ws = new WebSocket(url);
+      } catch (err) {
+        console.warn("[lkb-3d/mp] WebSocket ctor failed:", err);
+        _showToast("CONNECT FAILED");
+        _resetState();
+        _renderStatus();
+        return false;
+      }
+      mp.ws = ws;
+
+      mp._connectTimer = setTimeout(function () {
+        if (window.mp.status !== 'connected') {
+          console.warn("[lkb-3d/mp] connect timed out");
+          _showToast("TIMEOUT");
+          try { ws.close(); } catch (e) {}
+          // onclose will run _resetState()+rerender
+        }
+      }, MP_CONNECT_TIMEOUT_MS);
+
+      ws.onopen = function () {
+        if (window.mp._connectTimer) { clearTimeout(window.mp._connectTimer); window.mp._connectTimer = null; }
+        window.mp.status = 'connected';
+        _renderStatus();
+        // Send hello so the peer learns our intended role + client tag.
+        try {
+          ws.send(JSON.stringify({
+            type:   "hello",
+            role:   window.mp.mode,
+            client: "lkb-3d",
+            phase:  1
+          }));
+        } catch (e) {
+          console.warn("[lkb-3d/mp] hello send failed:", e);
+        }
+        console.log("[lkb-3d/mp] connected as", window.mp.mode, "room", window.mp.room);
+      };
+
+      ws.onmessage = function (ev) {
+        var msg = null;
+        try { msg = JSON.parse(ev.data); } catch (e) {
+          console.log("[lkb-3d/mp] rx (non-JSON):", ev.data);
+          return;
+        }
+        console.log("[lkb-3d/mp] rx:", msg);
+
+        // Relay-assigned role (2D-compatible message). Mirror into state
+        // so the status pill shows the authoritative role.
+        if (msg.type === "role" && (msg.role === "host" || msg.role === "guest")) {
+          window.mp.role = msg.role;
+          // Don't fight the relay — if it disagrees with our intended
+          // role, the relay's word wins (matches 2D negotiation flow).
+          if (msg.role !== window.mp.mode) {
+            console.log("[lkb-3d/mp] relay reassigned role:", window.mp.mode, "→", msg.role);
+            window.mp.mode = msg.role;
+          }
+          _renderStatus();
+          return;
+        }
+
+        // 2D-style "ready" message (both peers in the room).
+        if (msg.type === "ready") {
+          window.mp.peerReady = true;
+          _renderStatus();
+          _showToast("PEER READY");
+          return;
+        }
+
+        // Our own simple fan-out: peer sent a hello.
+        if (msg.type === "peer-hello" || msg.type === "hello") {
+          window.mp.peerReady = true;
+          _renderStatus();
+          _showToast("PEER READY");
+          return;
+        }
+
+        // Peer disconnected mid-session.
+        if (msg.type === "peer-left") {
+          window.mp.peerReady = false;
+          _renderStatus();
+          _showToast("PEER LEFT");
+          return;
+        }
+
+        // Room is full (relay rejected us).
+        if (msg.type === "full") {
+          console.warn("[lkb-3d/mp] room full");
+          _showToast("ROOM FULL");
+          try { ws.close(); } catch (e) {}
+          return;
+        }
+
+        // Anything else (game-state messages from a phase-2 peer talking
+        // to a phase-1 client, e.g. { t: "in" }, { t: "st" }) is logged
+        // and ignored — phase-1 doesn't apply state.
+      };
+
+      ws.onerror = function (err) {
+        console.warn("[lkb-3d/mp] ws error:", err);
+      };
+
+      ws.onclose = function (ev) {
+        console.log("[lkb-3d/mp] ws closed", { code: ev && ev.code, reason: ev && ev.reason });
+        var wasConnected = (window.mp.status === 'connected');
+        var prevRoom     = window.mp.room;
+        var prevRole     = window.mp._lastIntendedRole;
+        var retried      = window.mp._retryUsed;
+        _resetState();
+        _renderStatus();
+        // Single auto-retry on EARLY close (we never reached 'connected').
+        // After that, fall back to manual reconnect.
+        if (!wasConnected && !retried && prevRoom) {
+          window.mp._retryUsed = true;
+          console.log("[lkb-3d/mp] retrying in", MP_RETRY_DELAY_MS, "ms");
+          setTimeout(function () {
+            // Only retry if the user hasn't started something new.
+            if (window.mp.status === 'disconnected') {
+              mpConnect(prevRoom, prevRole);
+            }
+          }, MP_RETRY_DELAY_MS);
+        }
+      };
+
+      return true;
+    }
+
+    function mpDisconnect() {
+      var mp = window.mp;
+      if (mp.ws) {
+        try { mp.ws.close(); } catch (e) {}
+      }
+      _resetState();
+      _renderStatus();
+    }
+
+    // ── Public API ───────────────────────────────────────────────────
+    window.mpConnect    = mpConnect;
+    window.mpDisconnect = mpDisconnect;
+    window.mpRandomCode = mpRandomCode;
+
+    // ── UI wiring ────────────────────────────────────────────────────
+    function _wire() {
+      _resolveEls();
+      if (!els.bar) {
+        console.warn("[lkb-3d/mp] HUD not in DOM; bailing");
+        return;
+      }
+      _renderStatus();
+
+      els.hostBtn.addEventListener('click', function () {
+        var code = mpRandomCode();
+        mpConnect(code, 'host');
+      });
+
+      els.joinBtn.addEventListener('click', function () {
+        // Plain prompt() — phase-1 keeps the join UX intentionally crude
+        // (no custom modal). Phase-2 may upgrade to an inline input.
+        var raw = window.prompt("Enter room code (5 chars):", "");
+        if (raw == null) return; // cancelled
+        var code = _normalizeCode(raw);
+        if (code.length !== MP_CODE_LEN) {
+          _showToast("BAD CODE");
+          return;
+        }
+        mpConnect(code, 'guest');
+      });
+
+      els.leaveBtn.addEventListener('click', function () {
+        mpDisconnect();
+      });
+
+      // Click the room pill to copy the code to clipboard.
+      els.roomPill.addEventListener('click', function () {
+        var mp = window.mp;
+        if (!mp.room) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(mp.room).then(function () {
+            _showToast("COPIED " + mp.room);
+          }, function () {
+            _showToast("COPY FAILED");
+          });
+        } else {
+          _showToast("ROOM " + mp.room);
+        }
+      });
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', _wire);
+    } else {
+      _wire();
+    }
   })();
   </script>
 
