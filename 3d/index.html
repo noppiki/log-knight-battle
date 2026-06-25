@@ -333,6 +333,70 @@
       0%, 80%, 100% { opacity: 0.2; }
       40% { opacity: 1; }
     }
+
+    /* ── damage floater ("-8") — spawned by applyDamage above the
+         defender's head; rises 60px and fades to 0 over 600ms. The
+         position is set inline (top/left in screen px) by JS each spawn. */
+    .dmg-floater {
+      position: fixed;
+      z-index: 28;
+      pointer-events: none;
+      color: #ff6868;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+      font-size: 36px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      transform: translate(-50%, 0);
+      will-change: transform, opacity;
+      text-shadow:
+        0 0 8px rgba(216, 164, 90, 0.95),
+        0 4px 0 #1a0000,
+        -2px 0 0 #1a0000,
+        2px 0 0 #1a0000,
+        0 -2px 0 #1a0000;
+      animation: dmgFloat 0.6s ease-out forwards;
+    }
+    @keyframes dmgFloat {
+      0%   { transform: translate(-50%, 0)     scale(1.15); opacity: 1; }
+      18%  { transform: translate(-50%, -8px)  scale(1.0);  opacity: 1; }
+      100% { transform: translate(-50%, -60px) scale(0.95); opacity: 0; }
+    }
+
+    /* ── ROUND N banner — center overlay shown on each round start
+         (and on initial page load). Engraved-metal palette matches the
+         iter-65 player labels (#e8dcc0 body, #d8a45a accent). 1.2s
+         hold, 0.3s fade-out, then auto-removed by JS. */
+    #round-banner {
+      position: fixed;
+      inset: 0;
+      z-index: 27;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      font-family: 'Trebuchet MS', Verdana, sans-serif;
+    }
+    #round-banner .rb-text {
+      color: #e8dcc0;
+      font-size: 64px;
+      font-weight: 900;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      text-shadow:
+        0 -1px 0 rgba(255, 235, 200, 0.55),
+        0 1px 0 rgba(20, 16, 24, 0.95),
+        0 2px 0 rgba(20, 16, 24, 0.85),
+        0 3px 0 rgba(0, 0, 0, 0.55),
+        0 6px 18px rgba(0, 0, 0, 0.85),
+        0 0 28px rgba(216, 164, 90, 0.45);
+      animation: rbShow 1.5s ease-out forwards;
+    }
+    @keyframes rbShow {
+      0%   { opacity: 0; transform: scale(1.25) translateY(-6px); letter-spacing: 0.36em; }
+      18%  { opacity: 1; transform: scale(1.0)  translateY(0);    letter-spacing: 0.22em; }
+      80%  { opacity: 1; transform: scale(1.0)  translateY(0);    letter-spacing: 0.22em; }
+      100% { opacity: 0; transform: scale(0.98) translateY(2px);  letter-spacing: 0.22em; }
+    }
   </style>
 
   <script type="importmap">
@@ -401,6 +465,11 @@
     <div class="mw-label">MATCH WON</div>
     <div class="mw-winner" id="mw-winner-text"></div>
   </div>
+  <!-- ROUND N banner host — JS injects a .rb-text child on each round
+       start (and on initial load), then auto-removes after the CSS
+       animation completes (~1.5s). Pointer-events: none keeps it from
+       blocking the canvas. -->
+  <div id="round-banner" aria-live="polite"></div>
 
   <script type="module">
     import * as THREE from 'three';
@@ -590,6 +659,90 @@
       console.warn('[lkb-3d] rim lights skipped', err);
     }
 
+    // ── campfire PointLights (warm orange flicker, sides of the log) ─
+    // Left and right campfires sit off to the sides, slightly in front
+    // of the log so they cast warm orange spill onto the arena floor.
+    // castShadow=false keeps GPU cost down; flicker is driven in animate().
+    const CAMPFIRE_BASE = 2.5;
+    const fire_light_left  = new THREE.PointLight(0xff9050, CAMPFIRE_BASE, 5, 2);
+    fire_light_left.position.set(-5.5, 0.3, 1.5);
+    fire_light_left.castShadow = false;
+    scene.add(fire_light_left);
+
+    const fire_light_right = new THREE.PointLight(0xff9050, CAMPFIRE_BASE, 5, 2);
+    fire_light_right.position.set(5.5, 0.3, 1.5);
+    fire_light_right.castShadow = false;
+    scene.add(fire_light_right);
+
+    // ── campfire ember particles (30 pts each, additive orange-yellow) ─
+    // Slow-rising points with gentle sine wobble — suggest heat haze / embers.
+    // Wrapped in try/catch to fail softly without breaking the scene.
+    const EMBER_COUNT = 30;
+    const emberSystems = []; // { points, baseX, baseZ, velocities }
+
+    function createEmberSystem(baseX, baseZ) {
+      const geo = new THREE.BufferGeometry();
+      const positions  = new Float32Array(EMBER_COUNT * 3);
+      const velocities = new Float32Array(EMBER_COUNT * 3); // vx, vy, vz per point
+      for (let i = 0; i < EMBER_COUNT; i++) {
+        positions[i * 3 + 0] = baseX + (Math.random() - 0.5) * 0.3;
+        positions[i * 3 + 1] = 0.2 + Math.random() * 1.2;
+        positions[i * 3 + 2] = baseZ + (Math.random() - 0.5) * 0.3;
+        velocities[i * 3 + 0] = (Math.random() - 0.5) * 0.08; // gentle horizontal drift
+        velocities[i * 3 + 1] = 0.25 + Math.random() * 0.35;  // upward rise speed m/s
+        velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
+      }
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+      const mat = new THREE.PointsMaterial({
+        color:           0xff9050, // warm orange-yellow ember
+        size:            0.055,
+        sizeAttenuation: true,
+        transparent:     true,
+        opacity:         0.85,
+        depthWrite:      false,
+        blending:        THREE.AdditiveBlending,
+      });
+
+      const pts = new THREE.Points(geo, mat);
+      pts.frustumCulled = false;
+      scene.add(pts);
+      return { points: pts, baseX, baseZ, velocities };
+    }
+
+    try {
+      emberSystems.push(createEmberSystem(-5.5, 1.5));
+      emberSystems.push(createEmberSystem( 5.5, 1.5));
+    } catch (err) {
+      console.warn('[lkb-3d] campfire ember particles skipped', err);
+    }
+
+    function updateEmbers(delta, time) {
+      if (!emberSystems.length) return;
+      for (const sys of emberSystems) {
+        const pos = sys.points.geometry.attributes.position;
+        const arr = pos.array;
+        const vel = sys.velocities;
+        for (let i = 0; i < EMBER_COUNT; i++) {
+          const xi = i * 3 + 0, yi = i * 3 + 1, zi = i * 3 + 2;
+          // Add gentle sine wobble to horizontal drift so embers sway.
+          arr[xi] += (vel[xi] + 0.02 * Math.sin(time * 3.1 + i * 1.7)) * delta;
+          arr[yi] += vel[yi] * delta;
+          arr[zi] += (vel[zi] + 0.02 * Math.cos(time * 2.7 + i * 2.3)) * delta;
+          // Respawn ember once it rises above ~1.8 m or drifts too far sideways.
+          if (arr[yi] > 1.8 || Math.abs(arr[xi] - sys.baseX) > 0.5) {
+            arr[xi] = sys.baseX + (Math.random() - 0.5) * 0.25;
+            arr[yi] = 0.15 + Math.random() * 0.2;
+            arr[zi] = sys.baseZ + (Math.random() - 0.5) * 0.25;
+            vel[xi] = (Math.random() - 0.5) * 0.08;
+            vel[yi] = 0.25 + Math.random() * 0.35;
+            vel[zi] = (Math.random() - 0.5) * 0.08;
+          }
+        }
+        pos.needsUpdate = true;
+      }
+    }
+
     /* ── ground ────────────────────────────────────────────────── */
     const groundGeo = new THREE.PlaneGeometry(40, 40);
     const texLoader = new THREE.TextureLoader();
@@ -713,6 +866,10 @@
       const overlay = document.getElementById('loading');
       overlay.classList.add('fade-out');
       setTimeout(() => overlay.remove(), 600);
+      // Initial ROUND 1 banner — fires once the loading overlay clears
+      // (slight delay so the player actually sees it appear on top of
+      // the lit scene, not under the fading LOADING screen).
+      setTimeout(() => showRoundBanner(window.gameState.round || 1), 650);
     }
 
     function markLoaded() {
@@ -1110,6 +1267,10 @@
     window.gameState = {
       crimson: { hp: 100, sp: 0, dead: false, wins: 0 },
       azure:   { hp: 100, sp: 0, dead: false, wins: 0 },
+      // Round counter — starts at 1 on initial load, incremented by
+      // resetMatch() on each new round, and forced back to 1 by
+      // resetFullMatch() after a MATCH WON.
+      round: 1,
     };
     const HP_MAX = 100;
     const SP_MAX = 100;
@@ -1151,6 +1312,54 @@
     }
     updateGaugeDOM();
 
+    // ── damage floater — spawns a transient "-N" DOM span above the
+    // defender's head, positioned by projecting the combatant root
+    // through the active camera. Span removes itself after the CSS
+    // animation (0.6s) plus a small safety margin. Skipped silently if
+    // the defender root isn't ready yet (e.g. mid-load).
+    const _DMG_FLOAT_LIFE_MS = 650;
+    function showDamageFloater(defenderId, amount) {
+      const c = combatants[defenderId];
+      const root = c && c.root;
+      if (!root) return;
+      // Project the knight's chest area (≈ root + 1.6m) into screen px.
+      const ndc = new THREE.Vector3();
+      ndc.copy(root.position).add(new THREE.Vector3(0, 1.6, 0)).project(camera);
+      // Bail if the point is behind the camera (z>1).
+      if (ndc.z > 1) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      const sx = (ndc.x * 0.5 + 0.5) * rect.width  + rect.left;
+      const sy = (-ndc.y * 0.5 + 0.5) * rect.height + rect.top - 100; // -100px above head
+      const el = document.createElement('span');
+      el.className = 'dmg-floater';
+      el.textContent = '-' + Math.ceil(amount);
+      el.style.left = sx + 'px';
+      el.style.top  = sy + 'px';
+      document.body.appendChild(el);
+      setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, _DMG_FLOAT_LIFE_MS);
+    }
+
+    // ── ROUND N banner — clears any prior banner child, then injects
+    // a fresh .rb-text span so the CSS animation re-runs from frame 0.
+    // The element is removed after the 1.5s show+fade completes.
+    const _ROUND_BANNER_LIFE_MS = 1550;
+    const roundBannerHost = document.getElementById('round-banner');
+    let _roundBannerTimer = null;
+    function showRoundBanner(n) {
+      if (!roundBannerHost) return;
+      // Clear any in-flight banner so back-to-back calls don't stack.
+      if (_roundBannerTimer) { clearTimeout(_roundBannerTimer); _roundBannerTimer = null; }
+      while (roundBannerHost.firstChild) roundBannerHost.removeChild(roundBannerHost.firstChild);
+      const span = document.createElement('div');
+      span.className = 'rb-text';
+      span.textContent = 'ROUND ' + n;
+      roundBannerHost.appendChild(span);
+      _roundBannerTimer = setTimeout(() => {
+        while (roundBannerHost.firstChild) roundBannerHost.removeChild(roundBannerHost.firstChild);
+        _roundBannerTimer = null;
+      }, _ROUND_BANNER_LIFE_MS);
+    }
+
     // Reset cycle — called 5s after a KO. Restores both knights to
     // full HP/SP, hides the overlay, and forces both back to idle so
     // the next combat tick has clean state to drive.
@@ -1174,15 +1383,21 @@
           c.state = 'idle';
         }
       }
-      console.log('[lkb-3d] match reset');
+      // Advance the round counter and announce the new round. Initial
+      // load is handled separately in onAllLoaded() with ROUND 1.
+      window.gameState.round = (window.gameState.round || 1) + 1;
+      showRoundBanner(window.gameState.round);
+      console.log('[lkb-3d] match reset — ROUND ' + window.gameState.round);
     }
 
     // Full match reset — zeroes wins on both sides, then does normal round reset.
     function resetFullMatch() {
       window.gameState.crimson.wins = 0;
       window.gameState.azure.wins   = 0;
+      // Force round back to 1: resetMatch() below will pre-increment to 1.
+      window.gameState.round = 0;
       resetMatch();
-      console.log('[lkb-3d] full match reset (wins cleared)');
+      console.log('[lkb-3d] full match reset (wins + round cleared)');
     }
 
     // triggerDeath — fires Death_A on the dead knight, shows K.O.,
@@ -1243,6 +1458,9 @@
       if (!s || s.dead) return;
       s.hp = Math.max(0, s.hp - amount);
       updateGaugeDOM();
+      // Spawn a floating "-N" above the defender's head. Best-effort —
+      // bails internally if the combatant root isn't ready yet.
+      showDamageFloater(defenderId, amount);
       if (s.hp <= 0) triggerDeath(defenderId);
     };
 
@@ -1440,39 +1658,45 @@
     );
 
     /* ── particle dust/snow (optional, fail-soft) ──────────────── */
-    // 800 tiny additive points drifting downward, wrapped on a vertical
-    // band so the air always feels populated. Wrapped in try/catch — if
-    // any of this errors, we silently skip rather than breaking the scene.
+    // Additive points drifting downward with per-particle size variation and
+    // gentle horizontal wind drift. Wrapped in try/catch — if any of this
+    // errors, we silently skip rather than breaking the scene.
     let dustParticles = null;
-    let dustVelocities = null;
+    let dustVelocities = null;   // [fallSpeed, driftX] interleaved per particle
     try {
-      const DUST_COUNT = 1500;
+      const DUST_COUNT = 3500;
       const dustGeo = new THREE.BufferGeometry();
       const positions = new Float32Array(DUST_COUNT * 3);
-      dustVelocities = new Float32Array(DUST_COUNT);
+      const sizes     = new Float32Array(DUST_COUNT);
+      dustVelocities  = new Float32Array(DUST_COUNT * 2); // [vy, vx] per particle
       const SPAN_X = 16, SPAN_Z = 16;
       const Y_MIN = 0.1, Y_MAX = 8.0;
       for (let i = 0; i < DUST_COUNT; i++) {
         positions[i * 3 + 0] = (Math.random() - 0.5) * SPAN_X;
         positions[i * 3 + 1] = Math.random() * (Y_MAX - Y_MIN) + Y_MIN;
         positions[i * 3 + 2] = (Math.random() - 0.5) * SPAN_Z;
+        // Per-particle size variation: 0.05 – 0.12
+        sizes[i] = 0.05 + Math.random() * 0.07;
         // Gentle per-particle fall speed (m/s).
-        dustVelocities[i] = 0.08 + Math.random() * 0.18;
+        dustVelocities[i * 2 + 0] = 0.08 + Math.random() * 0.18;
+        // Slight horizontal wind drift: 0 ± 0.03 m/s
+        dustVelocities[i * 2 + 1] = (Math.random() - 0.5) * 0.06;
       }
       dustGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      dustGeo.setAttribute('size',     new THREE.BufferAttribute(sizes, 1));
 
       const dustMat = new THREE.PointsMaterial({
         color: 0xd8c8b8,
-        size: 0.07,
+        size: 0.07,          // base size; overridden per-point via sizes attribute
         sizeAttenuation: true,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.92,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
 
       dustParticles = new THREE.Points(dustGeo, dustMat);
-      dustParticles.userData = { Y_MIN, Y_MAX };
+      dustParticles.userData = { Y_MIN, Y_MAX, SPAN_X };
       scene.add(dustParticles);
     } catch (err) {
       console.warn('[lkb-3d] dust particles skipped', err);
@@ -1483,14 +1707,22 @@
       if (!dustParticles) return;
       const pos = dustParticles.geometry.attributes.position;
       const arr = pos.array;
-      const { Y_MIN, Y_MAX } = dustParticles.userData;
+      const { Y_MIN, Y_MAX, SPAN_X } = dustParticles.userData;
       const n = arr.length / 3;
       for (let i = 0; i < n; i++) {
+        const xi = i * 3 + 0;
         const yi = i * 3 + 1;
-        arr[yi] -= dustVelocities[i] * delta;
+        arr[yi] -= dustVelocities[i * 2 + 0] * delta;
+        arr[xi] += dustVelocities[i * 2 + 1] * delta;
+        // Wrap vertically: re-spawn at the top when fallen past Y_MIN.
         if (arr[yi] < Y_MIN) {
-          arr[yi] = Y_MAX; // wrap-around: re-spawn at the top
+          arr[yi] = Y_MAX;
+          arr[xi] = (Math.random() - 0.5) * SPAN_X; // randomise X on re-spawn
         }
+        // Wrap horizontally to stay within the volume.
+        const half = SPAN_X * 0.5;
+        if (arr[xi] >  half) arr[xi] -= SPAN_X;
+        if (arr[xi] < -half) arr[xi] += SPAN_X;
       }
       pos.needsUpdate = true;
     }
@@ -1517,6 +1749,9 @@
     onResize();
 
     /* ── render loop ────────────────────────────────────────────── */
+    // Shared elapsed time accumulator for campfire flicker + ember wobble.
+    let _sceneTime = 0;
+
     function animate() {
       requestAnimationFrame(animate);
       // SAFETY GUARD: reset camera if it has drifted out of the playable bowl.
@@ -1527,11 +1762,22 @@
         controls.update();
       }
       const delta = animClock.getDelta();
+      _sceneTime += delta;
+      const time = _sceneTime;
+
+      // ── campfire flicker ────────────────────────────────────────
+      // Two independent phases so the fires don't pulse in sync.
+      const flickerL = CAMPFIRE_BASE * (0.85 + 0.30 * Math.sin(time * 8  + 0)   + 0.15 * Math.sin(time * 13 + 0   * 1.7));
+      const flickerR = CAMPFIRE_BASE * (0.85 + 0.30 * Math.sin(time * 8  + 2.1) + 0.15 * Math.sin(time * 13 + 2.1 * 1.7));
+      fire_light_left.intensity  = flickerL;
+      fire_light_right.intensity = flickerR;
+
       // Advance every animation mixer (knights' idle, log if anim'd, etc.)
       if (mixers.length > 0) {
         mixers.forEach(m => m.update(delta));
       }
       updateDust(delta);
+      updateEmbers(delta, time);
       controls.update(); // needed for damping (recomputes camera.position)
       // Run impact FX AFTER controls so camera-shake jitter wins this frame.
       impactSystem.update(delta);
