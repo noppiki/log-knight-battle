@@ -1377,6 +1377,13 @@
       font-size: 32px;
       text-shadow: 0 0 10px rgba(255,80,80,0.8), 0 3px 0 #1a0000;
     }
+    /* ── r105: kind-heal — green HP recovery floater (+30 HP between rounds) */
+    .dmg-floater.kind-heal {
+      color: #66dd66;
+      font-size: 28px;
+      font-weight: 900;
+      text-shadow: 0 0 10px rgba(102,221,102,0.8), 0 0 4px rgba(80,200,80,0.6), 0 3px 0 #001a00;
+    }
     .dmg-floater .caption {
       font-size: 0.55em;
       opacity: 0.85;
@@ -1762,6 +1769,17 @@
     /* hit-flash overrides desperate-pulse so damage flash always reads on top */
     .hp-bar.hit-flash.desperate-pulse {
       animation: hpHitPulse 0.2s ease-out forwards;
+    }
+    /* ── r105: HP heal pulse — green glow on HP bar when player recovers HP between rounds */
+    @keyframes hpHealPulse {
+      0%   { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 18px 5px rgba(80,220,80,0.9), 0 0 8px 3px rgba(100,255,100,0.65); }
+      60%  { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 22px 6px rgba(80,220,80,0.75), 0 0 10px 4px rgba(100,255,100,0.5); }
+      100% { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55); }
+    }
+    .hp-bar.heal-pulse {
+      animation: hpHealPulse 0.4s ease-out forwards;
     }
 
     /* EXHAUSTED pill — transient center-top tooltip that flashes when
@@ -9052,7 +9070,9 @@
       const caption = (opts && opts.caption) || null;
       el.className = 'dmg-floater kind-' + kind;
       // Build inner HTML: number span + optional caption line.
-      el.innerHTML = '-' + Math.ceil(amount) +
+      // r105: kind-heal uses '+N HP' prefix; all other kinds use '-N'.
+      const _floatPrefix = (kind === 'heal') ? ('+' + Math.ceil(amount) + ' HP') : ('-' + Math.ceil(amount));
+      el.innerHTML = _floatPrefix +
         (caption ? '<span class="caption">' + caption + '</span>' : '');
       el.style.left = sx + 'px';
       el.style.top  = sy + 'px';
@@ -9192,6 +9212,22 @@
         // wins is intentionally NOT reset here — persists until match end
       }
       updateGaugeDOM();
+      // r105: HP regen visualization — show green floater + HP bar pulse for both fighters.
+      // Always fires on partialHeal (round 2+) regardless of HP cap; serves as round-start cue.
+      if (partialHeal) {
+        for (const _healId of ['crimson', 'azure']) {
+          showDamageFloater(_healId, 30, { kind: 'heal' });
+          const _healFill = document.getElementById('hp-fill-' + _healId);
+          const _healBar  = _healFill && _healFill.closest('.hp-bar');
+          if (_healBar) {
+            _healBar.classList.remove('heal-pulse');
+            // Force reflow so removing+re-adding restarts animation if called twice.
+            void _healBar.offsetWidth;
+            _healBar.classList.add('heal-pulse');
+            setTimeout(() => _healBar.classList.remove('heal-pulse'), 500);
+          }
+        }
+      }
       if (koOverlay) koOverlay.classList.remove('visible');
       if (matchWonOverlay) {
         matchWonOverlay.classList.remove('visible');
