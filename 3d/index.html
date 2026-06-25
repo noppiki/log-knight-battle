@@ -924,6 +924,45 @@
     #letterbox-top.active,
     #letterbox-bottom.active { height: 12vh; }
 
+    /* ── r78: FINISHER execution text ──────────────────────────── */
+    /* z-index 27 — above letterbox bars (24), HUD, and match-won (25/26),
+       but below settings panel (95/100). Hidden by default. */
+    #finisher-text {
+      display: none;
+      position: fixed;
+      inset: 0;
+      margin: auto;
+      width: max-content;
+      height: max-content;
+      font-family: 'Cinzel', 'Trajan Pro', serif;
+      font-size: 96px;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: linear-gradient(45deg, #ff2020 0%, #ff8800 50%, #ffd000 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: transparent;
+      text-shadow: none;
+      filter: drop-shadow(0 0 18px rgba(255,80,0,0.7)) drop-shadow(0 0 40px rgba(255,180,0,0.4));
+      z-index: 27;
+      pointer-events: none;
+      user-select: none;
+      transform: scale(1);
+    }
+    @keyframes finisherPop {
+      0%   { transform: scale(0.65); opacity: 0.3; }
+      35%  { transform: scale(1.22); opacity: 1;   }
+      55%  { transform: scale(0.97); opacity: 1;   }
+      70%  { transform: scale(1.06); opacity: 1;   }
+      85%  { transform: scale(1.00); opacity: 1;   }
+      100% { transform: scale(1.00); opacity: 1;   }
+    }
+    #finisher-text.finisher-pop {
+      animation: finisherPop 0.75s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+    }
+
     /* ── r65: match-start cinematic intro text ─────────────────── */
     /* READY... and FIGHT! overlays. z-index 30 — above all HUD and
        letterbox bars (24), below settings panel (95/100). */
@@ -2052,6 +2091,8 @@
   <!-- Cinematic letterbox bars — slide in during KO_REPLAY slow-mo -->
   <div id="letterbox-top"></div>
   <div id="letterbox-bottom"></div>
+  <!-- r78: finisher execution text overlay -->
+  <div id="finisher-text">FINISHER!</div>
   <div id="ko-overlay">K.O.</div>
   <div id="match-won-overlay">
     <div class="mw-label">MATCH WON</div>
@@ -8173,6 +8214,23 @@
     // NOTE: mutates fields in place so `wins` is preserved across rounds.
     let resetTimerHandle = null;
     function resetMatch() {
+      // r78: if a finisher cinematic is still running on reset (R hotkey mid-cinematic),
+      // cancel and restore cleanly so mixers don't stay at 0.2× and the
+      // finisher text isn't left hanging.
+      if (window._finisherHandle) {
+        clearTimeout(window._finisherHandle);
+        window._finisherHandle = null;
+      }
+      if (window._finisherCamActive) {
+        window._finisherCamActive = false;
+      }
+      window._finisherMode = false;
+      // Restore mixer scales if still slowed from finisher.
+      if (mixers && mixers.length) {
+        mixers.forEach(m => { if (m.timeScale < 0.5) m.timeScale = 1.0; });
+      }
+      const _ftCleanEl = document.getElementById('finisher-text');
+      if (_ftCleanEl) { _ftCleanEl.style.display = 'none'; _ftCleanEl.style.opacity = '1'; }
       // Defensive: if a KO_REPLAY slow-mo is still pending when a reset
       // arrives, run the restore now so we don't enter the next round with
       // mixers stuck at 0.5x.
@@ -8404,6 +8462,10 @@
     // total 6s before round/match reset. Idempotent per defender thanks
     // to the gameState.dead flag.
     function triggerDeath(defenderId) {
+      // r78: consume finisher flag atomically — even if this KO isn't match-deciding,
+      // the flag must be cleared so it cannot mis-fire on a future match-deciding KO.
+      const _isFinisher = !!window._finisherMode;
+      window._finisherMode = false;
       const c = combatants[defenderId];
       if (!c) return;
       window.gameState[defenderId].dead = true;
@@ -8454,19 +8516,25 @@
       }, 4000);
 
       if (winnerWins >= WINS_MAX) {
-        // MATCH WON — show match-won overlay, then do a full reset (clears wins)
+        // MATCH WON — show match-won overlay, then do a full reset (clears wins).
+        // r78: for the finisher path, matchWonOverlay is shown AFTER the 4s cinematic
+        // (inside triggerFinisherSequence's restore callback). For all other paths it
+        // shows immediately as before.
         if (koOverlay) koOverlay.classList.remove('visible');
-        if (matchWonOverlay) {
-          if (mwWinnerText) mwWinnerText.textContent = winnerId.toUpperCase() + ' WINS THE MATCH';
-          matchWonOverlay.classList.add('visible');
+        if (!_isFinisher || defenderId !== 'azure') {
+          if (matchWonOverlay) {
+            if (mwWinnerText) mwWinnerText.textContent = winnerId.toUpperCase() + ' WINS THE MATCH';
+            matchWonOverlay.classList.add('visible');
+          }
         }
         // r70: flag match end so R/Esc hotkeys activate, show hint after
-        // the KO_REPLAY cinematic (3s) so it doesn't clutter the slow-mo beat.
+        // the KO_REPLAY cinematic (3s) / finisher (4s) so it doesn't clutter.
         window._matchEndShown = true;
+        const _hintDelay = (_isFinisher && defenderId === 'azure') ? 4300 : 3200;
         setTimeout(() => {
           const hint = document.getElementById('match-hotkey-hint');
           if (hint && window._matchEndShown) hint.style.display = 'block';
-        }, 3200);
+        }, _hintDelay);
         console.log(`[lkb-3d] MATCH WON by ${winnerId}`);
 
         // ── Record tracker update ────────────────────────────────────
@@ -8494,74 +8562,85 @@
           }
         } catch (e) { console.warn('[lkb-3d] record update failed', e); }
 
-        // ── KO_REPLAY cinematic ──────────────────────────────────────
-        // Match-deciding KO only (NOT every round KO). Swing the camera
-        // to a tight close-up of the winner and dilate time on the skeletal
-        // mixers for 3.0s so the killing pose reads as a punctuated beat.
-        // Restores the prior viewMode (FP / manual / cinematic) after the
-        // replay so the player lands back where they were before the match
-        // ended. Idempotent + cancel-safe via _koReplayHandle.
-        try {
-          if (window._koReplayHandle) clearTimeout(window._koReplayHandle);
-          if (window._koReplayRestoreFn) {
-            // A previous replay never ran its restore (shouldn't happen, but
-            // defensive — invoke it now so we don't leak slow-mo / view state).
-            try { window._koReplayRestoreFn(); } catch (e) {}
-            window._koReplayRestoreFn = null;
+        // ── r78: FINISHER EXECUTION (tier-2 KO from low HP) or KO_REPLAY ──
+        // _isFinisher is true only when this is ALSO the match-deciding KO
+        // (we're inside the winnerWins >= WINS_MAX branch) AND the killing hit
+        // was tier-2 AND azure's pre-hit HP was ≤ 5.  All other match-deciding
+        // KOs fall through to the unchanged KO_REPLAY path below.
+        if (_isFinisher && defenderId === 'azure') {
+          try { triggerFinisherSequence(matchWonOverlay, mwWinnerText, winnerId); } catch (e) {
+            console.warn('[lkb-3d] finisher sequence failed — falling back to KO_REPLAY', e);
+            // Fallback: run normal KO_REPLAY so the match doesn't soft-lock.
+            window._finisherFallback = true;
           }
-          const savedViewMode = cameraDirector ? cameraDirector.viewMode : null;
-          // Switch to cinematic and jumpTo the close-up of the WINNER.
-          // CINEMA_SHOTS index in the director's `shots` list:
-          //   0=SIDE_WIDE  1=CLOSE_CRIMSON  2=SIDE_WIDE  3=CLOSE_AZURE  4=SIDE_WIDE  5=HIGH_WIDE
-          if (cameraDirector) {
-            cameraDirector.setViewMode('cinematic');
-            const winnerShot = (winnerId === 'crimson')
-              ? CINEMA_SHOTS.CLOSE_CRIMSON
-              : CINEMA_SHOTS.CLOSE_AZURE;
-            cameraDirector.jumpTo(winnerShot, 'KO_REPLAY');
+          if (!window._finisherFallback) {
+            // resetFullMatch scheduled inside triggerFinisherSequence (6s total).
+          } else {
+            window._finisherFallback = false;
+            // (fall through to KO_REPLAY block below)
           }
-          // Slide in cinematic letterbox bars for the slow-mo replay.
-          const _lbTop    = document.getElementById('letterbox-top');
-          const _lbBottom = document.getElementById('letterbox-bottom');
-          if (_lbTop)    _lbTop.classList.add('active');
-          if (_lbBottom) _lbBottom.classList.add('active');
-          // Slow-mo on all skeletal mixers (Death_A fall, idle, etc.).
-          // Save the per-mixer prior timeScale so the hit-lag system
-          // (which also touches timeScale briefly) and any other consumer
-          // remain unaffected if they ran a custom scale.
-          const _savedScales = (mixers && mixers.length)
-            ? mixers.map(m => m.timeScale)
-            : [];
-          if (mixers && mixers.length) {
-            mixers.forEach(m => { m.timeScale = 0.5; });
-          }
-          const KO_REPLAY_DURATION_MS = 3000;
-          window._koReplayRestoreFn = function () {
-            // Restore mixer timeScales.
-            if (mixers && mixers.length) {
-              for (let i = 0; i < mixers.length; i++) {
-                mixers[i].timeScale = (_savedScales[i] != null) ? _savedScales[i] : 1.0;
-              }
-            }
-            // Restore the prior viewMode (only if it differs — setViewMode
-            // early-returns on no-op, but being explicit is cheap).
-            if (cameraDirector && savedViewMode && cameraDirector.viewMode !== savedViewMode) {
-              cameraDirector.setViewMode(savedViewMode);
-            }
-            // Slide letterbox bars back out after slow-mo ends.
-            const lbTop    = document.getElementById('letterbox-top');
-            const lbBottom = document.getElementById('letterbox-bottom');
-            if (lbTop)    lbTop.classList.remove('active');
-            if (lbBottom) lbBottom.classList.remove('active');
-            window._koReplayRestoreFn = null;
-            window._koReplayHandle    = null;
-          };
-          window._koReplayHandle = setTimeout(window._koReplayRestoreFn, KO_REPLAY_DURATION_MS);
-        } catch (e) {
-          console.warn('[lkb-3d] KO_REPLAY cinematic failed:', e);
         }
 
-        resetTimerHandle = setTimeout(resetFullMatch, 6000);
+        if (!_isFinisher || defenderId !== 'azure' || window._finisherFallback) {
+          window._finisherFallback = false;
+          // ── KO_REPLAY cinematic ──────────────────────────────────────
+          // Match-deciding KO only (NOT every round KO). Swing the camera
+          // to a tight close-up of the winner and dilate time on the skeletal
+          // mixers for 3.0s so the killing pose reads as a punctuated beat.
+          // Restores the prior viewMode (FP / manual / cinematic) after the
+          // replay so the player lands back where they were before the match
+          // ended. Idempotent + cancel-safe via _koReplayHandle.
+          try {
+            if (window._koReplayHandle) clearTimeout(window._koReplayHandle);
+            if (window._koReplayRestoreFn) {
+              try { window._koReplayRestoreFn(); } catch (e) {}
+              window._koReplayRestoreFn = null;
+            }
+            const savedViewMode = cameraDirector ? cameraDirector.viewMode : null;
+            // Switch to cinematic and jumpTo the close-up of the WINNER.
+            if (cameraDirector) {
+              cameraDirector.setViewMode('cinematic');
+              const winnerShot = (winnerId === 'crimson')
+                ? CINEMA_SHOTS.CLOSE_CRIMSON
+                : CINEMA_SHOTS.CLOSE_AZURE;
+              cameraDirector.jumpTo(winnerShot, 'KO_REPLAY');
+            }
+            // Slide in cinematic letterbox bars for the slow-mo replay.
+            const _lbTop    = document.getElementById('letterbox-top');
+            const _lbBottom = document.getElementById('letterbox-bottom');
+            if (_lbTop)    _lbTop.classList.add('active');
+            if (_lbBottom) _lbBottom.classList.add('active');
+            // Slow-mo on all skeletal mixers (Death_A fall, idle, etc.).
+            const _savedScales = (mixers && mixers.length)
+              ? mixers.map(m => m.timeScale)
+              : [];
+            if (mixers && mixers.length) {
+              mixers.forEach(m => { m.timeScale = 0.5; });
+            }
+            const KO_REPLAY_DURATION_MS = 3000;
+            window._koReplayRestoreFn = function () {
+              if (mixers && mixers.length) {
+                for (let i = 0; i < mixers.length; i++) {
+                  mixers[i].timeScale = (_savedScales[i] != null) ? _savedScales[i] : 1.0;
+                }
+              }
+              if (cameraDirector && savedViewMode && cameraDirector.viewMode !== savedViewMode) {
+                cameraDirector.setViewMode(savedViewMode);
+              }
+              const lbTop    = document.getElementById('letterbox-top');
+              const lbBottom = document.getElementById('letterbox-bottom');
+              if (lbTop)    lbTop.classList.remove('active');
+              if (lbBottom) lbBottom.classList.remove('active');
+              window._koReplayRestoreFn = null;
+              window._koReplayHandle    = null;
+            };
+            window._koReplayHandle = setTimeout(window._koReplayRestoreFn, KO_REPLAY_DURATION_MS);
+          } catch (e) {
+            console.warn('[lkb-3d] KO_REPLAY cinematic failed:', e);
+          }
+
+          resetTimerHandle = setTimeout(resetFullMatch, 6000);
+        }
       } else {
         // Round over — normal KO overlay, then round reset (wins preserved)
         if (koOverlay) koOverlay.classList.add('visible');
@@ -8569,6 +8648,126 @@
       }
       // Store cheer handle so resetMatch can cancel it if needed (defensive).
       window._pendingCheerHandle = cheerHandle;
+    }
+
+    // ── r78: FINISHER EXECUTION SEQUENCE ──────────────────────────────
+    // Fires when crimson lands a clean tier-2 charge-hit that kills azure
+    // while azure's HP was ≤ 5 (execution threshold) on a match-deciding KO.
+    // Replaces KO_REPLAY for that specific condition; all other KOs are
+    // unaffected.  Total duration: 4000ms slow-mo cinematic, then victory.
+    //
+    // Race safety:
+    //   - Cancels hit-stop (_hitLagHandle) and stagger-boost (_staggerBoostHandle)
+    //     BEFORE capturing _savedScales, so we never snapshot 0 or 0.6 into
+    //     the scales and restore a wrong baseline.
+    //   - _finisherHandle is tracked for resetMatch() cleanup.
+    //   - _finisherCamActive + _finisherStartMs drive the animate() push-in branch.
+    function triggerFinisherSequence(matchWonOverlayEl, mwWinnerTextEl, winnerId) {
+      // ── Pre-cancel racing timeScale mutations ──
+      if (window._hitLagHandle) {
+        clearTimeout(window._hitLagHandle);
+        window._hitLagHandle = null;
+      }
+      if (window._hitLagRestoreFn) {
+        try { window._hitLagRestoreFn(); } catch (_e) {}
+        window._hitLagRestoreFn = null;
+      }
+      if (window._staggerBoostHandle) {
+        clearTimeout(window._staggerBoostHandle);
+        window._staggerBoostHandle = null;
+      }
+      if (window._staggerBoostAction) {
+        try { window._staggerBoostAction.timeScale = 1.0; } catch (_e) {}
+        window._staggerBoostAction = null;
+      }
+
+      // ── 1) Slow-mo: 0.2× for 4000ms (deeper than KO_REPLAY's 0.5×) ──
+      const _fSavedScales = (mixers && mixers.length)
+        ? mixers.map(m => m.timeScale)
+        : [];
+      if (mixers && mixers.length) {
+        mixers.forEach(m => { m.timeScale = 0.2; });
+      }
+
+      // ── 2) Cinematic camera push-in toward azure (animate() loop handles it) ──
+      const _fSavedViewMode = cameraDirector ? cameraDirector.viewMode : null;
+      window._finisherCamActive = true;
+      window._finisherStartMs   = performance.now();
+
+      // ── 3) Letterbox bars ──
+      const _lbTop    = document.getElementById('letterbox-top');
+      const _lbBottom = document.getElementById('letterbox-bottom');
+      if (_lbTop)    _lbTop.classList.add('active');
+      if (_lbBottom) _lbBottom.classList.add('active');
+
+      // ── 4) "FINISHER!" text overlay ──
+      const _ftEl = document.getElementById('finisher-text');
+      if (_ftEl) {
+        _ftEl.style.display = 'block';
+        _ftEl.style.opacity = '1';
+        // Restart the CSS scale animation cleanly.
+        _ftEl.classList.remove('finisher-pop');
+        void _ftEl.offsetWidth; // reflow
+        _ftEl.classList.add('finisher-pop');
+      }
+
+      // ── 5) Audio: low 40 Hz sawtooth boom ──
+      // sfxHorn was already queued at 400ms inside triggerDeath — skip re-fire.
+      try {
+        if (window.actx) {
+          const _boomOsc  = window.actx.createOscillator();
+          const _boomGain = window.actx.createGain();
+          _boomOsc.type = 'sawtooth';
+          _boomOsc.frequency.setValueAtTime(40, window.actx.currentTime);
+          _boomGain.gain.setValueAtTime(0,    window.actx.currentTime);
+          _boomGain.gain.linearRampToValueAtTime(0.18, window.actx.currentTime + 0.05);
+          _boomGain.gain.linearRampToValueAtTime(0,    window.actx.currentTime + 0.8);
+          _boomOsc.connect(_boomGain);
+          _boomGain.connect(window.globalGain || window.actx.destination);
+          _boomOsc.start();
+          _boomOsc.stop(window.actx.currentTime + 0.8);
+        }
+      } catch (_e) {}
+
+      // ── 6) Restore + transition to victory after 4000ms ──
+      const _fRestoreFn = function () {
+        // Restore mixer timeScales.
+        if (mixers && mixers.length) {
+          for (let i = 0; i < mixers.length; i++) {
+            mixers[i].timeScale = (_fSavedScales[i] != null) ? _fSavedScales[i] : 1.0;
+          }
+        }
+        // Deactivate cinematic branch.
+        window._finisherCamActive = false;
+        if (cameraDirector && _fSavedViewMode && cameraDirector.viewMode !== _fSavedViewMode) {
+          try { cameraDirector.setViewMode(_fSavedViewMode); } catch (_e) {}
+        }
+        // Retract letterbox bars.
+        const lbT = document.getElementById('letterbox-top');
+        const lbB = document.getElementById('letterbox-bottom');
+        if (lbT) lbT.classList.remove('active');
+        if (lbB) lbB.classList.remove('active');
+        // Fade out "FINISHER!" text.
+        const ftEl = document.getElementById('finisher-text');
+        if (ftEl) {
+          ftEl.style.transition = 'opacity 0.4s ease-out';
+          ftEl.style.opacity = '0';
+          setTimeout(() => {
+            if (ftEl) { ftEl.style.display = 'none'; ftEl.style.transition = ''; }
+          }, 450);
+        }
+        // Show match-won overlay (deferred from triggerDeath for the finisher path).
+        if (matchWonOverlayEl) {
+          if (mwWinnerTextEl) mwWinnerTextEl.textContent = (winnerId || 'CRIMSON').toUpperCase() + ' WINS THE MATCH';
+          matchWonOverlayEl.classList.add('visible');
+        }
+        window._finisherHandle = null;
+      };
+      window._finisherHandle = setTimeout(function () {
+        _fRestoreFn();
+        // Full match reset after an additional 2s (matches the 6s total of normal KO path).
+        resetTimerHandle = setTimeout(resetFullMatch, 2000);
+      }, 4000);
     }
 
     // ── Combo counter (r54) ─────────────────────────────────────────
@@ -8666,6 +8865,7 @@
           } catch (e) {}
         }
       }
+      const _r78PreHp = s.hp; // r78: capture pre-subtraction HP for finisher threshold check
       s.hp = Math.max(0, s.hp - amount);
       updateGaugeDOM();
       // Spawn a floating "-N" above the defender's head. Best-effort —
@@ -8685,7 +8885,17 @@
           try { _comboReset(); } catch (e) {}
         }
       }
-      if (s.hp <= 0) triggerDeath(defenderId);
+      // r78: finisher detection — arm finisher flag when a clean tier-2 hit
+      // from crimson drops azure from HP≤5 to 0. Must check preHp BEFORE
+      // s.hp is reduced; capture preHp earlier in the function to preserve
+      // the pre-subtraction value.
+      if (s.hp <= 0) {
+        if (defenderId === 'azure' && !guardAbsorbed &&
+            opts && opts.kind === 'charge2' && _r78PreHp <= 5) {
+          window._finisherMode = true;
+        }
+        triggerDeath(defenderId);
+      }
     };
 
     // gainSP — small helper for the SP +5 on every combat tick. Capped
@@ -11437,7 +11647,25 @@
       // While window._matchIntroActive, hijack camera pose AFTER the
       // director's update() so our write wins (director runs its internal
       // cycle timers, then we overwrite camera.position and lookAt).
-      if (window._matchIntroActive) {
+      if (window._finisherCamActive) {
+        // r78: FINISHER push-in — drive camera toward azure close-up over 4s.
+        // Mirrors the matchIntro pattern: hard-coded coords, no .position read on
+        // the azure combatant root (baked skeleton offsets make that unreliable).
+        // Start: CLOSE_AZURE position (3.5, 0.9, -3.5) → push in toward look
+        // target (2.0, 1.5, 0) so the head fills the frame by the end.
+        const _fElapsed  = Math.min(performance.now() - (window._finisherStartMs || 0), 4000);
+        const _fT        = _fElapsed / 4000; // 0→1 over 4s
+        const _fEase     = _fT < 0.5 ? 4 * _fT * _fT * _fT : 1 - Math.pow(-2 * _fT + 2, 3) / 2;
+        // Push in: start at CLOSE_AZURE (dist ~2 m) → pull to 0.9 m from look target.
+        const _fFromX = 3.5, _fFromY = 0.9, _fFromZ = -3.5;
+        const _fToX   = 2.5, _fToY   = 1.3, _fToZ   = -1.6; // tighter head close-up
+        camera.position.set(
+          _fFromX + (_fToX - _fFromX) * _fEase,
+          _fFromY + (_fToY - _fFromY) * _fEase,
+          _fFromZ + (_fToZ - _fFromZ) * _fEase
+        );
+        camera.lookAt(2.0, 1.5, 0); // azure head height
+      } else if (window._matchIntroActive) {
         // Still advance director internal state (cycle, hold timers).
         if (cameraDirector.active) cameraDirector.update(delta);
         const _introElapsed = performance.now() - window._matchIntroStartMs;
