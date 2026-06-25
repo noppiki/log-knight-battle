@@ -1384,6 +1384,13 @@
       font-weight: 900;
       text-shadow: 0 0 10px rgba(102,221,102,0.8), 0 0 4px rgba(80,200,80,0.6), 0 3px 0 #001a00;
     }
+    /* ── r107: kind-stam — cyan stamina recovery floater (+N STM between rounds) */
+    .dmg-floater.kind-stam {
+      color: #66ddff;
+      font-size: 24px;
+      font-weight: 900;
+      text-shadow: 0 0 10px rgba(102,221,255,0.8), 0 0 4px rgba(80,200,255,0.6), 0 3px 0 #001a1a;
+    }
     .dmg-floater .caption {
       font-size: 0.55em;
       opacity: 0.85;
@@ -1780,6 +1787,18 @@
     }
     .hp-bar.heal-pulse {
       animation: hpHealPulse 0.4s ease-out forwards;
+    }
+
+    /* ── r107: Stamina regen pulse — cyan glow on SP bar when stamina refills between rounds */
+    @keyframes spStamPulse {
+      0%   { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 18px 5px rgba(102,221,255,0.9), 0 0 8px 3px rgba(140,240,255,0.65); }
+      60%  { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55),
+                         0 0 22px 6px rgba(102,221,255,0.75), 0 0 10px 4px rgba(140,240,255,0.5); }
+      100% { box-shadow: inset 0 1px 2px rgba(0,0,0,0.7), 0 2px 6px rgba(0,0,0,0.55); }
+    }
+    .sp-bar.stam-pulse {
+      animation: spStamPulse 0.4s ease-out forwards;
     }
 
     /* EXHAUSTED pill — transient center-top tooltip that flashes when
@@ -9070,8 +9089,10 @@
       const caption = (opts && opts.caption) || null;
       el.className = 'dmg-floater kind-' + kind;
       // Build inner HTML: number span + optional caption line.
-      // r105: kind-heal uses '+N HP' prefix; all other kinds use '-N'.
-      const _floatPrefix = (kind === 'heal') ? ('+' + Math.ceil(amount) + ' HP') : ('-' + Math.ceil(amount));
+      // r105: kind-heal uses '+N HP' prefix; r107: kind-stam uses '+N STM'; all other kinds use '-N'.
+      const _floatPrefix = (kind === 'heal') ? ('+' + Math.ceil(amount) + ' HP')
+                         : (kind === 'stam') ? ('+' + Math.ceil(amount) + ' STM')
+                         : ('-' + Math.ceil(amount));
       el.innerHTML = _floatPrefix +
         (caption ? '<span class="caption">' + caption + '</span>' : '');
       el.style.left = sx + 'px';
@@ -9225,6 +9246,21 @@
             void _healBar.offsetWidth;
             _healBar.classList.add('heal-pulse');
             setTimeout(() => _healBar.classList.remove('heal-pulse'), 500);
+          }
+        }
+        // r107: Stamina regen visualization — show cyan floater + SP bar pulse for both fighters.
+        // Stamina always resets to 100 (STM_MAX) each round, so we show a fixed "+100 STM" cue.
+        // Amount shown is always STM_MAX (100); serves as round-start stamina-full indicator.
+        for (const _stmId of ['crimson', 'azure']) {
+          showDamageFloater(_stmId, STM_MAX, { kind: 'stam' });
+          const _stmFill = document.getElementById('sp-fill-' + _stmId);
+          const _stmBar  = _stmFill && _stmFill.closest('.sp-bar');
+          if (_stmBar) {
+            _stmBar.classList.remove('stam-pulse');
+            // Force reflow to restart animation if called twice in quick succession.
+            void _stmBar.offsetWidth;
+            _stmBar.classList.add('stam-pulse');
+            setTimeout(() => _stmBar.classList.remove('stam-pulse'), 500);
           }
         }
       }
